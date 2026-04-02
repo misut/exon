@@ -22,12 +22,19 @@ target_sources(toolchain
     src/toolchain.cppm
 )
 
+add_library(fetch)
+target_sources(fetch
+    PUBLIC FILE_SET CXX_MODULES FILES
+    src/fetch.cppm
+)
+target_link_libraries(fetch PUBLIC manifest toolchain)
+
 add_library(build)
 target_sources(build
     PUBLIC FILE_SET CXX_MODULES FILES
     src/build.cppm
 )
-target_link_libraries(build PUBLIC manifest toolchain)
+target_link_libraries(build PUBLIC manifest toolchain fetch)
 
 add_executable(exon src/main.cpp)
 target_link_libraries(exon PRIVATE build)
