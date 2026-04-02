@@ -1,6 +1,7 @@
 import std;
 import toml;
 import manifest;
+import build;
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -50,6 +51,21 @@ int main(int argc, char* argv[]) {
                     std::println("  {} = \"{}\"", name, ver);
                 }
             }
+        } catch (toml::ParseError const& e) {
+            std::println(std::cerr, "error: {}", e.what());
+            return 1;
+        } catch (std::exception const& e) {
+            std::println(std::cerr, "error: {}", e.what());
+            return 1;
+        }
+    } else if (command == "build") {
+        try {
+            auto m = manifest::load("exon.toml");
+            if (m.name.empty()) {
+                std::println(std::cerr, "error: package name is required in exon.toml");
+                return 1;
+            }
+            return build::run(m);
         } catch (toml::ParseError const& e) {
             std::println(std::cerr, "error: {}", e.what());
             return 1;

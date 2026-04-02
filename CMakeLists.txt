@@ -16,5 +16,18 @@ target_sources(manifest
 )
 target_link_libraries(manifest PUBLIC tomlcpp)
 
+add_library(toolchain)
+target_sources(toolchain
+    PUBLIC FILE_SET CXX_MODULES FILES
+    src/toolchain.cppm
+)
+
+add_library(build)
+target_sources(build
+    PUBLIC FILE_SET CXX_MODULES FILES
+    src/build.cppm
+)
+target_link_libraries(build PUBLIC manifest toolchain)
+
 add_executable(exon src/main.cpp)
-target_link_libraries(exon PRIVATE manifest)
+target_link_libraries(exon PRIVATE build)
