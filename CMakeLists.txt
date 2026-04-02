@@ -9,5 +9,12 @@ project(exon LANGUAGES CXX)
 
 add_subdirectory(tomlcpp)
 
+add_library(manifest)
+target_sources(manifest
+    PUBLIC FILE_SET CXX_MODULES FILES
+    src/manifest.cppm
+)
+target_link_libraries(manifest PUBLIC tomlcpp)
+
 add_executable(exon src/main.cpp)
-target_link_libraries(exon PRIVATE tomlcpp)
+target_link_libraries(exon PRIVATE manifest)
