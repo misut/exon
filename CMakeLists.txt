@@ -7,4 +7,7 @@ set(CMAKE_CXX_MODULE_STD ON)
 
 project(exon LANGUAGES CXX)
 
+add_subdirectory(tomlcpp)
+
 add_executable(exon src/main.cpp)
+target_link_libraries(exon PRIVATE tomlcpp)
