@@ -96,10 +96,11 @@ int run(manifest::Manifest const& m) {
 
     auto tc = toolchain::detect();
 
-    // 의존성 패칭
-    auto deps = fetch::fetch_all(m);
+    // 의존성 패칭 + lock 파일
+    auto lock_path = (project_root / "exon.lock").string();
+    auto fetch_result = fetch::fetch_all(m, lock_path);
 
-    generate_cmake(m, project_root, exon_dir, deps);
+    generate_cmake(m, project_root, exon_dir, fetch_result.deps);
 
     auto configure_cmd = std::format("{} -B {} -S {} -G Ninja",
         tc.cmake, build_dir.string(), exon_dir.string());
