@@ -8,6 +8,7 @@ struct Toolchain {
     std::string cmake;
     std::string ninja;
     std::string cxx_compiler;
+    std::string stdlib_modules_json; // libc++.modules.json 경로 (import std 지원)
 };
 
 namespace detail {
@@ -31,14 +32,31 @@ std::string find_in_path(std::string_view name) {
     return std::string{name};
 }
 
+// Homebrew LLVM 설치 경로에서 clang++ 과 modules json 탐색
+void detect_llvm(Toolchain& tc) {
+    // Homebrew 경로 패턴: /opt/homebrew/Cellar/llvm/<version>/
+    auto llvm_opt = std::filesystem::path{"/opt/homebrew/opt/llvm"};
+    if (!std::filesystem::exists(llvm_opt)) return;
+
+    auto clangpp = llvm_opt / "bin" / "clang++";
+    if (std::filesystem::exists(clangpp)) {
+        tc.cxx_compiler = std::filesystem::canonical(clangpp).string();
+    }
+
+    auto modules_json = llvm_opt / "lib" / "c++" / "libc++.modules.json";
+    if (std::filesystem::exists(modules_json)) {
+        tc.stdlib_modules_json = std::filesystem::canonical(modules_json).string();
+    }
+}
+
 } // namespace detail
 
 Toolchain detect() {
     // TODO: intron 연동 시 intron에서 경로를 가져오도록 변경
-    // 현재는 PATH에서 cmake, ninja를 찾아 절대 경로로 resolve
     Toolchain tc;
     tc.cmake = detail::find_in_path("cmake");
     tc.ninja = detail::find_in_path("ninja");
+    detail::detect_llvm(tc);
     return tc;
 }
 

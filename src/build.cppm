@@ -25,7 +25,8 @@ std::vector<std::string> collect_sources(std::filesystem::path const& src_dir) {
 void generate_cmake(manifest::Manifest const& m,
                     std::filesystem::path const& project_root,
                     std::filesystem::path const& output_dir,
-                    std::vector<fetch::FetchedDep> const& deps) {
+                    std::vector<fetch::FetchedDep> const& deps,
+                    toolchain::Toolchain const& tc) {
     std::filesystem::create_directories(output_dir);
 
     auto cmake_path = output_dir / "CMakeLists.txt";
@@ -34,10 +35,21 @@ void generate_cmake(manifest::Manifest const& m,
         throw std::runtime_error(std::format("failed to create {}", cmake_path.string()));
     }
 
-    file << "cmake_minimum_required(VERSION 3.20)\n";
-    file << std::format("project({} LANGUAGES CXX)\n\n", m.name);
-    file << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
-    file << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
+    bool import_std = (m.standard >= 23 && !tc.stdlib_modules_json.empty());
+
+    if (import_std) {
+        file << "cmake_minimum_required(VERSION 3.30)\n\n";
+        file << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
+        file << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n";
+        file << "set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD \"451f2fe2-a8a2-47c3-bc32-94786d8fc91b\")\n";
+        file << "set(CMAKE_CXX_MODULE_STD ON)\n\n";
+        file << std::format("project({} LANGUAGES CXX)\n\n", m.name);
+    } else {
+        file << "cmake_minimum_required(VERSION 3.20)\n";
+        file << std::format("project({} LANGUAGES CXX)\n\n", m.name);
+        file << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
+        file << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
+    }
 
     // 의존성을 static library로 빌드
     for (auto const& dep : deps) {
@@ -133,12 +145,16 @@ int run(manifest::Manifest const& m) {
     auto lock_path = (project_root / "exon.lock").string();
     auto fetch_result = fetch::fetch_all(m, lock_path);
 
-    generate_cmake(m, project_root, exon_dir, fetch_result.deps);
+    generate_cmake(m, project_root, exon_dir, fetch_result.deps, tc);
 
     auto configure_cmd = std::format("{} -B {} -S {} -G Ninja",
         tc.cmake, build_dir.string(), exon_dir.string());
     if (!tc.cxx_compiler.empty()) {
         configure_cmd += std::format(" -DCMAKE_CXX_COMPILER={}", tc.cxx_compiler);
+    }
+    if (!tc.stdlib_modules_json.empty() && m.standard >= 23) {
+        configure_cmd += std::format(" -DCMAKE_CXX_STDLIB_MODULES_JSON={}", tc.stdlib_modules_json);
+        configure_cmd += " -DCMAKE_EXE_LINKER_FLAGS=\"-lc++\"";
     }
 
     std::println("configuring...");
