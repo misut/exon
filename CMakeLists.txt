@@ -29,12 +29,18 @@ target_sources(lock
 )
 target_link_libraries(lock PUBLIC tomlcpp)
 
+add_library(semver)
+target_sources(semver
+    PUBLIC FILE_SET CXX_MODULES FILES
+    src/semver.cppm
+)
+
 add_library(fetch)
 target_sources(fetch
     PUBLIC FILE_SET CXX_MODULES FILES
     src/fetch.cppm
 )
-target_link_libraries(fetch PUBLIC manifest toolchain lock)
+target_link_libraries(fetch PUBLIC manifest toolchain lock semver)
 
 add_library(build)
 target_sources(build
