@@ -10,6 +10,7 @@ struct Manifest {
     std::string description;
     std::vector<std::string> authors;
     std::string license;
+    std::string type = "bin"; // "bin" or "lib"
     int standard = 23;
     std::map<std::string, std::string> dependencies;
 };
@@ -28,6 +29,8 @@ Manifest from_toml(toml::Table const& table) {
             m.description = pkg.at("description").as_string();
         if (pkg.contains("license"))
             m.license = pkg.at("license").as_string();
+        if (pkg.contains("type"))
+            m.type = pkg.at("type").as_string();
         if (pkg.contains("standard"))
             m.standard = static_cast<int>(pkg.at("standard").as_integer());
         if (pkg.contains("authors")) {

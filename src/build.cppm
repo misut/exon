@@ -92,15 +92,29 @@ void generate_cmake(manifest::Manifest const& m,
         throw std::runtime_error("no .cpp files found in src/");
     }
 
-    file << std::format("add_executable({}", m.name);
+    if (m.type == "lib") {
+        file << std::format("add_library({} STATIC", m.name);
+    } else {
+        file << std::format("add_executable({}", m.name);
+    }
     for (auto const& src : sources) {
         file << std::format("\n    {}", src);
     }
     file << "\n)\n";
 
+    // 라이브러리인 경우 include 디렉토리 공개
+    if (m.type == "lib") {
+        auto include_dir = project_root / "include";
+        if (std::filesystem::exists(include_dir)) {
+            file << std::format("target_include_directories({} PUBLIC {})\n",
+                m.name, std::filesystem::canonical(include_dir).string());
+        }
+    }
+
     // 의존성 링크
     if (!deps.empty()) {
-        file << std::format("target_link_libraries({} PRIVATE", m.name);
+        auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
+        file << std::format("target_link_libraries({} {}", m.name, link_type);
         for (auto const& dep : deps) {
             file << std::format("\n    {}", dep.name);
         }

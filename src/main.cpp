@@ -10,7 +10,7 @@ namespace {
 constexpr auto usage_text = R"(usage: exon <command> [args]
 
 commands:
-    init          create a new exon.toml
+    init [--lib]  create a new exon.toml
     info          show package information
     build         build the project
     run [args]    build and run the project
@@ -47,8 +47,9 @@ int main(int argc, char* argv[]) {
             std::println(std::cerr, "error: failed to create exon.toml");
             return 1;
         }
-        file << templates::exon_toml;
-        std::println("created exon.toml");
+        bool is_lib = (argc >= 3 && std::string_view{argv[2]} == "--lib");
+        file << (is_lib ? templates::exon_toml_lib : templates::exon_toml_bin);
+        std::println("created exon.toml ({})", is_lib ? "lib" : "bin");
     } else if (command == "info") {
         try {
             auto m = load_manifest();
@@ -66,6 +67,7 @@ int main(int argc, char* argv[]) {
             }
             if (!m.license.empty())
                 std::println("license: {}", m.license);
+            std::println("type: {}", m.type);
             std::println("standard: C++{}", m.standard);
             if (!m.dependencies.empty()) {
                 std::println("dependencies:");
@@ -94,6 +96,10 @@ int main(int argc, char* argv[]) {
             auto m = load_manifest();
             if (m.name.empty()) {
                 std::println(std::cerr, "error: package name is required in exon.toml");
+                return 1;
+            }
+            if (m.type == "lib") {
+                std::println(std::cerr, "error: cannot run a library package");
                 return 1;
             }
             int rc = build::run(m);
