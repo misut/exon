@@ -22,12 +22,19 @@ target_sources(toolchain
     src/toolchain.cppm
 )
 
+add_library(lock)
+target_sources(lock
+    PUBLIC FILE_SET CXX_MODULES FILES
+    src/lock.cppm
+)
+target_link_libraries(lock PUBLIC tomlcpp)
+
 add_library(fetch)
 target_sources(fetch
     PUBLIC FILE_SET CXX_MODULES FILES
     src/fetch.cppm
 )
-target_link_libraries(fetch PUBLIC manifest toolchain)
+target_link_libraries(fetch PUBLIC manifest toolchain lock)
 
 add_library(build)
 target_sources(build
