@@ -2,6 +2,7 @@ import std;
 import toml;
 import manifest;
 import build;
+import lock;
 import templates;
 
 namespace {
@@ -15,6 +16,8 @@ commands:
     run [args]    build and run the project
     clean         remove build artifacts
     add <pkg> <ver>  add a dependency
+    remove <pkg>     remove a dependency
+    update           update dependencies to latest compatible versions
 )";
 
 manifest::Manifest load_manifest() {
@@ -163,6 +166,83 @@ int main(int argc, char* argv[]) {
         auto file = std::ofstream("exon.toml");
         file << content;
         std::println("added {} = \"{}\"", pkg, ver);
+    } else if (command == "remove") {
+        if (argc < 3) {
+            std::println(std::cerr, "usage: exon remove <package>");
+            return 1;
+        }
+        auto pkg = std::string{argv[2]};
+
+        if (!std::filesystem::exists("exon.toml")) {
+            std::println(std::cerr, "error: exon.toml not found. run 'exon init' first");
+            return 1;
+        }
+
+        auto m = manifest::load("exon.toml");
+        if (!m.dependencies.contains(pkg)) {
+            std::println(std::cerr, "error: '{}' is not a dependency", pkg);
+            return 1;
+        }
+
+        // exon.toml에서 해당 의존성 줄 제거
+        auto content = std::string{};
+        {
+            auto file = std::ifstream("exon.toml");
+            content = std::string{
+                std::istreambuf_iterator<char>{file},
+                std::istreambuf_iterator<char>{}
+            };
+        }
+
+        auto search = std::format("\"{}\"", pkg);
+        auto pos = content.find(search);
+        if (pos != std::string::npos) {
+            // 줄 시작 찾기
+            auto line_start = content.rfind('\n', pos);
+            line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
+            // 줄 끝 찾기
+            auto line_end = content.find('\n', pos);
+            if (line_end != std::string::npos) line_end += 1;
+            else line_end = content.size();
+            content.erase(line_start, line_end - line_start);
+        }
+
+        auto file = std::ofstream("exon.toml");
+        file << content;
+        std::println("removed {}", pkg);
+
+        // exon.lock에서도 제거
+        auto lock_path = std::filesystem::current_path() / "exon.lock";
+        if (std::filesystem::exists(lock_path)) {
+            auto lf = lock::load(lock_path.string());
+            auto& pkgs = lf.packages;
+            std::erase_if(pkgs, [&](auto const& p) { return p.name == pkg; });
+            lock::save(lf, lock_path.string());
+        }
+    } else if (command == "update") {
+        try {
+            if (!std::filesystem::exists("exon.toml")) {
+                std::println(std::cerr, "error: exon.toml not found. run 'exon init' first");
+                return 1;
+            }
+
+            // lock 파일 삭제하여 모든 의존성을 다시 fetch
+            auto lock_path = std::filesystem::current_path() / "exon.lock";
+            if (std::filesystem::exists(lock_path)) {
+                std::filesystem::remove(lock_path);
+            }
+
+            auto m = load_manifest();
+            if (m.dependencies.empty()) {
+                std::println("no dependencies to update");
+                return 0;
+            }
+
+            return build::run(m);
+        } catch (std::exception const& e) {
+            std::println(std::cerr, "error: {}", e.what());
+            return 1;
+        }
     } else {
         std::println(std::cerr, "unknown command: {}", command);
         std::print(std::cerr, "{}", usage_text);
