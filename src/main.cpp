@@ -2,6 +2,7 @@ import std;
 import toml;
 import manifest;
 import build;
+import templates;
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -17,15 +18,7 @@ int main(int argc, char* argv[]) {
             std::println(std::cerr, "error: failed to create exon.toml");
             return 1;
         }
-        file << "[package]\n";
-        file << "name = \"\"\n";
-        file << "version = \"0.1.0\"\n";
-        file << "description = \"\"\n";
-        file << "authors = []\n";
-        file << "license = \"\"\n";
-        file << "standard = 23\n";
-        file << "\n";
-        file << "[dependencies]\n";
+        file << templates::exon_toml;
         std::println("created exon.toml");
     } else if (command == "info") {
         try {

@@ -36,5 +36,11 @@ target_sources(build
 )
 target_link_libraries(build PUBLIC manifest toolchain fetch)
 
+add_library(templates)
+target_sources(templates
+    PUBLIC FILE_SET CXX_MODULES FILES
+    src/templates.cppm
+)
+
 add_executable(exon src/main.cpp)
-target_link_libraries(exon PRIVATE build)
+target_link_libraries(exon PRIVATE build templates)
