@@ -128,6 +128,14 @@ public:
                 advance();
                 skip_ws();
 
+                // [[array of tables]]
+                bool is_array_table = false;
+                if (!at_end() && peek() == '[') {
+                    is_array_table = true;
+                    advance();
+                    skip_ws();
+                }
+
                 std::vector<std::string> keys;
                 keys.push_back(parse_key());
                 skip_ws();
@@ -142,18 +150,43 @@ public:
                     throw ParseError(line_, "expected ']'");
                 }
                 advance();
+
+                if (is_array_table) {
+                    if (at_end() || peek() != ']') {
+                        throw ParseError(line_, "expected ']]'");
+                    }
+                    advance();
+                }
                 expect_end_of_line();
 
-                current = &root;
-                for (auto const& k : keys) {
-                    if (!current->contains(k)) {
-                        current->emplace(k, Value{Table{}});
+                if (is_array_table) {
+                    // Navigate to parent, then append new table to array
+                    Table* parent = &root;
+                    for (std::size_t i = 0; i + 1 < keys.size(); ++i) {
+                        if (!parent->contains(keys[i])) {
+                            parent->emplace(keys[i], Value{Table{}});
+                        }
+                        parent = &parent->at(keys[i]).as_table();
                     }
-                    auto& val = current->at(k);
-                    if (!val.is_table()) {
-                        throw ParseError(line_, std::format("'{}' is not a table", k));
+                    auto const& last_key = keys.back();
+                    if (!parent->contains(last_key)) {
+                        parent->emplace(last_key, Value{Array{}});
                     }
-                    current = &val.as_table();
+                    auto& arr = parent->at(last_key).as_array();
+                    arr.push_back(Value{Table{}});
+                    current = &arr.back().as_table();
+                } else {
+                    current = &root;
+                    for (auto const& k : keys) {
+                        if (!current->contains(k)) {
+                            current->emplace(k, Value{Table{}});
+                        }
+                        auto& val = current->at(k);
+                        if (!val.is_table()) {
+                            throw ParseError(line_, std::format("'{}' is not a table", k));
+                        }
+                        current = &val.as_table();
+                    }
                 }
                 continue;
             }
