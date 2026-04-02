@@ -4,15 +4,41 @@ import manifest;
 import build;
 import templates;
 
+namespace {
+
+constexpr auto usage_text = R"(usage: exon <command> [args]
+
+commands:
+    init          create a new exon.toml
+    info          show package information
+    build         build the project
+    run [args]    build and run the project
+    clean         remove build artifacts
+    add <pkg> <ver>  add a dependency
+)";
+
+manifest::Manifest load_manifest() {
+    if (!std::filesystem::exists("exon.toml")) {
+        throw std::runtime_error("exon.toml not found. run 'exon init' first");
+    }
+    return manifest::load("exon.toml");
+}
+
+} // namespace
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::println("usage: exon <command>");
+        std::print("{}", usage_text);
         return 1;
     }
 
     std::string_view command{argv[1]};
 
     if (command == "init") {
+        if (std::filesystem::exists("exon.toml")) {
+            std::println(std::cerr, "error: exon.toml already exists");
+            return 1;
+        }
         auto file = std::ofstream("exon.toml");
         if (!file) {
             std::println(std::cerr, "error: failed to create exon.toml");
@@ -22,7 +48,7 @@ int main(int argc, char* argv[]) {
         std::println("created exon.toml");
     } else if (command == "info") {
         try {
-            auto m = manifest::load("exon.toml");
+            auto m = load_manifest();
             std::println("name: {}", m.name);
             std::println("version: {}", m.version);
             if (!m.description.empty())
@@ -44,31 +70,25 @@ int main(int argc, char* argv[]) {
                     std::println("  {} = \"{}\"", name, ver);
                 }
             }
-        } catch (toml::ParseError const& e) {
-            std::println(std::cerr, "error: {}", e.what());
-            return 1;
         } catch (std::exception const& e) {
             std::println(std::cerr, "error: {}", e.what());
             return 1;
         }
     } else if (command == "build") {
         try {
-            auto m = manifest::load("exon.toml");
+            auto m = load_manifest();
             if (m.name.empty()) {
                 std::println(std::cerr, "error: package name is required in exon.toml");
                 return 1;
             }
             return build::run(m);
-        } catch (toml::ParseError const& e) {
-            std::println(std::cerr, "error: {}", e.what());
-            return 1;
         } catch (std::exception const& e) {
             std::println(std::cerr, "error: {}", e.what());
             return 1;
         }
     } else if (command == "run") {
         try {
-            auto m = manifest::load("exon.toml");
+            auto m = load_manifest();
             if (m.name.empty()) {
                 std::println(std::cerr, "error: package name is required in exon.toml");
                 return 1;
@@ -83,9 +103,6 @@ int main(int argc, char* argv[]) {
             }
             std::println("running {}...\n", m.name);
             return std::system(run_cmd.c_str());
-        } catch (toml::ParseError const& e) {
-            std::println(std::cerr, "error: {}", e.what());
-            return 1;
         } catch (std::exception const& e) {
             std::println(std::cerr, "error: {}", e.what());
             return 1;
@@ -98,8 +115,57 @@ int main(int argc, char* argv[]) {
         } else {
             std::println("nothing to clean");
         }
+    } else if (command == "add") {
+        if (argc < 4) {
+            std::println(std::cerr, "usage: exon add <package> <version>");
+            return 1;
+        }
+        auto pkg = std::string{argv[2]};
+        auto ver = std::string{argv[3]};
+
+        if (!std::filesystem::exists("exon.toml")) {
+            std::println(std::cerr, "error: exon.toml not found. run 'exon init' first");
+            return 1;
+        }
+
+        // exon.toml 읽기
+        auto content = std::string{};
+        {
+            auto file = std::ifstream("exon.toml");
+            content = std::string{
+                std::istreambuf_iterator<char>{file},
+                std::istreambuf_iterator<char>{}
+            };
+        }
+
+        // 이미 존재하는지 확인
+        auto m = manifest::load("exon.toml");
+        if (m.dependencies.contains(pkg)) {
+            std::println(std::cerr, "error: '{}' is already a dependency", pkg);
+            return 1;
+        }
+
+        // [dependencies] 섹션 끝에 추가
+        auto dep_line = std::format("\"{}\" = \"{}\"\n", pkg, ver);
+        auto deps_pos = content.find("[dependencies]");
+        if (deps_pos == std::string::npos) {
+            content += "\n[dependencies]\n" + dep_line;
+        } else {
+            // [dependencies] 다음 줄 끝에 추가
+            auto insert_pos = content.find('\n', deps_pos);
+            if (insert_pos != std::string::npos) {
+                content.insert(insert_pos + 1, dep_line);
+            } else {
+                content += "\n" + dep_line;
+            }
+        }
+
+        auto file = std::ofstream("exon.toml");
+        file << content;
+        std::println("added {} = \"{}\"", pkg, ver);
     } else {
         std::println(std::cerr, "unknown command: {}", command);
+        std::print(std::cerr, "{}", usage_text);
         return 1;
     }
 
