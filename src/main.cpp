@@ -66,6 +66,38 @@ int main(int argc, char* argv[]) {
             std::println(std::cerr, "error: {}", e.what());
             return 1;
         }
+    } else if (command == "run") {
+        try {
+            auto m = manifest::load("exon.toml");
+            if (m.name.empty()) {
+                std::println(std::cerr, "error: package name is required in exon.toml");
+                return 1;
+            }
+            int rc = build::run(m);
+            if (rc != 0) return rc;
+
+            auto exe = std::filesystem::current_path() / ".exon" / "build" / m.name;
+            auto run_cmd = exe.string();
+            for (int i = 2; i < argc; ++i) {
+                run_cmd += std::format(" {}", argv[i]);
+            }
+            std::println("running {}...\n", m.name);
+            return std::system(run_cmd.c_str());
+        } catch (toml::ParseError const& e) {
+            std::println(std::cerr, "error: {}", e.what());
+            return 1;
+        } catch (std::exception const& e) {
+            std::println(std::cerr, "error: {}", e.what());
+            return 1;
+        }
+    } else if (command == "clean") {
+        auto exon_dir = std::filesystem::current_path() / ".exon";
+        if (std::filesystem::exists(exon_dir)) {
+            std::filesystem::remove_all(exon_dir);
+            std::println("cleaned .exon/");
+        } else {
+            std::println("nothing to clean");
+        }
     } else {
         std::println(std::cerr, "unknown command: {}", command);
         return 1;
