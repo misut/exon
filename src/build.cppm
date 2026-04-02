@@ -62,8 +62,27 @@ void generate_cmake(manifest::Manifest const& m,
             file << std::format("\n    {}", src);
         }
         file << "\n)\n";
-        file << std::format("target_include_directories({} PUBLIC {})\n\n",
-            dep.name, std::filesystem::canonical(dep.path / "include").string());
+
+        auto include_dir = dep.path / "include";
+        if (std::filesystem::exists(include_dir)) {
+            file << std::format("target_include_directories({} PUBLIC {})\n",
+                dep.name, std::filesystem::canonical(include_dir).string());
+        }
+
+        // transitive: dep의 exon.toml에서 하위 의존성 읽어 링크
+        auto dep_manifest_path = dep.path / "exon.toml";
+        if (std::filesystem::exists(dep_manifest_path)) {
+            auto dep_m = manifest::load(dep_manifest_path.string());
+            if (!dep_m.dependencies.empty()) {
+                file << std::format("target_link_libraries({} PUBLIC", dep.name);
+                for (auto const& [sub_key, sub_ver] : dep_m.dependencies) {
+                    auto sub_name = sub_key.substr(sub_key.rfind('/') + 1);
+                    file << std::format("\n    {}", sub_name);
+                }
+                file << "\n)\n";
+            }
+        }
+        file << "\n";
     }
 
     // 메인 프로젝트 소스
