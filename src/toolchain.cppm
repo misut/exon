@@ -24,7 +24,7 @@ std::string find_in_path(std::string_view name) {
         auto dir = path_str.substr(pos, sep == std::string_view::npos ? sep : sep - pos);
         auto full = std::filesystem::path{dir} / name;
         if (std::filesystem::exists(full)) {
-            return full.string();
+            return std::filesystem::canonical(full).string();
         }
         if (sep == std::string_view::npos) break;
         pos = sep + 1;
@@ -32,18 +32,18 @@ std::string find_in_path(std::string_view name) {
     return std::string{name};
 }
 
-// Homebrew LLVM 설치 경로에서 clang++ 과 modules json 탐색
-void detect_llvm(Toolchain& tc) {
-    // Homebrew 경로 패턴: /opt/homebrew/Cellar/llvm/<version>/
-    auto llvm_opt = std::filesystem::path{"/opt/homebrew/opt/llvm"};
-    if (!std::filesystem::exists(llvm_opt)) return;
+// PATH에서 찾은 clang++ 위치 기준으로 libc++.modules.json 탐색
+// 패턴: <root>/bin/clang++ → <root>/lib/c++/libc++.modules.json
+void detect_clang(Toolchain& tc) {
+    auto clangpp = find_in_path("clang++");
+    if (clangpp == "clang++") return; // PATH에 없음
 
-    auto clangpp = llvm_opt / "bin" / "clang++";
-    if (std::filesystem::exists(clangpp)) {
-        tc.cxx_compiler = std::filesystem::canonical(clangpp).string();
-    }
+    auto bin_dir = std::filesystem::path{clangpp}.parent_path();
+    auto root = bin_dir.parent_path();
 
-    auto modules_json = llvm_opt / "lib" / "c++" / "libc++.modules.json";
+    tc.cxx_compiler = clangpp;
+
+    auto modules_json = root / "lib" / "c++" / "libc++.modules.json";
     if (std::filesystem::exists(modules_json)) {
         tc.stdlib_modules_json = std::filesystem::canonical(modules_json).string();
     }
@@ -56,7 +56,7 @@ Toolchain detect() {
     Toolchain tc;
     tc.cmake = detail::find_in_path("cmake");
     tc.ninja = detail::find_in_path("ninja");
-    detail::detect_llvm(tc);
+    detail::detect_clang(tc);
     return tc;
 }
 
