@@ -2,11 +2,25 @@
 
 A package manager for C++. Inspired by Cargo.
 
-## Build
+## Installation
+
+### Script
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/misut/exon/main/install.sh | sh
+```
+
+### mise
+
+```sh
+mise plugin add exon https://github.com/misut/mise-exon.git
+mise install exon@0.0.0
+mise use exon@0.0.0
+```
+
+### Build from source
 
 Requires [Homebrew LLVM](https://formulae.brew.sh/formula/llvm) for `import std;` support.
-
-### Bootstrap
 
 ```sh
 brew install llvm
@@ -18,8 +32,6 @@ cmake -B build -G Ninja \
   -DCMAKE_CXX_STDLIB_MODULES_JSON="$LLVM_PREFIX/lib/c++/libc++.modules.json"
 cmake --build build
 ```
-
-### Self-hosting
 
 Once bootstrapped, exon can build itself:
 
