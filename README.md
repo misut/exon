@@ -6,6 +6,8 @@ A package manager for C++. Inspired by Cargo.
 
 Requires [Homebrew LLVM](https://formulae.brew.sh/formula/llvm) for `import std;` support.
 
+### Bootstrap
+
 ```sh
 brew install llvm
 git clone --recursive git@github.com:misut/exon.git
@@ -15,6 +17,14 @@ cmake -B build -G Ninja \
   -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++" \
   -DCMAKE_CXX_STDLIB_MODULES_JSON="$LLVM_PREFIX/lib/c++/libc++.modules.json"
 cmake --build build
+```
+
+### Self-hosting
+
+Once bootstrapped, exon can build itself:
+
+```sh
+./build/exon build
 ```
 
 ## Quick Start
@@ -73,6 +83,7 @@ standard = 23
 - **Lock file** — `exon.lock` for reproducible builds
 - **Build profiles** — debug (default) and release (`--release`)
 - **Git-based registry** — fetches packages from GitHub repositories
+- **Self-hosting** — exon builds itself with `exon build`
 
 ## License
 

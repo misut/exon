@@ -45,6 +45,8 @@
 
 # Build
 build/
+.exon/
+exon.lock
 
 # Claude Code
 CLAUDE.md
