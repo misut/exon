@@ -55,5 +55,12 @@ target_sources(templates
     src/templates.cppm
 )
 
+add_library(commands)
+target_sources(commands
+    PUBLIC FILE_SET CXX_MODULES FILES
+    src/commands.cppm
+)
+target_link_libraries(commands PUBLIC build templates lock)
+
 add_executable(exon src/main.cpp)
-target_link_libraries(exon PRIVATE build templates)
+target_link_libraries(exon PRIVATE commands)
