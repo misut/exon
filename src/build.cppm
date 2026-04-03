@@ -53,7 +53,6 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
         file << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n";
         file << "set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD \"451f2fe2-a8a2-47c3-bc32-94786d8fc91b\")\n";
         file << "set(CMAKE_CXX_MODULE_STD ON)\n";
-        file << "set(CMAKE_OSX_DEPLOYMENT_TARGET \"26.0\" CACHE STRING \"\")\n";
         file << "add_compile_definitions(_LIBCPP_DISABLE_AVAILABILITY)\n\n";
         file << std::format("project({} LANGUAGES CXX)\n\n", m.name);
     } else {
@@ -184,7 +183,12 @@ int run(manifest::Manifest const& m, bool release = false) {
     }
     if (!tc.stdlib_modules_json.empty() && m.standard >= 23) {
         configure_cmd += std::format(" -DCMAKE_CXX_STDLIB_MODULES_JSON={}", tc.stdlib_modules_json);
-        configure_cmd += " -DCMAKE_EXE_LINKER_FLAGS=\"-lc++\"";
+        auto llvm_root = std::filesystem::path{tc.cxx_compiler}.parent_path().parent_path();
+        auto lib_cxx = llvm_root / "lib" / "c++";
+        auto lib_unwind = llvm_root / "lib" / "unwind";
+        configure_cmd += std::format(
+            " -DCMAKE_EXE_LINKER_FLAGS=\"-L{} -lc++ -L{} -lunwind\"",
+            lib_cxx.string(), lib_unwind.string());
     }
 
     std::println("configuring...");
