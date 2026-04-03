@@ -7,18 +7,19 @@ import lock;
 export namespace fetch {
 
 struct FetchedDep {
-    std::string key;        // dep key (e.g. "github.com/user/repo")
-    std::string name;       // 패키지 이름 (repo name)
+    std::string key;  // dep key (e.g. "github.com/user/repo")
+    std::string name; // 패키지 이름 (repo name)
     std::string version;
-    std::string commit;     // exact git commit hash
-    std::filesystem::path path;  // 캐시된 소스 경로
+    std::string commit;         // exact git commit hash
+    std::filesystem::path path; // 캐시된 소스 경로
 };
 
 namespace detail {
 
 std::filesystem::path cache_dir() {
     auto home = std::getenv("HOME");
-    if (!home) throw std::runtime_error("HOME environment variable not set");
+    if (!home)
+        throw std::runtime_error("HOME environment variable not set");
     return std::filesystem::path{home} / ".exon" / "cache";
 }
 
@@ -34,20 +35,23 @@ std::string to_git_url(std::string const& dep_key) {
 // "github.com/user/repo" → "repo"
 std::string extract_repo_name(std::string const& dep_key) {
     auto last_slash = dep_key.rfind('/');
-    if (last_slash == std::string::npos) return dep_key;
+    if (last_slash == std::string::npos)
+        return dep_key;
     return dep_key.substr(last_slash + 1);
 }
 
 // version 이 "v" 접두사가 없으면 붙임
 std::string to_git_tag(std::string const& version) {
-    if (version.starts_with("v")) return version;
+    if (version.starts_with("v"))
+        return version;
     return std::format("v{}", version);
 }
 
 std::string get_git_commit(std::filesystem::path const& repo_path) {
     auto head_path = repo_path / ".git" / "HEAD";
     auto file = std::ifstream(head_path);
-    if (!file) return "";
+    if (!file)
+        return "";
 
     std::string line;
     std::getline(file, line);
@@ -56,7 +60,8 @@ std::string get_git_commit(std::filesystem::path const& repo_path) {
         auto ref = line.substr(5);
         auto ref_path = repo_path / ".git" / ref;
         auto ref_file = std::ifstream(ref_path);
-        if (!ref_file) return "";
+        if (!ref_file)
+            return "";
         std::getline(ref_file, line);
     }
 
@@ -66,13 +71,12 @@ std::string get_git_commit(std::filesystem::path const& repo_path) {
     return line;
 }
 
-void fetch_recursive(std::string const& dep_key, std::string const& version,
-                     lock::LockFile& lf,
-                     std::vector<FetchedDep>& result,
-                     std::set<std::string>& visited) {
+void fetch_recursive(std::string const& dep_key, std::string const& version, lock::LockFile& lf,
+                     std::vector<FetchedDep>& result, std::set<std::string>& visited) {
     // 순환 의존성 및 중복 방지
     auto visit_key = dep_key + "@" + version;
-    if (visited.contains(visit_key)) return;
+    if (visited.contains(visit_key))
+        return;
     visited.insert(visit_key);
 
     auto cache_root = cache_dir();
@@ -109,8 +113,8 @@ void fetch_recursive(std::string const& dep_key, std::string const& version,
         std::filesystem::create_directories(dep_cache);
 
         auto git_url = to_git_url(dep_key);
-        auto cmd = std::format("git clone --depth 1 --branch {} {} {} 2>&1",
-            tag, git_url, dep_cache.string());
+        auto cmd = std::format("git clone --depth 1 --branch {} {} {} 2>&1", tag, git_url,
+                               dep_cache.string());
 
         std::println("  fetching: {} {}...", dep_key, tag);
         int rc = std::system(cmd.c_str());
@@ -152,7 +156,8 @@ struct FetchResult {
 FetchResult fetch_all(manifest::Manifest const& m, std::string_view lock_path) {
     FetchResult result;
 
-    if (m.dependencies.empty()) return result;
+    if (m.dependencies.empty())
+        return result;
 
     result.lock_file = lock::load(lock_path);
 

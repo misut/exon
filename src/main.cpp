@@ -61,7 +61,8 @@ int main(int argc, char* argv[]) {
             if (!m.authors.empty()) {
                 std::print("authors: ");
                 for (std::size_t i = 0; i < m.authors.size(); ++i) {
-                    if (i > 0) std::print(", ");
+                    if (i > 0)
+                        std::print(", ");
                     std::print("{}", m.authors[i]);
                 }
                 std::println("");
@@ -104,7 +105,8 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             int rc = build::run(m);
-            if (rc != 0) return rc;
+            if (rc != 0)
+                return rc;
 
             auto exe = std::filesystem::current_path() / ".exon" / "build" / m.name;
             auto run_cmd = exe.string();
@@ -142,10 +144,8 @@ int main(int argc, char* argv[]) {
         auto content = std::string{};
         {
             auto file = std::ifstream("exon.toml");
-            content = std::string{
-                std::istreambuf_iterator<char>{file},
-                std::istreambuf_iterator<char>{}
-            };
+            content =
+                std::string{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
         }
 
         // 이미 존재하는지 확인
@@ -195,10 +195,8 @@ int main(int argc, char* argv[]) {
         auto content = std::string{};
         {
             auto file = std::ifstream("exon.toml");
-            content = std::string{
-                std::istreambuf_iterator<char>{file},
-                std::istreambuf_iterator<char>{}
-            };
+            content =
+                std::string{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
         }
 
         auto search = std::format("\"{}\"", pkg);
@@ -209,8 +207,10 @@ int main(int argc, char* argv[]) {
             line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
             // 줄 끝 찾기
             auto line_end = content.find('\n', pos);
-            if (line_end != std::string::npos) line_end += 1;
-            else line_end = content.size();
+            if (line_end != std::string::npos)
+                line_end += 1;
+            else
+                line_end = content.size();
             content.erase(line_start, line_end - line_start);
         }
 
@@ -259,7 +259,8 @@ int main(int argc, char* argv[]) {
 
         std::vector<std::string> files;
         for (auto const& entry : std::filesystem::recursive_directory_iterator(src_dir)) {
-            if (!entry.is_regular_file()) continue;
+            if (!entry.is_regular_file())
+                continue;
             auto ext = entry.path().extension().string();
             if (ext == ".cpp" || ext == ".cppm" || ext == ".h" || ext == ".hpp") {
                 files.push_back(entry.path().string());

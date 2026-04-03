@@ -15,7 +15,8 @@ namespace detail {
 
 std::string find_in_path(std::string_view name) {
     auto path_env = std::getenv("PATH");
-    if (!path_env) return std::string{name};
+    if (!path_env)
+        return std::string{name};
 
     auto path_str = std::string_view{path_env};
     std::size_t pos = 0;
@@ -26,7 +27,8 @@ std::string find_in_path(std::string_view name) {
         if (std::filesystem::exists(full)) {
             return std::filesystem::canonical(full).string();
         }
-        if (sep == std::string_view::npos) break;
+        if (sep == std::string_view::npos)
+            break;
         pos = sep + 1;
     }
     return std::string{name};
@@ -36,7 +38,8 @@ std::string find_in_path(std::string_view name) {
 // 패턴: <root>/bin/clang++ → <root>/lib/c++/libc++.modules.json
 void detect_clang(Toolchain& tc) {
     auto clangpp = find_in_path("clang++");
-    if (clangpp == "clang++") return; // PATH에 없음
+    if (clangpp == "clang++")
+        return; // PATH에 없음
 
     auto bin_dir = std::filesystem::path{clangpp}.parent_path();
     auto root = bin_dir.parent_path();

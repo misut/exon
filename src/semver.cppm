@@ -14,7 +14,8 @@ struct Version {
 
 Version parse(std::string_view str) {
     // strip leading 'v'
-    if (!str.empty() && str[0] == 'v') str = str.substr(1);
+    if (!str.empty() && str[0] == 'v')
+        str = str.substr(1);
 
     Version v;
     auto dot1 = str.find('.');
@@ -55,7 +56,8 @@ struct Range {
 namespace detail {
 
 void skip_ws(std::string_view& s) {
-    while (!s.empty() && s[0] == ' ') s = s.substr(1);
+    while (!s.empty() && s[0] == ' ')
+        s = s.substr(1);
 }
 
 Constraint parse_constraint(std::string_view& s) {
@@ -125,8 +127,10 @@ Range parse_range(std::string_view str) {
     Range r;
 
     // trim whitespace
-    while (!str.empty() && str.front() == ' ') str = str.substr(1);
-    while (!str.empty() && str.back() == ' ') str = str.substr(0, str.size() - 1);
+    while (!str.empty() && str.front() == ' ')
+        str = str.substr(1);
+    while (!str.empty() && str.back() == ' ')
+        str = str.substr(0, str.size() - 1);
 
     if (str.starts_with("^")) {
         auto v = parse(str.substr(1));
@@ -150,7 +154,8 @@ Range parse_range(std::string_view str) {
         // explicit constraints, possibly comma-separated
         while (!str.empty()) {
             detail::skip_ws(str);
-            if (str.empty()) break;
+            if (str.empty())
+                break;
             r.constraints.push_back(detail::parse_constraint(str));
             detail::skip_ws(str);
             if (!str.empty() && str[0] == ',') {
@@ -174,11 +179,26 @@ Range parse_range(std::string_view str) {
 bool satisfies(Version const& v, Range const& r) {
     for (auto const& c : r.constraints) {
         switch (c.op) {
-            case Op::Eq: if (!(v == c.ver)) return false; break;
-            case Op::Lt: if (!(v < c.ver))  return false; break;
-            case Op::Le: if (!(v <= c.ver)) return false; break;
-            case Op::Gt: if (!(v > c.ver))  return false; break;
-            case Op::Ge: if (!(v >= c.ver)) return false; break;
+        case Op::Eq:
+            if (!(v == c.ver))
+                return false;
+            break;
+        case Op::Lt:
+            if (!(v < c.ver))
+                return false;
+            break;
+        case Op::Le:
+            if (!(v <= c.ver))
+                return false;
+            break;
+        case Op::Gt:
+            if (!(v > c.ver))
+                return false;
+            break;
+        case Op::Ge:
+            if (!(v >= c.ver))
+                return false;
+            break;
         }
     }
     return true;

@@ -5,9 +5,9 @@ import toml;
 export namespace lock {
 
 struct LockedDep {
-    std::string name;     // dep key (e.g. "github.com/user/repo")
+    std::string name; // dep key (e.g. "github.com/user/repo")
     std::string version;
-    std::string commit;   // exact git commit hash
+    std::string commit; // exact git commit hash
 };
 
 struct LockFile {
@@ -15,14 +15,16 @@ struct LockFile {
 
     bool contains(std::string const& name, std::string const& version) const {
         for (auto const& p : packages) {
-            if (p.name == name && p.version == version) return true;
+            if (p.name == name && p.version == version)
+                return true;
         }
         return false;
     }
 
     LockedDep const* find(std::string const& name, std::string const& version) const {
         for (auto const& p : packages) {
-            if (p.name == name && p.version == version) return &p;
+            if (p.name == name && p.version == version)
+                return &p;
         }
         return nullptr;
     }
@@ -41,7 +43,8 @@ struct LockFile {
 LockFile load(std::string_view path) {
     LockFile lf;
 
-    if (!std::filesystem::exists(path)) return lf;
+    if (!std::filesystem::exists(path))
+        return lf;
 
     auto table = toml::parse_file(path);
 

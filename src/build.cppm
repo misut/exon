@@ -10,7 +10,8 @@ namespace detail {
 
 std::vector<std::string> collect_sources(std::filesystem::path const& src_dir) {
     std::vector<std::string> sources;
-    if (!std::filesystem::exists(src_dir)) return sources;
+    if (!std::filesystem::exists(src_dir))
+        return sources;
     for (auto const& entry : std::filesystem::directory_iterator(src_dir)) {
         if (entry.is_regular_file() && entry.path().extension() == ".cpp") {
             sources.push_back(std::filesystem::canonical(entry.path()).string());
@@ -22,11 +23,9 @@ std::vector<std::string> collect_sources(std::filesystem::path const& src_dir) {
 
 } // namespace detail
 
-void generate_cmake(manifest::Manifest const& m,
-                    std::filesystem::path const& project_root,
+void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& project_root,
                     std::filesystem::path const& output_dir,
-                    std::vector<fetch::FetchedDep> const& deps,
-                    toolchain::Toolchain const& tc) {
+                    std::vector<fetch::FetchedDep> const& deps, toolchain::Toolchain const& tc) {
     std::filesystem::create_directories(output_dir);
 
     auto cmake_path = output_dir / "CMakeLists.txt";
@@ -61,8 +60,7 @@ void generate_cmake(manifest::Manifest const& m,
             auto dep_cmake = dep.path / "CMakeLists.txt";
             if (std::filesystem::exists(dep_cmake)) {
                 file << std::format("add_subdirectory({} {})\n\n",
-                    std::filesystem::canonical(dep.path).string(),
-                    dep.name);
+                                    std::filesystem::canonical(dep.path).string(), dep.name);
                 continue;
             }
             throw std::runtime_error(std::format(
@@ -77,8 +75,8 @@ void generate_cmake(manifest::Manifest const& m,
 
         auto include_dir = dep.path / "include";
         if (std::filesystem::exists(include_dir)) {
-            file << std::format("target_include_directories({} PUBLIC {})\n",
-                dep.name, std::filesystem::canonical(include_dir).string());
+            file << std::format("target_include_directories({} PUBLIC {})\n", dep.name,
+                                std::filesystem::canonical(include_dir).string());
         }
 
         // transitive: dep의 exon.toml에서 하위 의존성 읽어 링크
@@ -118,8 +116,8 @@ void generate_cmake(manifest::Manifest const& m,
     if (m.type == "lib") {
         auto include_dir = project_root / "include";
         if (std::filesystem::exists(include_dir)) {
-            file << std::format("target_include_directories({} PUBLIC {})\n",
-                m.name, std::filesystem::canonical(include_dir).string());
+            file << std::format("target_include_directories({} PUBLIC {})\n", m.name,
+                                std::filesystem::canonical(include_dir).string());
         }
     }
 
@@ -147,8 +145,8 @@ int run(manifest::Manifest const& m) {
 
     generate_cmake(m, project_root, exon_dir, fetch_result.deps, tc);
 
-    auto configure_cmd = std::format("{} -B {} -S {} -G Ninja",
-        tc.cmake, build_dir.string(), exon_dir.string());
+    auto configure_cmd =
+        std::format("{} -B {} -S {} -G Ninja", tc.cmake, build_dir.string(), exon_dir.string());
     if (!tc.cxx_compiler.empty()) {
         configure_cmd += std::format(" -DCMAKE_CXX_COMPILER={}", tc.cxx_compiler);
     }
@@ -159,12 +157,14 @@ int run(manifest::Manifest const& m) {
 
     std::println("configuring...");
     int rc = std::system(configure_cmd.c_str());
-    if (rc != 0) return rc;
+    if (rc != 0)
+        return rc;
 
     auto build_cmd = std::format("{} --build {}", tc.cmake, build_dir.string());
     std::println("building...");
     rc = std::system(build_cmd.c_str());
-    if (rc != 0) return rc;
+    if (rc != 0)
+        return rc;
 
     std::println("build succeeded: .exon/build/{}", m.name);
     return 0;
