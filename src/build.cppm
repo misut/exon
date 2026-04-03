@@ -8,17 +8,28 @@ export namespace build {
 
 namespace detail {
 
-std::vector<std::string> collect_sources(std::filesystem::path const& src_dir) {
-    std::vector<std::string> sources;
+struct SourceFiles {
+    std::vector<std::string> cpp;  // .cpp files
+    std::vector<std::string> cppm; // .cppm module files
+};
+
+SourceFiles collect_sources(std::filesystem::path const& src_dir) {
+    SourceFiles sf;
     if (!std::filesystem::exists(src_dir))
-        return sources;
+        return sf;
     for (auto const& entry : std::filesystem::directory_iterator(src_dir)) {
-        if (entry.is_regular_file() && entry.path().extension() == ".cpp") {
-            sources.push_back(std::filesystem::canonical(entry.path()).string());
-        }
+        if (!entry.is_regular_file())
+            continue;
+        auto ext = entry.path().extension();
+        auto path = std::filesystem::canonical(entry.path()).string();
+        if (ext == ".cpp")
+            sf.cpp.push_back(path);
+        else if (ext == ".cppm")
+            sf.cppm.push_back(path);
     }
-    std::ranges::sort(sources);
-    return sources;
+    std::ranges::sort(sf.cpp);
+    std::ranges::sort(sf.cppm);
+    return sf;
 }
 
 } // namespace detail
@@ -53,9 +64,9 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
     // 의존성을 static library로 빌드
     for (auto const& dep : deps) {
         auto dep_src = dep.path / "src";
-        auto dep_sources = detail::collect_sources(dep_src);
+        auto dep_sf = detail::collect_sources(dep_src);
 
-        if (dep_sources.empty()) {
+        if (dep_sf.cpp.empty() && dep_sf.cppm.empty()) {
             // CMakeLists.txt가 있으면 add_subdirectory 사용
             auto dep_cmake = dep.path / "CMakeLists.txt";
             if (std::filesystem::exists(dep_cmake)) {
@@ -67,11 +78,20 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
                 "dependency '{}' has no source files in src/ and no CMakeLists.txt", dep.name));
         }
 
-        file << std::format("add_library({}", dep.name);
-        for (auto const& src : dep_sources) {
-            file << std::format("\n    {}", src);
+        file << std::format("add_library({})\n", dep.name);
+        if (!dep_sf.cpp.empty()) {
+            file << std::format("target_sources({} PRIVATE", dep.name);
+            for (auto const& src : dep_sf.cpp)
+                file << std::format("\n    {}", src);
+            file << "\n)\n";
         }
-        file << "\n)\n";
+        if (!dep_sf.cppm.empty()) {
+            file << std::format("target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS / FILES",
+                                dep.name);
+            for (auto const& src : dep_sf.cppm)
+                file << std::format("\n    {}", src);
+            file << "\n)\n";
+        }
 
         auto include_dir = dep.path / "include";
         if (std::filesystem::exists(include_dir)) {
@@ -97,20 +117,28 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
 
     // 메인 프로젝트 소스
     auto src_dir = project_root / "src";
-    auto sources = detail::collect_sources(src_dir);
-    if (sources.empty()) {
-        throw std::runtime_error("no .cpp files found in src/");
+    auto sf = detail::collect_sources(src_dir);
+    if (sf.cpp.empty() && sf.cppm.empty()) {
+        throw std::runtime_error("no source files found in src/");
     }
 
     if (m.type == "lib") {
-        file << std::format("add_library({} STATIC", m.name);
+        file << std::format("add_library({})\n", m.name);
     } else {
-        file << std::format("add_executable({}", m.name);
+        file << std::format("add_executable({})\n", m.name);
     }
-    for (auto const& src : sources) {
-        file << std::format("\n    {}", src);
+    if (!sf.cpp.empty()) {
+        file << std::format("target_sources({} PRIVATE", m.name);
+        for (auto const& src : sf.cpp)
+            file << std::format("\n    {}", src);
+        file << "\n)\n";
     }
-    file << "\n)\n";
+    if (!sf.cppm.empty()) {
+        file << std::format("target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS / FILES", m.name);
+        for (auto const& src : sf.cppm)
+            file << std::format("\n    {}", src);
+        file << "\n)\n";
+    }
 
     // 라이브러리인 경우 include 디렉토리 공개
     if (m.type == "lib") {
@@ -132,10 +160,11 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
     }
 }
 
-int run(manifest::Manifest const& m) {
+int run(manifest::Manifest const& m, bool release = false) {
     auto project_root = std::filesystem::current_path();
     auto exon_dir = project_root / ".exon";
-    auto build_dir = exon_dir / "build";
+    auto profile = release ? "release" : "debug";
+    auto build_dir = exon_dir / profile;
 
     auto tc = toolchain::detect();
 
@@ -145,8 +174,9 @@ int run(manifest::Manifest const& m) {
 
     generate_cmake(m, project_root, exon_dir, fetch_result.deps, tc);
 
-    auto configure_cmd =
-        std::format("{} -B {} -S {} -G Ninja", tc.cmake, build_dir.string(), exon_dir.string());
+    auto build_type = release ? "Release" : "Debug";
+    auto configure_cmd = std::format("{} -B {} -S {} -G Ninja -DCMAKE_BUILD_TYPE={}", tc.cmake,
+                                     build_dir.string(), exon_dir.string(), build_type);
     if (!tc.cxx_compiler.empty()) {
         configure_cmd += std::format(" -DCMAKE_CXX_COMPILER={}", tc.cxx_compiler);
     }
@@ -166,7 +196,7 @@ int run(manifest::Manifest const& m) {
     if (rc != 0)
         return rc;
 
-    std::println("build succeeded: .exon/build/{}", m.name);
+    std::println("build succeeded: .exon/{}/{}", profile, m.name);
     return 0;
 }
 
