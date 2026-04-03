@@ -9,6 +9,8 @@ struct Toolchain {
     std::string ninja;
     std::string cxx_compiler;
     std::string stdlib_modules_json; // libc++.modules.json 경로 (import std 지원)
+    std::string lib_dir;             // libc++ 라이브러리 경로 (링커용)
+    std::string sysroot;             // macOS SDK 경로
 };
 
 namespace detail {
@@ -35,7 +37,8 @@ std::string find_in_path(std::string_view name) {
 }
 
 // PATH에서 찾은 clang++ 위치 기준으로 libc++.modules.json 탐색
-// 패턴: <root>/bin/clang++ → <root>/lib/c++/libc++.modules.json
+// Homebrew: <root>/lib/c++/libc++.modules.json
+// LLVM 공식: <root>/lib/libc++.modules.json
 void detect_clang(Toolchain& tc) {
     auto clangpp = find_in_path("clang++");
     if (clangpp == "clang++")
@@ -46,20 +49,46 @@ void detect_clang(Toolchain& tc) {
 
     tc.cxx_compiler = clangpp;
 
-    auto modules_json = root / "lib" / "c++" / "libc++.modules.json";
-    if (std::filesystem::exists(modules_json)) {
-        tc.stdlib_modules_json = std::filesystem::canonical(modules_json).string();
+    // modules json 탐색 (여러 경로)
+    auto candidates = {
+        root / "lib" / "c++" / "libc++.modules.json", // Homebrew
+        root / "lib" / "libc++.modules.json",          // LLVM 공식 (intron)
+    };
+    for (auto const& path : candidates) {
+        if (std::filesystem::exists(path)) {
+            tc.stdlib_modules_json = std::filesystem::canonical(path).string();
+            tc.lib_dir = std::filesystem::canonical(path.parent_path()).string();
+            break;
+        }
     }
 }
 
 } // namespace detail
 
 Toolchain detect() {
-    // TODO: intron 연동 시 intron에서 경로를 가져오도록 변경
     Toolchain tc;
     tc.cmake = detail::find_in_path("cmake");
     tc.ninja = detail::find_in_path("ninja");
     detail::detect_clang(tc);
+
+    // macOS sysroot 감지
+    #if defined(__APPLE__)
+    auto xcrun = detail::find_in_path("xcrun");
+    if (xcrun != "xcrun") {
+        // xcrun --show-sdk-path를 읽을 수 없으므로 알려진 경로 탐색
+        auto candidates = {
+            std::filesystem::path{"/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"},
+            std::filesystem::path{"/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"},
+        };
+        for (auto const& p : candidates) {
+            if (std::filesystem::exists(p)) {
+                tc.sysroot = p.string();
+                break;
+            }
+        }
+    }
+    #endif
+
     return tc;
 }
 

@@ -180,14 +180,12 @@ int run(manifest::Manifest const& m, bool release = false) {
     if (!tc.cxx_compiler.empty()) {
         configure_cmd += std::format(" -DCMAKE_CXX_COMPILER={}", tc.cxx_compiler);
     }
+    if (!tc.sysroot.empty()) {
+        configure_cmd += std::format(" -DCMAKE_OSX_SYSROOT={}", tc.sysroot);
+    }
     if (!tc.stdlib_modules_json.empty() && m.standard >= 23) {
-        configure_cmd += std::format(" -DCMAKE_CXX_STDLIB_MODULES_JSON={}", tc.stdlib_modules_json);
-        auto llvm_root = std::filesystem::path{tc.cxx_compiler}.parent_path().parent_path();
-        auto lib_cxx = llvm_root / "lib" / "c++";
-        auto lib_unwind = llvm_root / "lib" / "unwind";
-        configure_cmd += std::format(
-            " -DCMAKE_EXE_LINKER_FLAGS=\"-L{} -lc++ -L{} -lunwind\"",
-            lib_cxx.string(), lib_unwind.string());
+        configure_cmd +=
+            std::format(" -DCMAKE_CXX_STDLIB_MODULES_JSON={}", tc.stdlib_modules_json);
     }
 
     std::println("configuring...");
