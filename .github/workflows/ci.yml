@@ -17,26 +17,18 @@ jobs:
       - name: Install dependencies
         run: brew install llvm ninja
 
-      - name: Install intron
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/misut/intron/main/install.sh | sh
-          echo "$HOME/.intron/bin" >> $GITHUB_PATH
-
-      - name: Install toolchain
-        run: |
-          intron install llvm 22.1.2
-
       - name: Bootstrap build
         run: |
-          LLVM_ROOT="$HOME/.intron/toolchains/llvm/22.1.2"
+          LLVM_PREFIX=$(brew --prefix llvm)
           cmake -B build -G Ninja \
-            -DCMAKE_CXX_COMPILER="$LLVM_ROOT/bin/clang++" \
-            -DCMAKE_CXX_STDLIB_MODULES_JSON="$LLVM_ROOT/lib/libc++.modules.json"
+            -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++" \
+            -DCMAKE_CXX_STDLIB_MODULES_JSON="$LLVM_PREFIX/lib/c++/libc++.modules.json" \
+            -DCMAKE_EXE_LINKER_FLAGS="-L$LLVM_PREFIX/lib/c++ -lc++ -lc++abi -L$LLVM_PREFIX/lib/unwind -lunwind"
           cmake --build build
 
       - name: Self-host build
         run: |
-          export PATH="$HOME/.intron/toolchains/llvm/22.1.2/bin:$PATH"
+          export PATH="$(brew --prefix llvm)/bin:$PATH"
           ./build/exon build
 
       - name: Verify
