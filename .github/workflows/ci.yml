@@ -16,8 +16,12 @@ jobs:
 
       - name: Install intron
         run: |
-          curl -fsSL https://raw.githubusercontent.com/misut/intron/main/install.sh | sh
+          gh release download v0.3.0 --repo misut/intron --pattern "*.tar.gz" --dir /tmp
+          mkdir -p "$HOME/.intron/bin"
+          tar -xzf /tmp/intron-*.tar.gz -C "$HOME/.intron/bin"
           echo "$HOME/.intron/bin" >> $GITHUB_PATH
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Install toolchain
         run: |
