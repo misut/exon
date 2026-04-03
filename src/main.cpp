@@ -18,6 +18,7 @@ commands:
     add <pkg> <ver>  add a dependency
     remove <pkg>     remove a dependency
     update           update dependencies to latest compatible versions
+    fmt              format source files with clang-format
 )";
 
 manifest::Manifest load_manifest() {
@@ -249,6 +250,39 @@ int main(int argc, char* argv[]) {
             std::println(std::cerr, "error: {}", e.what());
             return 1;
         }
+    } else if (command == "fmt") {
+        auto src_dir = std::filesystem::current_path() / "src";
+        if (!std::filesystem::exists(src_dir)) {
+            std::println(std::cerr, "error: src/ directory not found");
+            return 1;
+        }
+
+        std::vector<std::string> files;
+        for (auto const& entry : std::filesystem::recursive_directory_iterator(src_dir)) {
+            if (!entry.is_regular_file()) continue;
+            auto ext = entry.path().extension().string();
+            if (ext == ".cpp" || ext == ".cppm" || ext == ".h" || ext == ".hpp") {
+                files.push_back(entry.path().string());
+            }
+        }
+
+        if (files.empty()) {
+            std::println("no source files to format");
+            return 0;
+        }
+
+        std::ranges::sort(files);
+        auto cmd = std::string{"clang-format -i"};
+        for (auto const& f : files) {
+            cmd += std::format(" {}", f);
+        }
+
+        int rc = std::system(cmd.c_str());
+        if (rc != 0) {
+            std::println(std::cerr, "error: clang-format failed (is it installed?)");
+            return 1;
+        }
+        std::println("formatted {} file(s)", files.size());
     } else {
         std::println(std::cerr, "unknown command: {}", command);
         std::print(std::cerr, "{}", usage_text);
