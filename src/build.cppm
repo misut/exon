@@ -52,7 +52,8 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
         file << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
         file << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n";
         file << "set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD \"451f2fe2-a8a2-47c3-bc32-94786d8fc91b\")\n";
-        file << "set(CMAKE_CXX_MODULE_STD ON)\n\n";
+        file << "set(CMAKE_CXX_MODULE_STD ON)\n";
+        file << "add_compile_definitions(_LIBCPP_DISABLE_AVAILABILITY)\n\n";
         file << std::format("project({} LANGUAGES CXX)\n\n", m.name);
     } else {
         file << "cmake_minimum_required(VERSION 3.20)\n";
