@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: brew install llvm ninja
+
+      - name: Bootstrap build
+        run: |
+          LLVM_PREFIX=$(brew --prefix llvm)
+          cmake -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++" \
+            -DCMAKE_CXX_STDLIB_MODULES_JSON="$LLVM_PREFIX/lib/c++/libc++.modules.json"
+          cmake --build build
+
+      - name: Self-host build
+        run: |
+          export PATH="$(brew --prefix llvm)/bin:$PATH"
+          ./build/exon build
+
+      - name: Verify
+        run: .exon/debug/exon info

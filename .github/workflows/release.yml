@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: brew install llvm ninja
+
+      - name: Bootstrap build
+        run: |
+          LLVM_PREFIX=$(brew --prefix llvm)
+          cmake -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++" \
+            -DCMAKE_CXX_STDLIB_MODULES_JSON="$LLVM_PREFIX/lib/c++/libc++.modules.json"
+          cmake --build build
+
+      - name: Self-host release build
+        run: |
+          export PATH="$(brew --prefix llvm)/bin:$PATH"
+          ./build/exon build --release
+
+      - name: Package
+        run: |
+          tar -czf exon-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz \
+            -C .exon/release exon
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: exon-*.tar.gz
+          generate_release_notes: true
