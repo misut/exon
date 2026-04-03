@@ -186,9 +186,11 @@ int run(manifest::Manifest const& m, bool release = false) {
     if (!tc.stdlib_modules_json.empty() && m.standard >= 23) {
         configure_cmd +=
             std::format(" -DCMAKE_CXX_STDLIB_MODULES_JSON={}", tc.stdlib_modules_json);
-        if (!tc.lib_dir.empty()) {
+        // clang config가 없으면 (Homebrew 등) linker flags를 직접 추가
+        if (!tc.has_clang_config && !tc.lib_dir.empty()) {
             configure_cmd += std::format(
-                " -DCMAKE_EXE_LINKER_FLAGS=\"-L{} -lc++ -lc++abi\"", tc.lib_dir);
+                " -DCMAKE_EXE_LINKER_FLAGS=\"-L{0} -Wl,-rpath,{0} -lc++ -lc++abi\"",
+                tc.lib_dir);
         }
     }
 
