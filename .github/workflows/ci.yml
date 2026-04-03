@@ -14,35 +14,21 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install intron
-        run: |
-          gh release download v0.3.0 --repo misut/intron --pattern "*.tar.gz" --dir /tmp
-          mkdir -p "$HOME/.intron/bin"
-          tar -xzf /tmp/intron-*.tar.gz -C "$HOME/.intron/bin"
-          echo "$HOME/.intron/bin" >> $GITHUB_PATH
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Install toolchain
-        run: |
-          intron install llvm 22.1.2
-          intron install cmake 4.3.1
-          intron install ninja 1.13.2
+      - name: Install dependencies
+        run: brew install llvm ninja
 
       - name: Bootstrap build
         run: |
-          LLVM_ROOT="$HOME/.intron/toolchains/llvm/22.1.2"
-          CMAKE="$HOME/.intron/toolchains/cmake/4.3.1/bin/cmake"
-          NINJA="$HOME/.intron/toolchains/ninja/1.13.2/ninja"
-          $CMAKE -B build -G Ninja \
-            -DCMAKE_CXX_COMPILER="$LLVM_ROOT/bin/clang++" \
-            -DCMAKE_CXX_STDLIB_MODULES_JSON="$LLVM_ROOT/lib/libc++.modules.json" \
-            -DCMAKE_MAKE_PROGRAM="$NINJA"
-          $CMAKE --build build
+          LLVM_PREFIX=$(brew --prefix llvm)
+          cmake -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++" \
+            -DCMAKE_CXX_STDLIB_MODULES_JSON="$LLVM_PREFIX/lib/c++/libc++.modules.json" \
+            -DCMAKE_EXE_LINKER_FLAGS="-L$LLVM_PREFIX/lib/c++ -lc++ -lc++abi -L$LLVM_PREFIX/lib/unwind -lunwind"
+          cmake --build build
 
       - name: Self-host build
         run: |
-          export PATH="$HOME/.intron/toolchains/llvm/22.1.2/bin:$HOME/.intron/toolchains/cmake/4.3.1/bin:$HOME/.intron/toolchains/ninja/1.13.2:$PATH"
+          export PATH="$(brew --prefix llvm)/bin:$PATH"
           ./build/exon build
 
       - name: Verify
