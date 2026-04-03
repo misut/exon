@@ -12,8 +12,8 @@ constexpr auto usage_text = R"(usage: exon <command> [args]
 commands:
     init [--lib]  create a new exon.toml
     info          show package information
-    build         build the project
-    run [args]    build and run the project
+    build [--release]  build the project
+    run [--release] [args]  build and run the project
     clean         remove build artifacts
     add <pkg> <ver>  add a dependency
     remove <pkg>     remove a dependency
@@ -88,7 +88,8 @@ int main(int argc, char* argv[]) {
                 std::println(std::cerr, "error: package name is required in exon.toml");
                 return 1;
             }
-            return build::run(m);
+            bool release = (argc >= 3 && std::string_view{argv[2]} == "--release");
+            return build::run(m, release);
         } catch (std::exception const& e) {
             std::println(std::cerr, "error: {}", e.what());
             return 1;
@@ -104,13 +105,20 @@ int main(int argc, char* argv[]) {
                 std::println(std::cerr, "error: cannot run a library package");
                 return 1;
             }
-            int rc = build::run(m);
+            bool release = false;
+            int args_start = 2;
+            if (argc >= 3 && std::string_view{argv[2]} == "--release") {
+                release = true;
+                args_start = 3;
+            }
+            int rc = build::run(m, release);
             if (rc != 0)
                 return rc;
 
-            auto exe = std::filesystem::current_path() / ".exon" / "build" / m.name;
+            auto profile = release ? "release" : "debug";
+            auto exe = std::filesystem::current_path() / ".exon" / profile / m.name;
             auto run_cmd = exe.string();
-            for (int i = 2; i < argc; ++i) {
+            for (int i = args_start; i < argc; ++i) {
                 run_cmd += std::format(" {}", argv[i]);
             }
             std::println("running {}...\n", m.name);
