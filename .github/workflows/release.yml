@@ -15,21 +15,33 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install dependencies
-        run: brew install llvm ninja
+      - name: Install intron
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/misut/intron/main/install.sh | sh
+          echo "$HOME/.intron/bin" >> $GITHUB_PATH
+
+      - name: Install toolchain
+        run: |
+          intron install llvm 22.1.2
+          intron install cmake 4.3.1
+          intron install ninja 1.13.2
+          intron default llvm 22.1.2
+          intron default cmake 4.3.1
+          intron default ninja 1.13.2
 
       - name: Bootstrap build
         run: |
-          LLVM_PREFIX=$(brew --prefix llvm)
-          cmake -B build -G Ninja \
-            -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++" \
-            -DCMAKE_CXX_STDLIB_MODULES_JSON="$LLVM_PREFIX/lib/c++/libc++.modules.json" \
-            -DCMAKE_EXE_LINKER_FLAGS="-L$LLVM_PREFIX/lib/c++ -lc++ -lc++abi -L$LLVM_PREFIX/lib/unwind -lunwind"
-          cmake --build build
+          LLVM_ROOT="$HOME/.intron/toolchains/llvm/22.1.2"
+          CMAKE="$HOME/.intron/toolchains/cmake/4.3.1/bin/cmake"
+          $CMAKE -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER="$LLVM_ROOT/bin/clang++" \
+            -DCMAKE_CXX_STDLIB_MODULES_JSON="$LLVM_ROOT/lib/libc++.modules.json" \
+            -DCMAKE_MAKE_PROGRAM="$HOME/.intron/toolchains/ninja/1.13.2/ninja"
+          $CMAKE --build build
 
       - name: Self-host release build
         run: |
-          export PATH="$(brew --prefix llvm)/bin:$PATH"
+          export PATH="$HOME/.intron/toolchains/llvm/22.1.2/bin:$HOME/.intron/toolchains/cmake/4.3.1/bin:$HOME/.intron/toolchains/ninja/1.13.2:$PATH"
           ./build/exon build --release
 
       - name: Package
