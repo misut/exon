@@ -85,10 +85,21 @@ void detect_clang(Toolchain& tc) {
 
     auto root = std::filesystem::path{tc.cxx_compiler}.parent_path().parent_path();
 
-    // clang config 파일 존재 여부 (있으면 linker flags를 clang이 처리)
+    // clang config에 -lc++가 있으면 linker flags를 clang이 처리
     auto etc_dir = root / "etc" / "clang";
-    if (std::filesystem::exists(etc_dir))
-        tc.has_clang_config = true;
+    if (std::filesystem::exists(etc_dir)) {
+        for (auto const& entry : std::filesystem::directory_iterator(etc_dir)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".cfg") {
+                auto f = std::ifstream(entry.path());
+                auto content = std::string{std::istreambuf_iterator<char>{f},
+                                           std::istreambuf_iterator<char>{}};
+                if (content.find("-lc++") != std::string::npos) {
+                    tc.has_clang_config = true;
+                    break;
+                }
+            }
+        }
+    }
 
     // modules json 탐색
     auto candidates = {
