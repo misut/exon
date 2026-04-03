@@ -1,0 +1,11 @@
+[package]
+name = "exon"
+version = "0.1.0"
+description = "A package manager for C++"
+authors = ["Geunryeol Park (misut)"]
+license = "MIT"
+type = "bin"
+standard = 23
+
+[dependencies]
+"github.com/misut/tomlcpp" = "0.1.0"
