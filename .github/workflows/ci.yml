@@ -20,7 +20,7 @@ jobs:
             platform: aarch64-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -47,7 +47,7 @@ jobs:
             CXX_FLAGS="-stdlib=libc++"
             LINKER_FLAGS="-stdlib=libc++ -lc++abi"
           fi
-          cmake -B build -S .github/cmake -G Ninja \
+          cmake -Wno-dev -B build -S .github/cmake -G Ninja \
             -DTOMLCPP_DIR=/tmp/tomlcpp \
             -DCMAKE_CXX_COMPILER="$CXX" \
             -DCMAKE_CXX_STDLIB_MODULES_JSON="$MODULES_JSON" \
