@@ -10,7 +10,11 @@ project(exon LANGUAGES CXX)
 set(EXON_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 set(TOMLCPP_DIR "" CACHE PATH "Path to tomlcpp source")
 
-add_subdirectory(${TOMLCPP_DIR} tomlcpp)
+add_library(tomlcpp)
+target_sources(tomlcpp
+    PUBLIC FILE_SET CXX_MODULES BASE_DIRS ${TOMLCPP_DIR} FILES
+    ${TOMLCPP_DIR}/src/toml.cppm
+)
 
 add_executable(exon)
 target_sources(exon PRIVATE

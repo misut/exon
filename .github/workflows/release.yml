@@ -15,18 +15,13 @@ jobs:
         include:
           - os: macos-14
             platform: aarch64-apple-darwin
-            build: exon
           - os: ubuntu-24.04
             platform: x86_64-linux-gnu
-            build: cmake
           - os: ubuntu-24.04-arm
             platform: aarch64-linux-gnu
-            build: cmake
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -39,44 +34,38 @@ jobs:
           sudo apt-get install -y libc++-20-dev libc++abi-20-dev ninja-build
           pip install cmake --break-system-packages
 
-      - name: Build release (macOS)
-        if: matrix.build == 'exon'
-        run: |
-          LLVM_PREFIX=$(brew --prefix llvm)
-          cmake -B build -G Ninja \
-            -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++" \
-            -DCMAKE_CXX_STDLIB_MODULES_JSON="$LLVM_PREFIX/lib/c++/libc++.modules.json" \
-            -DCMAKE_EXE_LINKER_FLAGS="-L$LLVM_PREFIX/lib/c++ -lc++ -lc++abi -L$LLVM_PREFIX/lib/unwind -lunwind"
-          cmake --build build
-          export PATH="$(brew --prefix llvm)/bin:$PATH"
-          ./build/exon build --release
-
-      - name: Build release (Linux)
-        if: matrix.build == 'cmake'
+      - name: Bootstrap and release build
         run: |
           git clone https://github.com/misut/tomlcpp.git /tmp/tomlcpp
-          CXX=clang++-20
-          MODULES_JSON=/usr/lib/llvm-20/lib/libc++.modules.json
-          CXX_FLAGS="-stdlib=libc++"
-          LINKER_FLAGS="-stdlib=libc++ -lc++abi"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            LLVM_PREFIX=$(brew --prefix llvm)
+            CXX="$LLVM_PREFIX/bin/clang++"
+            MODULES_JSON="$LLVM_PREFIX/lib/c++/libc++.modules.json"
+            LINKER_FLAGS="-L$LLVM_PREFIX/lib/c++ -lc++ -lc++abi -L$LLVM_PREFIX/lib/unwind -lunwind"
+          else
+            CXX=clang++-20
+            MODULES_JSON=/usr/lib/llvm-20/lib/libc++.modules.json
+            CXX_FLAGS="-stdlib=libc++"
+            LINKER_FLAGS="-stdlib=libc++ -lc++abi"
+          fi
           cmake -B build -S .github/cmake -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
             -DTOMLCPP_DIR=/tmp/tomlcpp \
             -DCMAKE_CXX_COMPILER="$CXX" \
             -DCMAKE_CXX_STDLIB_MODULES_JSON="$MODULES_JSON" \
-            -DCMAKE_CXX_FLAGS="$CXX_FLAGS" \
+            -DCMAKE_CXX_FLAGS="${CXX_FLAGS:-}" \
             -DCMAKE_EXE_LINKER_FLAGS="$LINKER_FLAGS"
           cmake --build build
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            export PATH="$(brew --prefix llvm)/bin:$PATH"
+          else
+            export PATH="/usr/lib/llvm-20/bin:$PATH"
+          fi
+          ./build/exon build --release
 
       - name: Package
         run: |
-          if [ "${{ matrix.build }}" = "exon" ]; then
-            tar -czf exon-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz \
-              -C .exon/release exon
-          else
-            tar -czf exon-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz \
-              -C build exon
-          fi
+          tar -czf exon-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz \
+            -C .exon/release exon
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
