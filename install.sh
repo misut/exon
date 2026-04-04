@@ -8,13 +8,31 @@ INSTALL_DIR="$HOME/.exon/bin"
 OS=$(uname -s)
 ARCH=$(uname -m)
 
-if [ "$OS" != "Darwin" ] || [ "$ARCH" != "arm64" ]; then
-    echo "error: only macOS ARM (Apple Silicon) is currently supported"
-    echo "  detected: $OS $ARCH"
-    exit 1
-fi
-
-PLATFORM="aarch64-apple-darwin"
+case "$OS" in
+    Darwin)
+        case "$ARCH" in
+            arm64) PLATFORM="aarch64-apple-darwin" ;;
+            *)
+                echo "error: unsupported macOS architecture: $ARCH"
+                exit 1
+                ;;
+        esac
+        ;;
+    Linux)
+        case "$ARCH" in
+            x86_64)  PLATFORM="x86_64-linux-gnu" ;;
+            aarch64) PLATFORM="aarch64-linux-gnu" ;;
+            *)
+                echo "error: unsupported Linux architecture: $ARCH"
+                exit 1
+                ;;
+        esac
+        ;;
+    *)
+        echo "error: unsupported OS: $OS"
+        exit 1
+        ;;
+esac
 
 # Get latest release tag
 echo "fetching latest release..."
@@ -25,7 +43,7 @@ if [ -z "$TAG" ]; then
     exit 1
 fi
 
-echo "installing exon $TAG..."
+echo "installing exon $TAG for $PLATFORM..."
 
 # Download
 URL="https://github.com/$REPO/releases/download/$TAG/exon-$TAG-$PLATFORM.tar.gz"

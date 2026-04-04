@@ -42,11 +42,15 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
         cmd += std::format(" -DCMAKE_CXX_COMPILER={}", tc.cxx_compiler);
     if (!tc.sysroot.empty())
         cmd += std::format(" -DCMAKE_OSX_SYSROOT={}", tc.sysroot);
+    if (tc.needs_stdlib_flag)
+        cmd += " -DCMAKE_CXX_FLAGS=\"-stdlib=libc++\"";
     if (!tc.stdlib_modules_json.empty() && m.standard >= 23) {
         cmd += std::format(" -DCMAKE_CXX_STDLIB_MODULES_JSON={}", tc.stdlib_modules_json);
         if (!tc.has_clang_config && !tc.lib_dir.empty()) {
-            cmd += std::format(" -DCMAKE_EXE_LINKER_FLAGS=\"-L{0} -Wl,-rpath,{0} -lc++ -lc++abi\"",
-                               tc.lib_dir);
+            auto linker_flags = std::format("-L{0} -Wl,-rpath,{0} -lc++ -lc++abi", tc.lib_dir);
+            if (tc.needs_stdlib_flag)
+                linker_flags += " -stdlib=libc++";
+            cmd += std::format(" -DCMAKE_EXE_LINKER_FLAGS=\"{}\"", linker_flags);
         }
     }
     return cmd;
