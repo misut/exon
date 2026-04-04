@@ -8,7 +8,10 @@ import templates;
 
 export namespace commands {
 
-constexpr auto version = "0.8.0";
+#ifndef EXON_PKG_VERSION
+#define EXON_PKG_VERSION "dev"
+#endif
+constexpr auto version = EXON_PKG_VERSION;
 
 constexpr auto usage_text = R"(usage: exon <command> [args]
 
