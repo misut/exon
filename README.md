@@ -22,41 +22,21 @@ curl -fsSL https://raw.githubusercontent.com/misut/exon/main/install.sh | sh
 
 ```sh
 mise plugin add exon https://github.com/misut/mise-exon.git
-mise install exon@0.5.0
-mise use exon@0.5.0
+mise install exon@0.6.0
+mise use exon@0.6.0
 ```
 
 ### Build from source
 
-Requires [Homebrew LLVM](https://formulae.brew.sh/formula/llvm) (macOS) or [LLVM 20+](https://apt.llvm.org/) (Linux) for `import std;` support.
+Requires LLVM with libc++ modules: [Homebrew LLVM](https://formulae.brew.sh/formula/llvm) (macOS) or [LLVM 20+](https://apt.llvm.org/) (Linux).
 
-**macOS:**
 ```sh
-brew install llvm ninja
-LLVM_PREFIX=$(brew --prefix llvm)
-cmake -B build -G Ninja \
-  -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++" \
-  -DCMAKE_CXX_STDLIB_MODULES_JSON="$LLVM_PREFIX/lib/c++/libc++.modules.json" \
-  -DCMAKE_EXE_LINKER_FLAGS="-L$LLVM_PREFIX/lib/c++ -lc++ -lc++abi -L$LLVM_PREFIX/lib/unwind -lunwind"
+# bootstrap
+git clone https://github.com/misut/tomlcpp.git /tmp/tomlcpp
+cmake -B build -S .github/cmake -G Ninja -DTOMLCPP_DIR=/tmp/tomlcpp
 cmake --build build
-```
 
-**Linux:**
-```sh
-wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 20
-sudo apt-get install -y libc++-20-dev libc++abi-20-dev ninja-build
-pip install cmake --break-system-packages
-cmake -B build -G Ninja \
-  -DCMAKE_CXX_COMPILER=clang++-20 \
-  -DCMAKE_CXX_STDLIB_MODULES_JSON=/usr/lib/llvm-20/lib/libc++.modules.json \
-  -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
-  -DCMAKE_EXE_LINKER_FLAGS="-stdlib=libc++ -lc++abi"
-cmake --build build
-```
-
-Once bootstrapped, exon can build itself:
-
-```sh
+# self-host
 ./build/exon build
 ```
 
