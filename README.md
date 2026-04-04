@@ -2,6 +2,14 @@
 
 A package manager for C++. Inspired by Cargo.
 
+## Supported Platforms
+
+| Platform | Architecture |
+|----------|-------------|
+| macOS | ARM64 (Apple Silicon) |
+| Linux | x86_64 |
+| Linux | aarch64 |
+
 ## Installation
 
 ### Script
@@ -14,22 +22,35 @@ curl -fsSL https://raw.githubusercontent.com/misut/exon/main/install.sh | sh
 
 ```sh
 mise plugin add exon https://github.com/misut/mise-exon.git
-mise install exon@0.0.0
-mise use exon@0.0.0
+mise install exon@0.4.0
+mise use exon@0.4.0
 ```
 
 ### Build from source
 
-Requires [Homebrew LLVM](https://formulae.brew.sh/formula/llvm) for `import std;` support.
+Requires [Homebrew LLVM](https://formulae.brew.sh/formula/llvm) (macOS) or [LLVM 20+](https://apt.llvm.org/) (Linux) for `import std;` support.
 
+**macOS:**
 ```sh
-brew install llvm
-git clone --recursive git@github.com:misut/exon.git
-cd exon
-LLVM_PREFIX=/opt/homebrew/opt/llvm
+brew install llvm ninja
+LLVM_PREFIX=$(brew --prefix llvm)
 cmake -B build -G Ninja \
   -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++" \
-  -DCMAKE_CXX_STDLIB_MODULES_JSON="$LLVM_PREFIX/lib/c++/libc++.modules.json"
+  -DCMAKE_CXX_STDLIB_MODULES_JSON="$LLVM_PREFIX/lib/c++/libc++.modules.json" \
+  -DCMAKE_EXE_LINKER_FLAGS="-L$LLVM_PREFIX/lib/c++ -lc++ -lc++abi -L$LLVM_PREFIX/lib/unwind -lunwind"
+cmake --build build
+```
+
+**Linux:**
+```sh
+wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 20
+sudo apt-get install -y libc++-20-dev libc++abi-20-dev ninja-build
+pip install cmake --break-system-packages
+cmake -B build -G Ninja \
+  -DCMAKE_CXX_COMPILER=clang++-20 \
+  -DCMAKE_CXX_STDLIB_MODULES_JSON=/usr/lib/llvm-20/lib/libc++.modules.json \
+  -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
+  -DCMAKE_EXE_LINKER_FLAGS="-stdlib=libc++ -lc++abi"
 cmake --build build
 ```
 
@@ -65,6 +86,7 @@ hello, world!
 | `exon info` | Show package information |
 | `exon build [--release]` | Build the project |
 | `exon run [--release]` | Build and run |
+| `exon test [--release]` | Build and run tests |
 | `exon clean` | Remove build artifacts |
 | `exon add <pkg> <ver>` | Add a dependency |
 | `exon remove <pkg>` | Remove a dependency |
@@ -96,6 +118,7 @@ standard = 23
 - **Build profiles** — debug (default) and release (`--release`)
 - **Git-based registry** — fetches packages from GitHub repositories
 - **Self-hosting** — exon builds itself with `exon build`
+- **Cross-platform** — macOS (ARM64) and Linux (x86_64, aarch64)
 
 ## License
 

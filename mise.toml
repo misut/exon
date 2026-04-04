@@ -1,5 +1,5 @@
 [tools]
 clang = "latest"
 cmake = "latest"
-exon = "0.3.0"
+exon = "0.4.0"
 ninja = "latest"
