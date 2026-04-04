@@ -17,6 +17,8 @@ int main(int argc, char* argv[]) {
         return commands::cmd_info();
     if (command == "build")
         return commands::cmd_build(argc, argv);
+    if (command == "check")
+        return commands::cmd_check(argc, argv);
     if (command == "run")
         return commands::cmd_run(argc, argv);
     if (command == "test")
