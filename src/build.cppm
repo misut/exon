@@ -32,6 +32,53 @@ SourceFiles collect_sources(std::filesystem::path const& src_dir) {
     return sf;
 }
 
+struct BuildFlags {
+    std::string cxx_flags;
+    std::string linker_flags;
+    std::string standard_libraries; // static libs appended after objects (for Linux)
+};
+
+BuildFlags resolve_flags(toolchain::Toolchain const& tc, manifest::Manifest const& m,
+                         bool release) {
+    BuildFlags flags;
+
+    if (tc.stdlib_modules_json.empty() || m.standard < 23)
+        return flags;
+
+    auto libcxx_a = std::filesystem::path{tc.lib_dir} / "libc++.a";
+    auto libcxxabi_a = std::filesystem::path{tc.lib_dir} / "libc++abi.a";
+    bool has_static_libs = !tc.lib_dir.empty() && std::filesystem::exists(libcxx_a) &&
+                           std::filesystem::exists(libcxxabi_a);
+
+    if (release && tc.has_clang_config) {
+        // intron LLVM release: bypass clang config to avoid rpath to toolchain dir.
+        // uses system libc++ (/usr/lib/) on macOS instead.
+        flags.cxx_flags = "--no-default-config -stdlib=libc++";
+        flags.linker_flags = "--no-default-config -lc++ -lc++abi";
+        if (!tc.sysroot.empty()) {
+            auto sysroot = std::format(" --sysroot={}", tc.sysroot);
+            flags.cxx_flags += sysroot;
+            flags.linker_flags += sysroot;
+        }
+    } else if (release && has_static_libs && tc.needs_stdlib_flag) {
+        // Linux release: statically link libc++ for portable binaries
+        flags.cxx_flags = "-stdlib=libc++";
+        flags.linker_flags = "-nostdlib++ -stdlib=libc++";
+        flags.standard_libraries = std::format("{} {}", libcxx_a.string(), libcxxabi_a.string());
+    } else if (!tc.has_clang_config && !tc.lib_dir.empty()) {
+        // debug or fallback: dynamic libc++ from lib_dir
+        if (tc.needs_stdlib_flag)
+            flags.cxx_flags = "-stdlib=libc++";
+        flags.linker_flags = std::format("-L{0} -Wl,-rpath,{0} -lc++ -lc++abi", tc.lib_dir);
+        if (tc.needs_stdlib_flag)
+            flags.linker_flags += " -stdlib=libc++";
+    } else if (tc.needs_stdlib_flag) {
+        flags.cxx_flags = "-stdlib=libc++";
+    }
+
+    return flags;
+}
+
 std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest const& m,
                           std::filesystem::path const& build_dir,
                           std::filesystem::path const& source_dir, bool release) {
@@ -42,55 +89,17 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
         cmd += std::format(" -DCMAKE_CXX_COMPILER={}", tc.cxx_compiler);
     if (!tc.sysroot.empty())
         cmd += std::format(" -DCMAKE_OSX_SYSROOT={}", tc.sysroot);
-    if (!tc.stdlib_modules_json.empty() && m.standard >= 23) {
+    if (!tc.stdlib_modules_json.empty() && m.standard >= 23)
         cmd += std::format(" -DCMAKE_CXX_STDLIB_MODULES_JSON={}", tc.stdlib_modules_json);
 
-        // release: portable binaries
-        if (release && !tc.lib_dir.empty()) {
-            auto libcxx_a = std::filesystem::path{tc.lib_dir} / "libc++.a";
-            auto libcxxabi_a = std::filesystem::path{tc.lib_dir} / "libc++abi.a";
-            bool has_static_libs =
-                std::filesystem::exists(libcxx_a) && std::filesystem::exists(libcxxabi_a);
+    auto flags = resolve_flags(tc, m, release);
+    if (!flags.cxx_flags.empty())
+        cmd += std::format(" -DCMAKE_CXX_FLAGS=\"{}\"", flags.cxx_flags);
+    if (!flags.linker_flags.empty())
+        cmd += std::format(" -DCMAKE_EXE_LINKER_FLAGS=\"{}\"", flags.linker_flags);
+    if (!flags.standard_libraries.empty())
+        cmd += std::format(" -DCMAKE_CXX_STANDARD_LIBRARIES=\"{}\"", flags.standard_libraries);
 
-            if (tc.has_clang_config) {
-                // intron LLVM: --no-default-config to bypass config's -lc++ (avoids rpath
-                // to toolchain dir). System libc++ (/usr/lib/) is used instead on macOS.
-                std::string cxx_flags = "--no-default-config -stdlib=libc++";
-                if (!tc.sysroot.empty())
-                    cxx_flags += std::format(" --sysroot={}", tc.sysroot);
-                cmd += std::format(" -DCMAKE_CXX_FLAGS=\"{}\"", cxx_flags);
-
-                std::string linker_flags = "--no-default-config";
-                if (!tc.sysroot.empty())
-                    linker_flags += std::format(" --sysroot={}", tc.sysroot);
-                linker_flags += " -lc++ -lc++abi";
-                cmd += std::format(" -DCMAKE_EXE_LINKER_FLAGS=\"{}\"", linker_flags);
-            } else if (has_static_libs && tc.needs_stdlib_flag) {
-                // Linux system LLVM: statically link libc++ (no system libc++ guaranteed)
-                cmd += " -DCMAKE_CXX_FLAGS=\"-stdlib=libc++\"";
-                cmd += " -DCMAKE_EXE_LINKER_FLAGS=\"-nostdlib++ -stdlib=libc++\"";
-                cmd += std::format(" -DCMAKE_CXX_STANDARD_LIBRARIES=\"{} {}\"",
-                                   libcxx_a.string(), libcxxabi_a.string());
-            } else if (!tc.has_clang_config) {
-                auto linker_flags =
-                    std::format("-L{0} -Wl,-rpath,{0} -lc++ -lc++abi", tc.lib_dir);
-                if (tc.needs_stdlib_flag)
-                    linker_flags += " -stdlib=libc++";
-                cmd += std::format(" -DCMAKE_EXE_LINKER_FLAGS=\"{}\"", linker_flags);
-            }
-        }
-        // debug: dynamic linking
-        else if (!tc.has_clang_config && !tc.lib_dir.empty()) {
-            if (tc.needs_stdlib_flag)
-                cmd += " -DCMAKE_CXX_FLAGS=\"-stdlib=libc++\"";
-            auto linker_flags = std::format("-L{0} -Wl,-rpath,{0} -lc++ -lc++abi", tc.lib_dir);
-            if (tc.needs_stdlib_flag)
-                linker_flags += " -stdlib=libc++";
-            cmd += std::format(" -DCMAKE_EXE_LINKER_FLAGS=\"{}\"", linker_flags);
-        } else if (tc.needs_stdlib_flag) {
-            cmd += " -DCMAKE_CXX_FLAGS=\"-stdlib=libc++\"";
-        }
-    }
     return cmd;
 }
 
