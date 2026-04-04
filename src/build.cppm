@@ -1,5 +1,6 @@
 export module build;
 import std;
+import toml;
 import manifest;
 import toolchain;
 import fetch;
@@ -108,6 +109,36 @@ std::string read_file(std::filesystem::path const& path) {
     if (!file)
         return {};
     return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+}
+
+void ensure_intron_tools() {
+    if (!std::filesystem::exists(".intron.toml"))
+        return;
+
+    // check if intron is available
+    if (std::system("intron help > /dev/null 2>&1") != 0)
+        return;
+
+    auto table = toml::parse_file(".intron.toml");
+    if (!table.contains("toolchain"))
+        return;
+
+    auto home = std::getenv("HOME");
+    if (!home)
+        return;
+    auto intron_root = std::filesystem::path{home} / ".intron" / "toolchains";
+
+    auto const& tools = table.at("toolchain").as_table();
+    for (auto const& [tool, ver_val] : tools) {
+        auto version = ver_val.as_string();
+        auto tool_path = intron_root / tool / version;
+        if (std::filesystem::exists(tool_path))
+            continue;
+        std::println("installing {} {}...", tool, version);
+        auto cmd = std::format("intron install {} {}", tool, version);
+        if (std::system(cmd.c_str()) != 0)
+            std::println(std::cerr, "warning: failed to install {} {}", tool, version);
+    }
 }
 
 } // namespace detail
@@ -294,6 +325,8 @@ bool sync_cmake(std::string const& content, std::filesystem::path const& output_
 }
 
 int run(manifest::Manifest const& m, bool release = false) {
+    detail::ensure_intron_tools();
+
     auto project_root = std::filesystem::current_path();
     auto exon_dir = project_root / ".exon";
     auto profile = release ? "release" : "debug";
@@ -326,6 +359,8 @@ int run(manifest::Manifest const& m, bool release = false) {
 }
 
 int run_test(manifest::Manifest const& m, bool release = false) {
+    detail::ensure_intron_tools();
+
     auto project_root = std::filesystem::current_path();
     auto tests_dir = project_root / "tests";
 

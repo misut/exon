@@ -23,43 +23,32 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: brew install llvm ninja
-
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Install intron
         run: |
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 20
-          sudo apt-get install -y libc++-20-dev libc++abi-20-dev ninja-build
-          pip install cmake --break-system-packages
+          curl -fsSL https://raw.githubusercontent.com/misut/intron/main/install.sh | sh
+          echo "$HOME/.intron/bin" >> $GITHUB_PATH
+
+      - name: Install toolchains
+        run: |
+          intron install llvm 22.1.2
+          intron install cmake 4.3.1
+          intron install ninja 1.13.2
 
       - name: Bootstrap and release build
         run: |
+          eval "$(intron env)"
+          LLVM_ROOT="$HOME/.intron/toolchains/llvm/22.1.2"
           git clone https://github.com/misut/tomlcpp.git /tmp/tomlcpp
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            LLVM_PREFIX=$(brew --prefix llvm)
-            CXX="$LLVM_PREFIX/bin/clang++"
-            MODULES_JSON="$LLVM_PREFIX/lib/c++/libc++.modules.json"
-            LINKER_FLAGS="-L$LLVM_PREFIX/lib/c++ -lc++ -lc++abi -L$LLVM_PREFIX/lib/unwind -lunwind"
-          else
-            CXX=clang++-20
-            MODULES_JSON=/usr/lib/llvm-20/lib/libc++.modules.json
-            CXX_FLAGS="-stdlib=libc++"
-            LINKER_FLAGS="-stdlib=libc++ -lc++abi"
+          CMAKE_ARGS="-Wno-dev -B build -S .github/cmake -G Ninja"
+          CMAKE_ARGS="$CMAKE_ARGS -DTOMLCPP_DIR=/tmp/tomlcpp"
+          CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CXX_COMPILER=$LLVM_ROOT/bin/clang++"
+          CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CXX_STDLIB_MODULES_JSON=$LLVM_ROOT/lib/libc++.modules.json"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CXX_FLAGS=-stdlib=libc++"
+            CMAKE_ARGS="$CMAKE_ARGS \"-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -lc++abi\""
           fi
-          cmake -Wno-dev -B build -S .github/cmake -G Ninja \
-            -DTOMLCPP_DIR=/tmp/tomlcpp \
-            -DCMAKE_CXX_COMPILER="$CXX" \
-            -DCMAKE_CXX_STDLIB_MODULES_JSON="$MODULES_JSON" \
-            -DCMAKE_CXX_FLAGS="${CXX_FLAGS:-}" \
-            -DCMAKE_EXE_LINKER_FLAGS="$LINKER_FLAGS"
+          eval cmake $CMAKE_ARGS
           cmake --build build
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            export PATH="$(brew --prefix llvm)/bin:$PATH"
-          else
-            export PATH="/usr/lib/llvm-20/bin:$PATH"
-          fi
           ./build/exon build --release
 
       - name: Package
