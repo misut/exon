@@ -143,14 +143,20 @@ void test_dev_deps_excluded_from_main() {
         .is_dev = true,
     }};
 
-    // without tests: dev dep library is built but NOT linked to main modules
+    // without tests: dev dep should NOT be built at all
     auto cmake = build::generate_cmake(m, proj.root, deps, make_tc(), false);
-    check(cmake.contains("add_library(testlib)"), "dev dep is built");
+    check(!cmake.contains("add_library(testlib)"), "dev dep not built without tests");
+    check(!cmake.contains("testlib"), "no testlib reference without tests");
 
+    // with tests: dev dep should be built and linked to test targets
+    proj.write("tests/test_app.cpp", "int main() {}");
+    auto cmake_test = build::generate_cmake(m, proj.root, deps, make_tc(), true);
+    check(cmake_test.contains("add_library(testlib)"), "dev dep built with tests");
     // modules lib should NOT link to dev dep
-    // find the target_link_libraries for app-modules
-    auto modules_link_pos = cmake.find("target_link_libraries(app-modules");
+    auto modules_link_pos = cmake_test.find("target_link_libraries(app-modules");
     check(modules_link_pos == std::string::npos, "modules should not link dev dep");
+    // test target should link dev dep
+    check(cmake_test.contains("target_link_libraries(test-test_app PRIVATE"), "test links");
 
     std::filesystem::remove_all(dep_path);
 }
