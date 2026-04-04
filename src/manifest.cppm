@@ -13,7 +13,7 @@ struct Manifest {
     std::string type = "bin"; // "bin" or "lib"
     int standard = 23;
     std::map<std::string, std::string> dependencies;
-    std::vector<std::string> workspace_members; // workspace 멤버 경로
+    std::vector<std::string> workspace_members; // workspace member paths
 };
 
 bool is_workspace(Manifest const& m) { return !m.workspace_members.empty(); }

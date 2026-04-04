@@ -82,7 +82,7 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
         file << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
     }
 
-    // 의존성을 static library로 빌드
+    // build dependencies as static libraries
     for (auto const& dep : deps) {
         auto dep_src = dep.path / "src";
         auto dep_sf = detail::collect_sources(dep_src);
@@ -134,14 +134,14 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
         file << "\n";
     }
 
-    // 메인 프로젝트 소스
+    // main project sources
     auto src_dir = project_root / "src";
     auto sf = detail::collect_sources(src_dir);
     if (sf.cpp.empty() && sf.cppm.empty()) {
         throw std::runtime_error("no source files found in src/");
     }
 
-    // cppm이 있으면 공유 모듈 라이브러리 생성 (메인 + 테스트가 공유)
+    // create shared module library if cppm files exist (shared between main and tests)
     auto modules_lib = std::format("{}-modules", m.name);
     bool has_modules = !sf.cppm.empty();
 
