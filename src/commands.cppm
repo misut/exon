@@ -8,7 +8,7 @@ import templates;
 
 export namespace commands {
 
-constexpr auto version = "0.1.0";
+constexpr auto version = "0.2.1";
 
 constexpr auto usage_text = R"(usage: exon <command> [args]
 
