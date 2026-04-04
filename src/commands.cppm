@@ -17,6 +17,7 @@ commands:
     info                   show package information
     build [--release]      build the project
     run [--release] [args] build and run the project
+    test [--release]       build and run tests
     clean                  remove build artifacts
     add <pkg> <ver>        add a dependency
     remove <pkg>           remove a dependency
@@ -135,6 +136,21 @@ int cmd_run(int argc, char* argv[]) {
         }
         std::println("running {}...\n", m.name);
         return std::system(run_cmd.c_str());
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
+}
+
+int cmd_test(int argc, char* argv[]) {
+    try {
+        auto m = load_manifest();
+        if (m.name.empty()) {
+            std::println(std::cerr, "error: package name is required in exon.toml");
+            return 1;
+        }
+        bool release = (argc >= 3 && std::string_view{argv[2]} == "--release");
+        return build::run_test(m, release);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
