@@ -22,8 +22,8 @@ curl -fsSL https://raw.githubusercontent.com/misut/exon/main/install.sh | sh
 
 ```sh
 mise plugin add exon https://github.com/misut/mise-exon.git
-mise install exon@0.7.0
-mise use exon@0.7.0
+mise install exon@0.9.0
+mise use exon@0.9.0
 ```
 
 ### Build from source
@@ -65,12 +65,14 @@ hello, world!
 | `exon init [--lib]` | Create a new project |
 | `exon info` | Show package information |
 | `exon build [--release]` | Build the project |
+| `exon check [--release]` | Check syntax without linking |
 | `exon run [--release]` | Build and run |
 | `exon test [--release]` | Build and run tests |
 | `exon clean` | Remove build artifacts |
-| `exon add <pkg> <ver>` | Add a dependency |
+| `exon add [--dev] <pkg> <ver>` | Add a dependency |
 | `exon remove <pkg>` | Remove a dependency |
 | `exon update` | Update dependencies |
+| `exon sync` | Sync CMakeLists.txt with exon.toml |
 | `exon fmt` | Format source files |
 
 ## exon.toml
@@ -87,6 +89,15 @@ standard = 23
 
 [dependencies]
 "github.com/user/repo" = "0.1.0"
+
+[dev-dependencies]
+"github.com/user/testlib" = "0.1.0"
+
+[defines]
+MY_FLAG = "value"
+
+[defines.debug]
+DEBUG_MODE = "1"
 ```
 
 ## Features
@@ -97,6 +108,10 @@ standard = 23
 - **Lock file** — `exon.lock` for reproducible builds
 - **Incremental builds** — CMake configuration is cached and skipped when unchanged
 - **Build profiles** — debug (default) and release (`--release`, statically links libc++ for portable binaries)
+- **Dev dependencies** — `[dev-dependencies]` for test-only packages, excluded from builds
+- **Compile definitions** — built-in (`EXON_PKG_NAME`, `EXON_PKG_VERSION`) and user-defined via `[defines]`
+- **CMakeLists.txt sync** — `exon sync` generates a portable CMakeLists.txt for plain cmake builds
+- **Syntax check** — `exon check` compiles modules without linking for fast feedback
 - **Git-based registry** — fetches packages from GitHub repositories
 - **Self-hosting** — exon builds itself with `exon build`
 - **Cross-platform** — macOS (ARM64) and Linux (x86_64, aarch64)
