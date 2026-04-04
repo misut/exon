@@ -22,8 +22,8 @@ curl -fsSL https://raw.githubusercontent.com/misut/exon/main/install.sh | sh
 
 ```sh
 mise plugin add exon https://github.com/misut/mise-exon.git
-mise install exon@0.4.0
-mise use exon@0.4.0
+mise install exon@0.5.0
+mise use exon@0.5.0
 ```
 
 ### Build from source
@@ -115,6 +115,7 @@ standard = 23
 - **C++20 modules** — `.cppm` files in `src/` are handled as module sources
 - **Transitive dependencies** — recursive resolution with cycle detection
 - **Lock file** — `exon.lock` for reproducible builds
+- **Incremental builds** — CMake configuration is cached and skipped when unchanged
 - **Build profiles** — debug (default) and release (`--release`)
 - **Git-based registry** — fetches packages from GitHub repositories
 - **Self-hosting** — exon builds itself with `exon build`
