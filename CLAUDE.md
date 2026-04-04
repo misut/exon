@@ -53,6 +53,10 @@ DEBUG_MODE = "1"
 NDEBUG = "1"
 ```
 
+### CMakeLists.txt Sync
+
+`exon sync` generates a portable `CMakeLists.txt` in the project root, allowing plain cmake builds without exon. Uses relative paths and FetchContent for dependencies. Also auto-synced on `exon build`, `check`, and `test`.
+
 ## Related Projects
 
 - **intron**: Toolchain manager (like rust-toolchain). https://github.com/misut/intron
