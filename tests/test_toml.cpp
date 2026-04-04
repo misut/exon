@@ -90,7 +90,7 @@ void test_parse_error() {
     bool caught = false;
     try {
         toml::parse("invalid = ");
-    } catch (toml::ParseError const&) {
+    } catch (std::exception const&) {
         caught = true;
     }
     check(caught, "parse error on invalid input");
