@@ -56,34 +56,34 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
     return cmd;
 }
 
+std::string read_file(std::filesystem::path const& path) {
+    auto file = std::ifstream(path);
+    if (!file)
+        return {};
+    return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+}
+
 } // namespace detail
 
-void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& project_root,
-                    std::filesystem::path const& output_dir,
-                    std::vector<fetch::FetchedDep> const& deps, toolchain::Toolchain const& tc,
-                    bool with_tests = false) {
-    std::filesystem::create_directories(output_dir);
-
-    auto cmake_path = output_dir / "CMakeLists.txt";
-    auto file = std::ofstream(cmake_path);
-    if (!file) {
-        throw std::runtime_error(std::format("failed to create {}", cmake_path.string()));
-    }
+std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path const& project_root,
+                           std::vector<fetch::FetchedDep> const& deps,
+                           toolchain::Toolchain const& tc, bool with_tests = false) {
+    std::ostringstream out;
 
     bool import_std = (m.standard >= 23 && !tc.stdlib_modules_json.empty());
 
     if (import_std) {
-        file << "cmake_minimum_required(VERSION 3.30)\n\n";
-        file << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
-        file << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n";
-        file << "set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD \"451f2fe2-a8a2-47c3-bc32-94786d8fc91b\")\n";
-        file << "set(CMAKE_CXX_MODULE_STD ON)\n";
-        file << std::format("project({} LANGUAGES CXX)\n\n", m.name);
+        out << "cmake_minimum_required(VERSION 3.30)\n\n";
+        out << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
+        out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n";
+        out << "set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD \"451f2fe2-a8a2-47c3-bc32-94786d8fc91b\")\n";
+        out << "set(CMAKE_CXX_MODULE_STD ON)\n";
+        out << std::format("project({} LANGUAGES CXX)\n\n", m.name);
     } else {
-        file << "cmake_minimum_required(VERSION 3.20)\n";
-        file << std::format("project({} LANGUAGES CXX)\n\n", m.name);
-        file << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
-        file << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
+        out << "cmake_minimum_required(VERSION 3.20)\n";
+        out << std::format("project({} LANGUAGES CXX)\n\n", m.name);
+        out << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
+        out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
     }
 
     // build dependencies as static libraries
@@ -94,48 +94,48 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
         if (dep_sf.cpp.empty() && dep_sf.cppm.empty()) {
             auto dep_cmake = dep.path / "CMakeLists.txt";
             if (std::filesystem::exists(dep_cmake)) {
-                file << std::format("add_subdirectory({} {})\n\n",
-                                    std::filesystem::canonical(dep.path).string(), dep.name);
+                out << std::format("add_subdirectory({} {})\n\n",
+                                   std::filesystem::canonical(dep.path).string(), dep.name);
                 continue;
             }
             throw std::runtime_error(std::format(
                 "dependency '{}' has no source files in src/ and no CMakeLists.txt", dep.name));
         }
 
-        file << std::format("add_library({})\n", dep.name);
+        out << std::format("add_library({})\n", dep.name);
         if (!dep_sf.cpp.empty()) {
-            file << std::format("target_sources({} PRIVATE", dep.name);
+            out << std::format("target_sources({} PRIVATE", dep.name);
             for (auto const& src : dep_sf.cpp)
-                file << std::format("\n    {}", src);
-            file << "\n)\n";
+                out << std::format("\n    {}", src);
+            out << "\n)\n";
         }
         if (!dep_sf.cppm.empty()) {
-            file << std::format(
+            out << std::format(
                 "target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS / FILES", dep.name);
             for (auto const& src : dep_sf.cppm)
-                file << std::format("\n    {}", src);
-            file << "\n)\n";
+                out << std::format("\n    {}", src);
+            out << "\n)\n";
         }
 
         auto include_dir = dep.path / "include";
         if (std::filesystem::exists(include_dir)) {
-            file << std::format("target_include_directories({} PUBLIC {})\n", dep.name,
-                                std::filesystem::canonical(include_dir).string());
+            out << std::format("target_include_directories({} PUBLIC {})\n", dep.name,
+                               std::filesystem::canonical(include_dir).string());
         }
 
         auto dep_manifest_path = dep.path / "exon.toml";
         if (std::filesystem::exists(dep_manifest_path)) {
             auto dep_m = manifest::load(dep_manifest_path.string());
             if (!dep_m.dependencies.empty()) {
-                file << std::format("target_link_libraries({} PUBLIC", dep.name);
+                out << std::format("target_link_libraries({} PUBLIC", dep.name);
                 for (auto const& [sub_key, sub_ver] : dep_m.dependencies) {
                     auto sub_name = sub_key.substr(sub_key.rfind('/') + 1);
-                    file << std::format("\n    {}", sub_name);
+                    out << std::format("\n    {}", sub_name);
                 }
-                file << "\n)\n";
+                out << "\n)\n";
             }
         }
-        file << "\n";
+        out << "\n";
     }
 
     // main project sources
@@ -150,56 +150,56 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
     bool has_modules = !sf.cppm.empty();
 
     if (has_modules) {
-        file << std::format("add_library({})\n", modules_lib);
-        file << std::format(
+        out << std::format("add_library({})\n", modules_lib);
+        out << std::format(
             "target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS / FILES", modules_lib);
         for (auto const& src : sf.cppm)
-            file << std::format("\n    {}", src);
-        file << "\n)\n";
+            out << std::format("\n    {}", src);
+        out << "\n)\n";
 
         if (!deps.empty()) {
-            file << std::format("target_link_libraries({} PUBLIC", modules_lib);
+            out << std::format("target_link_libraries({} PUBLIC", modules_lib);
             for (auto const& dep : deps)
-                file << std::format("\n    {}", dep.name);
-            file << "\n)\n";
+                out << std::format("\n    {}", dep.name);
+            out << "\n)\n";
         }
 
         if (m.type == "lib") {
             auto include_dir = project_root / "include";
             if (std::filesystem::exists(include_dir)) {
-                file << std::format("target_include_directories({} PUBLIC {})\n", modules_lib,
-                                    std::filesystem::canonical(include_dir).string());
+                out << std::format("target_include_directories({} PUBLIC {})\n", modules_lib,
+                                   std::filesystem::canonical(include_dir).string());
             }
         }
-        file << "\n";
+        out << "\n";
     }
 
     // main target
     // lib with only .cppm files: alias the modules library
     if (m.type == "lib" && has_modules && sf.cpp.empty()) {
-        file << std::format("add_library({} ALIAS {})\n", m.name, modules_lib);
+        out << std::format("add_library({} ALIAS {})\n", m.name, modules_lib);
     } else {
         if (m.type == "lib") {
-            file << std::format("add_library({})\n", m.name);
+            out << std::format("add_library({})\n", m.name);
         } else {
-            file << std::format("add_executable({})\n", m.name);
+            out << std::format("add_executable({})\n", m.name);
         }
         if (!sf.cpp.empty()) {
-            file << std::format("target_sources({} PRIVATE", m.name);
+            out << std::format("target_sources({} PRIVATE", m.name);
             for (auto const& src : sf.cpp)
-                file << std::format("\n    {}", src);
-            file << "\n)\n";
+                out << std::format("\n    {}", src);
+            out << "\n)\n";
         }
 
         if (has_modules) {
             auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
-            file << std::format("target_link_libraries({} {} {})\n", m.name, link_type, modules_lib);
+            out << std::format("target_link_libraries({} {} {})\n", m.name, link_type, modules_lib);
         } else if (!deps.empty()) {
             auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
-            file << std::format("target_link_libraries({} {}", m.name, link_type);
+            out << std::format("target_link_libraries({} {}", m.name, link_type);
             for (auto const& dep : deps)
-                file << std::format("\n    {}", dep.name);
-            file << "\n)\n";
+                out << std::format("\n    {}", dep.name);
+            out << "\n)\n";
         }
     }
 
@@ -212,20 +212,38 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
             auto test_stem = std::filesystem::path{test_cpp}.stem().string();
             auto test_name = std::format("test-{}", test_stem);
 
-            file << std::format("\nadd_executable({})\n", test_name);
-            file << std::format("target_sources({} PRIVATE\n    {}\n)\n", test_name, test_cpp);
+            out << std::format("\nadd_executable({})\n", test_name);
+            out << std::format("target_sources({} PRIVATE\n    {}\n)\n", test_name, test_cpp);
 
             if (has_modules) {
-                file << std::format("target_link_libraries({} PRIVATE {})\n", test_name,
-                                    modules_lib);
+                out << std::format("target_link_libraries({} PRIVATE {})\n", test_name,
+                                   modules_lib);
             } else if (!deps.empty()) {
-                file << std::format("target_link_libraries({} PRIVATE", test_name);
+                out << std::format("target_link_libraries({} PRIVATE", test_name);
                 for (auto const& dep : deps)
-                    file << std::format("\n    {}", dep.name);
-                file << "\n)\n";
+                    out << std::format("\n    {}", dep.name);
+                out << "\n)\n";
             }
         }
     }
+
+    return out.str();
+}
+
+// compare generated content with existing lock file, write only if changed
+bool sync_cmake(std::string const& content, std::filesystem::path const& output_dir) {
+    std::filesystem::create_directories(output_dir);
+    auto cmake_path = output_dir / "CMakeLists.txt";
+
+    auto existing = detail::read_file(cmake_path);
+    if (existing == content)
+        return false;
+
+    auto file = std::ofstream(cmake_path);
+    if (!file)
+        throw std::runtime_error(std::format("failed to create {}", cmake_path.string()));
+    file << content;
+    return true;
 }
 
 int run(manifest::Manifest const& m, bool release = false) {
@@ -239,16 +257,20 @@ int run(manifest::Manifest const& m, bool release = false) {
     auto lock_path = (project_root / "exon.lock").string();
     auto fetch_result = fetch::fetch_all(m, lock_path);
 
-    generate_cmake(m, project_root, exon_dir, fetch_result.deps, tc);
+    auto content = generate_cmake(m, project_root, fetch_result.deps, tc);
+    bool changed = sync_cmake(content, exon_dir);
+    bool configured = std::filesystem::exists(build_dir / "build.ninja");
 
-    std::println("configuring...");
-    int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release).c_str());
-    if (rc != 0)
-        return rc;
+    if (changed || !configured) {
+        std::println("configuring...");
+        int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release).c_str());
+        if (rc != 0)
+            return rc;
+    }
 
     auto build_cmd = std::format("{} --build {}", tc.cmake, build_dir.string());
     std::println("building...");
-    rc = std::system(build_cmd.c_str());
+    int rc = std::system(build_cmd.c_str());
     if (rc != 0)
         return rc;
 
@@ -280,12 +302,16 @@ int run_test(manifest::Manifest const& m, bool release = false) {
     auto lock_path = (project_root / "exon.lock").string();
     auto fetch_result = fetch::fetch_all(m, lock_path);
 
-    generate_cmake(m, project_root, exon_dir, fetch_result.deps, tc, true);
+    auto content = generate_cmake(m, project_root, fetch_result.deps, tc, true);
+    bool changed = sync_cmake(content, exon_dir);
+    bool configured = std::filesystem::exists(build_dir / "build.ninja");
 
-    std::println("configuring...");
-    int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release).c_str());
-    if (rc != 0)
-        return rc;
+    if (changed || !configured) {
+        std::println("configuring...");
+        int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release).c_str());
+        if (rc != 0)
+            return rc;
+    }
 
     // collect test names
     std::vector<std::string> test_names;
@@ -299,7 +325,7 @@ int run_test(manifest::Manifest const& m, bool release = false) {
     for (auto const& name : test_names) {
         auto build_cmd =
             std::format("{} --build {} --target {}", tc.cmake, build_dir.string(), name);
-        rc = std::system(build_cmd.c_str());
+        int rc = std::system(build_cmd.c_str());
         if (rc != 0)
             return rc;
     }
@@ -310,7 +336,7 @@ int run_test(manifest::Manifest const& m, bool release = false) {
     int failed = 0;
     for (auto const& name : test_names) {
         auto exe = build_dir / name;
-        rc = std::system(exe.string().c_str());
+        int rc = std::system(exe.string().c_str());
         if (rc == 0) {
             std::println("  {} ... ok", name);
             ++passed;
