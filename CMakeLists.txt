@@ -7,7 +7,13 @@ set(CMAKE_CXX_MODULE_STD ON)
 
 project(exon LANGUAGES CXX)
 
-add_subdirectory(tomlcpp)
+include(FetchContent)
+FetchContent_Declare(
+    tomlcpp
+    GIT_REPOSITORY git@github.com:misut/tomlcpp.git
+    GIT_TAG v0.2.0
+)
+FetchContent_MakeAvailable(tomlcpp)
 
 add_library(manifest)
 target_sources(manifest
