@@ -106,9 +106,6 @@ void detect_clang(Toolchain& tc) {
             auto clangpp = std::filesystem::path{sys_llvm} / "bin" / "clang++";
             if (std::filesystem::exists(clangpp)) {
                 tc.cxx_compiler = std::filesystem::canonical(clangpp).string();
-#if defined(__linux__)
-                tc.needs_stdlib_flag = true;
-#endif
             }
         }
     }
@@ -124,6 +121,11 @@ void detect_clang(Toolchain& tc) {
         return;
 
     auto root = std::filesystem::path{tc.cxx_compiler}.parent_path().parent_path();
+
+#if defined(__linux__)
+    // Linux clang always needs -stdlib=libc++ (defaults to libstdc++)
+    tc.needs_stdlib_flag = true;
+#endif
 
     // if clang config has -lc++, clang handles linker flags
     auto etc_dir = root / "etc" / "clang";
@@ -143,8 +145,10 @@ void detect_clang(Toolchain& tc) {
 
     // search for modules json
     auto candidates = {
-        root / "lib" / "c++" / "libc++.modules.json", // Homebrew
-        root / "lib" / "libc++.modules.json",          // LLVM official (intron)
+        root / "lib" / "c++" / "libc++.modules.json",                      // Homebrew
+        root / "lib" / "libc++.modules.json",                               // LLVM official
+        root / "lib" / "x86_64-unknown-linux-gnu" / "libc++.modules.json",  // Linux x86_64
+        root / "lib" / "aarch64-unknown-linux-gnu" / "libc++.modules.json", // Linux ARM64
     };
     for (auto const& path : candidates) {
         if (std::filesystem::exists(path)) {
