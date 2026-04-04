@@ -1,0 +1,80 @@
+import std;
+import lock;
+
+int failures = 0;
+
+void check(bool cond, std::string_view msg) {
+    if (!cond) {
+        std::println(std::cerr, "  FAIL: {}", msg);
+        ++failures;
+    }
+}
+
+void test_empty_lockfile() {
+    lock::LockFile lf;
+    check(lf.packages.empty(), "empty lockfile has no packages");
+    check(!lf.contains("foo", "1.0.0"), "empty lockfile contains nothing");
+    check(lf.find("foo", "1.0.0") == nullptr, "empty lockfile find returns nullptr");
+}
+
+void test_add_or_update() {
+    lock::LockFile lf;
+
+    lf.add_or_update({.name = "pkg-a", .version = "1.0.0", .commit = "aaa"});
+    check(lf.packages.size() == 1, "one package after add");
+    check(lf.contains("pkg-a", "1.0.0"), "contains pkg-a");
+    check(lf.find("pkg-a", "1.0.0")->commit == "aaa", "commit is aaa");
+
+    // update existing
+    lf.add_or_update({.name = "pkg-a", .version = "1.0.0", .commit = "bbb"});
+    check(lf.packages.size() == 1, "still one package after update");
+    check(lf.find("pkg-a", "1.0.0")->commit == "bbb", "commit updated to bbb");
+
+    // add different version
+    lf.add_or_update({.name = "pkg-a", .version = "2.0.0", .commit = "ccc"});
+    check(lf.packages.size() == 2, "two packages for different versions");
+    check(lf.find("pkg-a", "2.0.0")->commit == "ccc", "v2 commit is ccc");
+
+    // add different package
+    lf.add_or_update({.name = "pkg-b", .version = "0.1.0", .commit = "ddd"});
+    check(lf.packages.size() == 3, "three packages total");
+}
+
+void test_save_and_load() {
+    auto tmp = std::filesystem::temp_directory_path() / "exon_test_lock.toml";
+
+    // save
+    lock::LockFile lf;
+    lf.add_or_update({.name = "github.com/user/repo", .version = "1.0.0", .commit = "abc123"});
+    lf.add_or_update({.name = "github.com/other/lib", .version = "0.2.0", .commit = "def456"});
+    lock::save(lf, tmp.string());
+
+    // load back
+    auto loaded = lock::load(tmp.string());
+    check(loaded.packages.size() == 2, "loaded 2 packages");
+    check(loaded.contains("github.com/user/repo", "1.0.0"), "loaded contains repo");
+    check(loaded.find("github.com/user/repo", "1.0.0")->commit == "abc123", "loaded commit");
+    check(loaded.contains("github.com/other/lib", "0.2.0"), "loaded contains lib");
+    check(loaded.find("github.com/other/lib", "0.2.0")->commit == "def456", "loaded lib commit");
+
+    std::filesystem::remove(tmp);
+}
+
+void test_load_nonexistent() {
+    auto lf = lock::load("/tmp/exon_nonexistent_lock.toml");
+    check(lf.packages.empty(), "loading nonexistent file returns empty");
+}
+
+int main() {
+    test_empty_lockfile();
+    test_add_or_update();
+    test_save_and_load();
+    test_load_nonexistent();
+
+    if (failures > 0) {
+        std::println("{} test(s) failed", failures);
+        return 1;
+    }
+    std::println("test_lock: all passed");
+    return 0;
+}

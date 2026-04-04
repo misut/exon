@@ -174,8 +174,8 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             regular_deps.push_back(&dep);
     }
 
-    // build dependencies as static libraries
-    for (auto const& dep : deps) {
+    // emit dependency as static library
+    auto emit_dep = [&](fetch::FetchedDep const& dep) {
         auto dep_src = dep.path / "src";
         auto dep_sf = detail::collect_sources(dep_src);
 
@@ -184,7 +184,7 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             if (std::filesystem::exists(dep_cmake)) {
                 out << std::format("add_subdirectory({} {})\n\n",
                                    std::filesystem::canonical(dep.path).string(), dep.name);
-                continue;
+                return;
             }
             throw std::runtime_error(std::format(
                 "dependency '{}' has no source files in src/ and no CMakeLists.txt", dep.name));
@@ -224,6 +224,16 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             }
         }
         out << "\n";
+    };
+
+    // build regular dependencies
+    for (auto const* dep : regular_deps)
+        emit_dep(*dep);
+
+    // build dev dependencies (test-only)
+    if (with_tests) {
+        for (auto const* dep : dev_deps)
+            emit_dep(*dep);
     }
 
     // main project sources
@@ -373,21 +383,38 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
     }
 
-    // dependencies via FetchContent
-    if (!deps.empty()) {
-        out << "include(FetchContent)\n";
-        for (auto const& dep : deps) {
-            auto git_url = std::format("https://{}.git", dep.key);
-            auto tag = dep.version.starts_with("v") ? dep.version
-                                                     : std::format("v{}", dep.version);
-            out << std::format("FetchContent_Declare({}\n", dep.name);
+    // separate deps
+    std::vector<fetch::FetchedDep const*> p_regular, p_dev;
+    for (auto const& dep : deps) {
+        if (dep.is_dev)
+            p_dev.push_back(&dep);
+        else
+            p_regular.push_back(&dep);
+    }
+
+    // dependencies via FetchContent (regular only for main build)
+    auto emit_fetch = [&](std::vector<fetch::FetchedDep const*> const& dep_list) {
+        for (auto const* dep : dep_list) {
+            auto git_url = std::format("https://{}.git", dep->key);
+            auto tag = dep->version.starts_with("v") ? dep->version
+                                                      : std::format("v{}", dep->version);
+            out << std::format("FetchContent_Declare({}\n", dep->name);
             out << std::format("    GIT_REPOSITORY {}\n", git_url);
             out << std::format("    GIT_TAG {}\n", tag);
             out << "    GIT_SHALLOW ON\n";
             out << ")\n";
         }
-        for (auto const& dep : deps)
-            out << std::format("FetchContent_MakeAvailable({})\n", dep.name);
+        for (auto const* dep : dep_list)
+            out << std::format("FetchContent_MakeAvailable({})\n", dep->name);
+    };
+
+    if (!p_regular.empty() || !p_dev.empty()) {
+        out << "include(FetchContent)\n";
+        emit_fetch(p_regular);
+        if (!p_dev.empty()) {
+            out << "\n# dev-dependencies (test-only)\n";
+            emit_fetch(p_dev);
+        }
         out << "\n";
     }
 
@@ -416,10 +443,10 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             out << std::format("\n    {}", to_rel(src));
         out << "\n)\n";
 
-        if (!deps.empty()) {
+        if (!p_regular.empty()) {
             out << std::format("target_link_libraries({} PUBLIC", modules_lib);
-            for (auto const& dep : deps)
-                out << std::format("\n    {}", dep.name);
+            for (auto const* dep : p_regular)
+                out << std::format("\n    {}", dep->name);
             out << "\n)\n";
         }
 
@@ -451,11 +478,11 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         if (has_modules) {
             auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
             out << std::format("target_link_libraries({} {} {})\n", m.name, link_type, modules_lib);
-        } else if (!deps.empty()) {
+        } else if (!p_regular.empty()) {
             auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
             out << std::format("target_link_libraries({} {}", m.name, link_type);
-            for (auto const& dep : deps)
-                out << std::format("\n    {}", dep.name);
+            for (auto const* dep : p_regular)
+                out << std::format("\n    {}", dep->name);
             out << "\n)\n";
         }
     }
@@ -484,12 +511,17 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             out << std::format("\nadd_executable({})\n", test_name);
             out << std::format("target_sources({} PRIVATE\n    {}\n)\n", test_name, to_rel(test_cpp));
 
-            if (has_modules)
-                out << std::format("target_link_libraries({} PRIVATE {})\n", test_name, modules_lib);
-            else if (!deps.empty()) {
+            if (has_modules || !p_dev.empty()) {
                 out << std::format("target_link_libraries({} PRIVATE", test_name);
-                for (auto const& dep : deps)
-                    out << std::format("\n    {}", dep.name);
+                if (has_modules)
+                    out << std::format("\n    {}", modules_lib);
+                for (auto const* dep : p_dev)
+                    out << std::format("\n    {}", dep->name);
+                out << "\n)\n";
+            } else if (!p_regular.empty()) {
+                out << std::format("target_link_libraries({} PRIVATE", test_name);
+                for (auto const* dep : p_regular)
+                    out << std::format("\n    {}", dep->name);
                 out << "\n)\n";
             }
         }
