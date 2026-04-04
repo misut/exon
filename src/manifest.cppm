@@ -13,7 +13,10 @@ struct Manifest {
     std::string type = "bin"; // "bin" or "lib"
     int standard = 23;
     std::map<std::string, std::string> dependencies;
+    std::vector<std::string> workspace_members; // workspace 멤버 경로
 };
+
+bool is_workspace(Manifest const& m) { return !m.workspace_members.empty(); }
 
 Manifest from_toml(toml::Table const& table) {
     Manifest m;
@@ -36,6 +39,15 @@ Manifest from_toml(toml::Table const& table) {
         if (pkg.contains("authors")) {
             for (auto const& a : pkg.at("authors").as_array()) {
                 m.authors.push_back(a.as_string());
+            }
+        }
+    }
+
+    if (table.contains("workspace")) {
+        auto const& ws = table.at("workspace").as_table();
+        if (ws.contains("members")) {
+            for (auto const& member : ws.at("members").as_array()) {
+                m.workspace_members.push_back(member.as_string());
             }
         }
     }
