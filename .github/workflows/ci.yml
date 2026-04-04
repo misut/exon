@@ -14,18 +14,13 @@ jobs:
         include:
           - os: macos-14
             platform: aarch64-apple-darwin
-            build: exon
           - os: ubuntu-24.04
             platform: x86_64-linux-gnu
-            build: cmake
           - os: ubuntu-24.04-arm
             platform: aarch64-linux-gnu
-            build: cmake
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
@@ -38,52 +33,45 @@ jobs:
           sudo apt-get install -y libc++-20-dev libc++abi-20-dev ninja-build
           pip install cmake --break-system-packages
 
-      - name: Bootstrap build (macOS)
-        if: matrix.build == 'exon'
-        run: |
-          LLVM_PREFIX=$(brew --prefix llvm)
-          cmake -B build -G Ninja \
-            -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++" \
-            -DCMAKE_CXX_STDLIB_MODULES_JSON="$LLVM_PREFIX/lib/c++/libc++.modules.json" \
-            -DCMAKE_EXE_LINKER_FLAGS="-L$LLVM_PREFIX/lib/c++ -lc++ -lc++abi -L$LLVM_PREFIX/lib/unwind -lunwind"
-          cmake --build build
-
-      - name: Bootstrap build (Linux)
-        if: matrix.build == 'cmake'
+      - name: Bootstrap build
         run: |
           git clone https://github.com/misut/tomlcpp.git /tmp/tomlcpp
-          CXX=clang++-20
-          MODULES_JSON=/usr/lib/llvm-20/lib/libc++.modules.json
-          CXX_FLAGS="-stdlib=libc++"
-          LINKER_FLAGS="-stdlib=libc++ -lc++abi"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            LLVM_PREFIX=$(brew --prefix llvm)
+            CXX="$LLVM_PREFIX/bin/clang++"
+            MODULES_JSON="$LLVM_PREFIX/lib/c++/libc++.modules.json"
+            LINKER_FLAGS="-L$LLVM_PREFIX/lib/c++ -lc++ -lc++abi -L$LLVM_PREFIX/lib/unwind -lunwind"
+          else
+            CXX=clang++-20
+            MODULES_JSON=/usr/lib/llvm-20/lib/libc++.modules.json
+            CXX_FLAGS="-stdlib=libc++"
+            LINKER_FLAGS="-stdlib=libc++ -lc++abi"
+          fi
           cmake -B build -S .github/cmake -G Ninja \
             -DTOMLCPP_DIR=/tmp/tomlcpp \
             -DCMAKE_CXX_COMPILER="$CXX" \
             -DCMAKE_CXX_STDLIB_MODULES_JSON="$MODULES_JSON" \
-            -DCMAKE_CXX_FLAGS="$CXX_FLAGS" \
+            -DCMAKE_CXX_FLAGS="${CXX_FLAGS:-}" \
             -DCMAKE_EXE_LINKER_FLAGS="$LINKER_FLAGS"
           cmake --build build
 
       - name: Self-host build
         run: |
-          if [ "${{ matrix.build }}" = "exon" ]; then
+          if [ "$RUNNER_OS" = "macOS" ]; then
             export PATH="$(brew --prefix llvm)/bin:$PATH"
-            ./build/exon build
           else
-            mkdir -p .exon/debug && cp build/exon .exon/debug/exon
             export PATH="/usr/lib/llvm-20/bin:$PATH"
-            ./build/exon build
           fi
+          ./build/exon build
 
       - name: Self-host test
         run: |
-          if [ "${{ matrix.build }}" = "exon" ]; then
+          if [ "$RUNNER_OS" = "macOS" ]; then
             export PATH="$(brew --prefix llvm)/bin:$PATH"
-            ./build/exon test
           else
             export PATH="/usr/lib/llvm-20/bin:$PATH"
-            .exon/debug/exon test
           fi
+          .exon/debug/exon test
 
       - name: Verify
         run: .exon/debug/exon info
