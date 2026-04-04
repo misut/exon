@@ -32,11 +32,32 @@ SourceFiles collect_sources(std::filesystem::path const& src_dir) {
     return sf;
 }
 
+std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest const& m,
+                          std::filesystem::path const& build_dir,
+                          std::filesystem::path const& source_dir, bool release) {
+    auto build_type = release ? "Release" : "Debug";
+    auto cmd = std::format("{} -B {} -S {} -G Ninja -DCMAKE_BUILD_TYPE={}", tc.cmake,
+                           build_dir.string(), source_dir.string(), build_type);
+    if (!tc.cxx_compiler.empty())
+        cmd += std::format(" -DCMAKE_CXX_COMPILER={}", tc.cxx_compiler);
+    if (!tc.sysroot.empty())
+        cmd += std::format(" -DCMAKE_OSX_SYSROOT={}", tc.sysroot);
+    if (!tc.stdlib_modules_json.empty() && m.standard >= 23) {
+        cmd += std::format(" -DCMAKE_CXX_STDLIB_MODULES_JSON={}", tc.stdlib_modules_json);
+        if (!tc.has_clang_config && !tc.lib_dir.empty()) {
+            cmd += std::format(" -DCMAKE_EXE_LINKER_FLAGS=\"-L{0} -Wl,-rpath,{0} -lc++ -lc++abi\"",
+                               tc.lib_dir);
+        }
+    }
+    return cmd;
+}
+
 } // namespace detail
 
 void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& project_root,
                     std::filesystem::path const& output_dir,
-                    std::vector<fetch::FetchedDep> const& deps, toolchain::Toolchain const& tc) {
+                    std::vector<fetch::FetchedDep> const& deps, toolchain::Toolchain const& tc,
+                    bool with_tests = false) {
     std::filesystem::create_directories(output_dir);
 
     auto cmake_path = output_dir / "CMakeLists.txt";
@@ -67,7 +88,6 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
         auto dep_sf = detail::collect_sources(dep_src);
 
         if (dep_sf.cpp.empty() && dep_sf.cppm.empty()) {
-            // CMakeLists.txt가 있으면 add_subdirectory 사용
             auto dep_cmake = dep.path / "CMakeLists.txt";
             if (std::filesystem::exists(dep_cmake)) {
                 file << std::format("add_subdirectory({} {})\n\n",
@@ -86,8 +106,8 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
             file << "\n)\n";
         }
         if (!dep_sf.cppm.empty()) {
-            file << std::format("target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS / FILES",
-                                dep.name);
+            file << std::format(
+                "target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS / FILES", dep.name);
             for (auto const& src : dep_sf.cppm)
                 file << std::format("\n    {}", src);
             file << "\n)\n";
@@ -99,7 +119,6 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
                                 std::filesystem::canonical(include_dir).string());
         }
 
-        // transitive: dep의 exon.toml에서 하위 의존성 읽어 링크
         auto dep_manifest_path = dep.path / "exon.toml";
         if (std::filesystem::exists(dep_manifest_path)) {
             auto dep_m = manifest::load(dep_manifest_path.string());
@@ -134,13 +153,13 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
         file << "\n)\n";
     }
     if (!sf.cppm.empty()) {
-        file << std::format("target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS / FILES", m.name);
+        file << std::format(
+            "target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS / FILES", m.name);
         for (auto const& src : sf.cppm)
             file << std::format("\n    {}", src);
         file << "\n)\n";
     }
 
-    // 라이브러리인 경우 include 디렉토리 공개
     if (m.type == "lib") {
         auto include_dir = project_root / "include";
         if (std::filesystem::exists(include_dir)) {
@@ -149,7 +168,6 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
         }
     }
 
-    // 의존성 링크
     if (!deps.empty()) {
         auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
         file << std::format("target_link_libraries({} {}", m.name, link_type);
@@ -157,6 +175,37 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
             file << std::format("\n    {}", dep.name);
         }
         file << "\n)\n";
+    }
+
+    // テスト タゲット
+    if (with_tests) {
+        auto tests_dir = project_root / "tests";
+        auto test_sf = detail::collect_sources(tests_dir);
+
+        for (auto const& test_cpp : test_sf.cpp) {
+            auto test_stem =
+                std::filesystem::path{test_cpp}.stem().string(); // e.g. "test_registry"
+            auto test_name = std::format("test-{}", test_stem);
+
+            file << std::format("\nadd_executable({})\n", test_name);
+            file << std::format("target_sources({} PRIVATE\n    {}\n)\n", test_name, test_cpp);
+
+            if (!sf.cppm.empty()) {
+                file << std::format(
+                    "target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS / FILES",
+                    test_name);
+                for (auto const& src : sf.cppm)
+                    file << std::format("\n    {}", src);
+                file << "\n)\n";
+            }
+
+            if (!deps.empty()) {
+                file << std::format("target_link_libraries({} PRIVATE", test_name);
+                for (auto const& dep : deps)
+                    file << std::format("\n    {}", dep.name);
+                file << "\n)\n";
+            }
+        }
     }
 }
 
@@ -168,34 +217,13 @@ int run(manifest::Manifest const& m, bool release = false) {
 
     auto tc = toolchain::detect();
 
-    // 의존성 패칭 + lock 파일
     auto lock_path = (project_root / "exon.lock").string();
     auto fetch_result = fetch::fetch_all(m, lock_path);
 
     generate_cmake(m, project_root, exon_dir, fetch_result.deps, tc);
 
-    auto build_type = release ? "Release" : "Debug";
-    auto configure_cmd = std::format("{} -B {} -S {} -G Ninja -DCMAKE_BUILD_TYPE={}", tc.cmake,
-                                     build_dir.string(), exon_dir.string(), build_type);
-    if (!tc.cxx_compiler.empty()) {
-        configure_cmd += std::format(" -DCMAKE_CXX_COMPILER={}", tc.cxx_compiler);
-    }
-    if (!tc.sysroot.empty()) {
-        configure_cmd += std::format(" -DCMAKE_OSX_SYSROOT={}", tc.sysroot);
-    }
-    if (!tc.stdlib_modules_json.empty() && m.standard >= 23) {
-        configure_cmd +=
-            std::format(" -DCMAKE_CXX_STDLIB_MODULES_JSON={}", tc.stdlib_modules_json);
-        // clang config가 없으면 (Homebrew 등) linker flags를 직접 추가
-        if (!tc.has_clang_config && !tc.lib_dir.empty()) {
-            configure_cmd += std::format(
-                " -DCMAKE_EXE_LINKER_FLAGS=\"-L{0} -Wl,-rpath,{0} -lc++ -lc++abi\"",
-                tc.lib_dir);
-        }
-    }
-
     std::println("configuring...");
-    int rc = std::system(configure_cmd.c_str());
+    int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release).c_str());
     if (rc != 0)
         return rc;
 
@@ -206,6 +234,79 @@ int run(manifest::Manifest const& m, bool release = false) {
         return rc;
 
     std::println("build succeeded: .exon/{}/{}", profile, m.name);
+    return 0;
+}
+
+int run_test(manifest::Manifest const& m, bool release = false) {
+    auto project_root = std::filesystem::current_path();
+    auto tests_dir = project_root / "tests";
+
+    if (!std::filesystem::exists(tests_dir)) {
+        std::println(std::cerr, "error: tests/ directory not found");
+        return 1;
+    }
+
+    auto test_sf = detail::collect_sources(tests_dir);
+    if (test_sf.cpp.empty()) {
+        std::println(std::cerr, "error: no test files found in tests/");
+        return 1;
+    }
+
+    auto exon_dir = project_root / ".exon";
+    auto profile = release ? "release" : "debug";
+    auto build_dir = exon_dir / profile;
+
+    auto tc = toolchain::detect();
+
+    auto lock_path = (project_root / "exon.lock").string();
+    auto fetch_result = fetch::fetch_all(m, lock_path);
+
+    generate_cmake(m, project_root, exon_dir, fetch_result.deps, tc, true);
+
+    std::println("configuring...");
+    int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release).c_str());
+    if (rc != 0)
+        return rc;
+
+    // テスト名を収集
+    std::vector<std::string> test_names;
+    for (auto const& test_cpp : test_sf.cpp) {
+        test_names.push_back(
+            std::format("test-{}", std::filesystem::path{test_cpp}.stem().string()));
+    }
+
+    // ビルド
+    std::println("building tests...");
+    for (auto const& name : test_names) {
+        auto build_cmd =
+            std::format("{} --build {} --target {}", tc.cmake, build_dir.string(), name);
+        rc = std::system(build_cmd.c_str());
+        if (rc != 0)
+            return rc;
+    }
+
+    // 実行
+    std::println("running tests...\n");
+    int passed = 0;
+    int failed = 0;
+    for (auto const& name : test_names) {
+        auto exe = build_dir / name;
+        rc = std::system(exe.string().c_str());
+        if (rc == 0) {
+            std::println("  {} ... ok", name);
+            ++passed;
+        } else {
+            std::println("  {} ... FAILED", name);
+            ++failed;
+        }
+    }
+
+    std::println("");
+    if (failed > 0) {
+        std::println("{} passed, {} failed", passed, failed);
+        return 1;
+    }
+    std::println("all {} tests passed", passed);
     return 0;
 }
 
