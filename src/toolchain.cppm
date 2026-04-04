@@ -11,6 +11,7 @@ struct Toolchain {
     std::string lib_dir;             // libc++ library path (for linker)
     std::string sysroot;             // macOS SDK path
     bool has_clang_config = false;   // if clang config exists, linker flags are unnecessary
+    bool needs_stdlib_flag = false;  // if -stdlib=libc++ is needed (Linux)
 };
 
 namespace detail {
@@ -62,7 +63,32 @@ std::string find_intron_latest(std::string_view tool) {
     return (root / latest).string();
 }
 
-// detect clang++ from intron, fall back to PATH
+// find system LLVM root on Linux (e.g. /usr/lib/llvm-20)
+std::string find_system_llvm() {
+#if defined(__linux__)
+    auto usr_lib = std::filesystem::path{"/usr/lib"};
+    if (!std::filesystem::exists(usr_lib))
+        return {};
+
+    std::string latest;
+    for (auto const& entry : std::filesystem::directory_iterator(usr_lib)) {
+        if (!entry.is_directory())
+            continue;
+        auto name = entry.path().filename().string();
+        if (name.starts_with("llvm-")) {
+            if (latest.empty() || name > latest)
+                latest = name;
+        }
+    }
+    if (latest.empty())
+        return {};
+    return (usr_lib / latest).string();
+#else
+    return {};
+#endif
+}
+
+// detect clang++ from intron, fall back to system LLVM, then PATH
 void detect_clang(Toolchain& tc) {
     // 1. intron LLVM
     auto intron_llvm = find_intron_latest("llvm");
@@ -73,7 +99,21 @@ void detect_clang(Toolchain& tc) {
         }
     }
 
-    // 2. PATH fallback
+    // 2. system LLVM on Linux (e.g. /usr/lib/llvm-20/bin/clang++)
+    if (tc.cxx_compiler.empty()) {
+        auto sys_llvm = find_system_llvm();
+        if (!sys_llvm.empty()) {
+            auto clangpp = std::filesystem::path{sys_llvm} / "bin" / "clang++";
+            if (std::filesystem::exists(clangpp)) {
+                tc.cxx_compiler = std::filesystem::canonical(clangpp).string();
+#if defined(__linux__)
+                tc.needs_stdlib_flag = true;
+#endif
+            }
+        }
+    }
+
+    // 3. PATH fallback
     if (tc.cxx_compiler.empty()) {
         auto clangpp = find_in_path("clang++");
         if (clangpp != "clang++")
@@ -140,7 +180,7 @@ Toolchain detect() {
     if (tc.ninja.empty())
         tc.ninja = detail::find_in_path("ninja");
 
-    // clang: intron → PATH
+    // clang: intron → system LLVM → PATH
     detail::detect_clang(tc);
 
     // detect macOS sysroot

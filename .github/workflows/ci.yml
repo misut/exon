@@ -8,16 +8,38 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: aarch64-apple-darwin
+            build: exon
+          - os: ubuntu-24.04
+            platform: x86_64-linux-gnu
+            build: cmake
+          - os: ubuntu-24.04-arm
+            platform: aarch64-linux-gnu
+            build: cmake
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install dependencies
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
         run: brew install llvm ninja
 
-      - name: Bootstrap build
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 20
+          sudo apt-get install -y libc++-20-dev libc++abi-20-dev ninja-build
+          pip install cmake --break-system-packages
+
+      - name: Bootstrap build (macOS)
+        if: matrix.build == 'exon'
         run: |
           LLVM_PREFIX=$(brew --prefix llvm)
           cmake -B build -G Ninja \
@@ -26,15 +48,42 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS="-L$LLVM_PREFIX/lib/c++ -lc++ -lc++abi -L$LLVM_PREFIX/lib/unwind -lunwind"
           cmake --build build
 
+      - name: Bootstrap build (Linux)
+        if: matrix.build == 'cmake'
+        run: |
+          git clone https://github.com/misut/tomlcpp.git /tmp/tomlcpp
+          CXX=clang++-20
+          MODULES_JSON=/usr/lib/llvm-20/lib/libc++.modules.json
+          CXX_FLAGS="-stdlib=libc++"
+          LINKER_FLAGS="-stdlib=libc++ -lc++abi"
+          cmake -B build -S .github/cmake -G Ninja \
+            -DTOMLCPP_DIR=/tmp/tomlcpp \
+            -DCMAKE_CXX_COMPILER="$CXX" \
+            -DCMAKE_CXX_STDLIB_MODULES_JSON="$MODULES_JSON" \
+            -DCMAKE_CXX_FLAGS="$CXX_FLAGS" \
+            -DCMAKE_EXE_LINKER_FLAGS="$LINKER_FLAGS"
+          cmake --build build
+
       - name: Self-host build
         run: |
-          export PATH="$(brew --prefix llvm)/bin:$PATH"
-          ./build/exon build
+          if [ "${{ matrix.build }}" = "exon" ]; then
+            export PATH="$(brew --prefix llvm)/bin:$PATH"
+            ./build/exon build
+          else
+            mkdir -p .exon/debug && cp build/exon .exon/debug/exon
+            export PATH="/usr/lib/llvm-20/bin:$PATH"
+            ./build/exon build
+          fi
 
       - name: Self-host test
         run: |
-          export PATH="$(brew --prefix llvm)/bin:$PATH"
-          ./build/exon test
+          if [ "${{ matrix.build }}" = "exon" ]; then
+            export PATH="$(brew --prefix llvm)/bin:$PATH"
+            ./build/exon test
+          else
+            export PATH="/usr/lib/llvm-20/bin:$PATH"
+            .exon/debug/exon test
+          fi
 
       - name: Verify
         run: .exon/debug/exon info
