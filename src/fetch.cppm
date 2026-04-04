@@ -8,10 +8,10 @@ export namespace fetch {
 
 struct FetchedDep {
     std::string key;  // dep key (e.g. "github.com/user/repo")
-    std::string name; // 패키지 이름 (repo name)
+    std::string name; // package name (repo name)
     std::string version;
     std::string commit;         // exact git commit hash
-    std::filesystem::path path; // 캐시된 소스 경로
+    std::filesystem::path path; // cached source path
 };
 
 namespace detail {
@@ -40,7 +40,7 @@ std::string extract_repo_name(std::string const& dep_key) {
     return dep_key.substr(last_slash + 1);
 }
 
-// version 이 "v" 접두사가 없으면 붙임
+// prepend "v" prefix if missing
 std::string to_git_tag(std::string const& version) {
     if (version.starts_with("v"))
         return version;
@@ -73,7 +73,7 @@ std::string get_git_commit(std::filesystem::path const& repo_path) {
 
 void fetch_recursive(std::string const& dep_key, std::string const& version, lock::LockFile& lf,
                      std::vector<FetchedDep>& result, std::set<std::string>& visited) {
-    // 순환 의존성 및 중복 방지
+    // prevent circular dependencies and duplicates
     auto visit_key = dep_key + "@" + version;
     if (visited.contains(visit_key))
         return;
@@ -90,7 +90,7 @@ void fetch_recursive(std::string const& dep_key, std::string const& version, loc
     dep.name = extract_repo_name(dep_key);
     dep.version = version;
 
-    // 캐시가 존재하고 lock 파일의 커밋과 일치하면 사용
+    // use cache if it exists and matches the lock file commit
     if (std::filesystem::exists(dep_cache) && locked) {
         auto current_commit = get_git_commit(dep_cache);
         if (current_commit == locked->commit) {
@@ -100,7 +100,7 @@ void fetch_recursive(std::string const& dep_key, std::string const& version, loc
         }
     }
 
-    // 캐시가 있지만 lock이 없으면 기존 캐시 사용
+    // use existing cache if no lock entry
     if (dep.path.empty() && std::filesystem::exists(dep_cache)) {
         auto commit = get_git_commit(dep_cache);
         std::println("  cached: {} {} ({})", dep_key, tag, commit.substr(0, 8));
@@ -108,7 +108,7 @@ void fetch_recursive(std::string const& dep_key, std::string const& version, loc
         dep.path = dep_cache;
     }
 
-    // 새로 clone
+    // fresh clone
     if (dep.path.empty()) {
         std::filesystem::create_directories(dep_cache);
 
@@ -133,7 +133,7 @@ void fetch_recursive(std::string const& dep_key, std::string const& version, loc
         .commit = dep.commit,
     });
 
-    // transitive: 의존성의 exon.toml이 있으면 재귀 해석
+    // transitive: recursively resolve if dep has exon.toml
     auto dep_manifest_path = dep.path / "exon.toml";
     if (std::filesystem::exists(dep_manifest_path)) {
         auto dep_manifest = manifest::load(dep_manifest_path.string());
@@ -142,7 +142,7 @@ void fetch_recursive(std::string const& dep_key, std::string const& version, loc
         }
     }
 
-    // 의존성을 뒤에 추가 (위상 정렬: 의존되는 것이 먼저)
+    // append dep at end (topological order: dependencies come first)
     result.push_back(std::move(dep));
 }
 

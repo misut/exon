@@ -33,7 +33,7 @@ manifest::Manifest load_manifest() {
     return manifest::load("exon.toml");
 }
 
-// workspace일 때 각 멤버 디렉토리에서 함수를 실행
+// run a function in each workspace member directory
 int run_for_workspace(manifest::Manifest const& m,
                       std::function<int(std::filesystem::path const&)> fn) {
     auto root = std::filesystem::current_path();

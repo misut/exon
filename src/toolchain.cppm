@@ -7,10 +7,10 @@ struct Toolchain {
     std::string cmake;
     std::string ninja;
     std::string cxx_compiler;
-    std::string stdlib_modules_json; // libc++.modules.json 경로 (import std 지원)
-    std::string lib_dir;             // libc++ 라이브러리 경로 (링커용)
-    std::string sysroot;             // macOS SDK 경로
-    bool has_clang_config = false;   // clang config가 있으면 linker flags 불필요
+    std::string stdlib_modules_json; // libc++.modules.json path (import std support)
+    std::string lib_dir;             // libc++ library path (for linker)
+    std::string sysroot;             // macOS SDK path
+    bool has_clang_config = false;   // if clang config exists, linker flags are unnecessary
 };
 
 namespace detail {
@@ -43,7 +43,7 @@ std::filesystem::path intron_root() {
     return std::filesystem::path{home} / ".intron" / "toolchains";
 }
 
-// intron toolchains 디렉토리에서 가장 높은 버전을 찾아 반환
+// find the highest version in intron toolchains directory
 std::string find_intron_latest(std::string_view tool) {
     auto root = intron_root() / tool;
     if (!std::filesystem::exists(root))
@@ -62,7 +62,7 @@ std::string find_intron_latest(std::string_view tool) {
     return (root / latest).string();
 }
 
-// intron에서 clang++ 감지, 없으면 PATH fallback
+// detect clang++ from intron, fall back to PATH
 void detect_clang(Toolchain& tc) {
     // 1. intron LLVM
     auto intron_llvm = find_intron_latest("llvm");
@@ -85,7 +85,7 @@ void detect_clang(Toolchain& tc) {
 
     auto root = std::filesystem::path{tc.cxx_compiler}.parent_path().parent_path();
 
-    // clang config에 -lc++가 있으면 linker flags를 clang이 처리
+    // if clang config has -lc++, clang handles linker flags
     auto etc_dir = root / "etc" / "clang";
     if (std::filesystem::exists(etc_dir)) {
         for (auto const& entry : std::filesystem::directory_iterator(etc_dir)) {
@@ -101,10 +101,10 @@ void detect_clang(Toolchain& tc) {
         }
     }
 
-    // modules json 탐색
+    // search for modules json
     auto candidates = {
         root / "lib" / "c++" / "libc++.modules.json", // Homebrew
-        root / "lib" / "libc++.modules.json",          // LLVM 공식 (intron)
+        root / "lib" / "libc++.modules.json",          // LLVM official (intron)
     };
     for (auto const& path : candidates) {
         if (std::filesystem::exists(path)) {
@@ -143,7 +143,7 @@ Toolchain detect() {
     // clang: intron → PATH
     detail::detect_clang(tc);
 
-    // macOS sysroot 감지
+    // detect macOS sysroot
 #if defined(__APPLE__)
     auto candidates = {
         std::filesystem::path{
