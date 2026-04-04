@@ -1,5 +1,10 @@
+[plugins]
+exon = "https://github.com/misut/mise-exon.git"
+intron = "https://github.com/misut/mise-intron.git"
+
 [tools]
 clang = "latest"
 cmake = "latest"
 exon = "0.6.0"
+intron = "0.5.0"
 ninja = "latest"

@@ -46,7 +46,28 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
         cmd += " -DCMAKE_CXX_FLAGS=\"-stdlib=libc++\"";
     if (!tc.stdlib_modules_json.empty() && m.standard >= 23) {
         cmd += std::format(" -DCMAKE_CXX_STDLIB_MODULES_JSON={}", tc.stdlib_modules_json);
-        if (!tc.has_clang_config && !tc.lib_dir.empty()) {
+
+        // release: statically link libc++ for portable binaries
+        if (release && !tc.lib_dir.empty()) {
+            auto libcxx_a = std::filesystem::path{tc.lib_dir} / "libc++.a";
+            auto libcxxabi_a = std::filesystem::path{tc.lib_dir} / "libc++abi.a";
+            if (std::filesystem::exists(libcxx_a) && std::filesystem::exists(libcxxabi_a)) {
+                std::string linker_flags = "-nostdlib++";
+                if (tc.needs_stdlib_flag)
+                    linker_flags += " -stdlib=libc++";
+                cmd += std::format(" -DCMAKE_EXE_LINKER_FLAGS=\"{}\"", linker_flags);
+                cmd += std::format(" -DCMAKE_CXX_STANDARD_LIBRARIES=\"{} {}\"",
+                                   libcxx_a.string(), libcxxabi_a.string());
+            } else if (!tc.has_clang_config) {
+                auto linker_flags =
+                    std::format("-L{0} -Wl,-rpath,{0} -lc++ -lc++abi", tc.lib_dir);
+                if (tc.needs_stdlib_flag)
+                    linker_flags += " -stdlib=libc++";
+                cmd += std::format(" -DCMAKE_EXE_LINKER_FLAGS=\"{}\"", linker_flags);
+            }
+        }
+        // debug: dynamic linking
+        else if (!tc.has_clang_config && !tc.lib_dir.empty()) {
             auto linker_flags = std::format("-L{0} -Wl,-rpath,{0} -lc++ -lc++abi", tc.lib_dir);
             if (tc.needs_stdlib_flag)
                 linker_flags += " -stdlib=libc++";
