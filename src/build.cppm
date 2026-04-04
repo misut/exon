@@ -174,31 +174,36 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
         file << "\n";
     }
 
-    // メインタゲット
-    if (m.type == "lib") {
-        file << std::format("add_library({})\n", m.name);
+    // main target
+    // lib with only .cppm files: alias the modules library
+    if (m.type == "lib" && has_modules && sf.cpp.empty()) {
+        file << std::format("add_library({} ALIAS {})\n", m.name, modules_lib);
     } else {
-        file << std::format("add_executable({})\n", m.name);
-    }
-    if (!sf.cpp.empty()) {
-        file << std::format("target_sources({} PRIVATE", m.name);
-        for (auto const& src : sf.cpp)
-            file << std::format("\n    {}", src);
-        file << "\n)\n";
+        if (m.type == "lib") {
+            file << std::format("add_library({})\n", m.name);
+        } else {
+            file << std::format("add_executable({})\n", m.name);
+        }
+        if (!sf.cpp.empty()) {
+            file << std::format("target_sources({} PRIVATE", m.name);
+            for (auto const& src : sf.cpp)
+                file << std::format("\n    {}", src);
+            file << "\n)\n";
+        }
+
+        if (has_modules) {
+            auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
+            file << std::format("target_link_libraries({} {} {})\n", m.name, link_type, modules_lib);
+        } else if (!deps.empty()) {
+            auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
+            file << std::format("target_link_libraries({} {}", m.name, link_type);
+            for (auto const& dep : deps)
+                file << std::format("\n    {}", dep.name);
+            file << "\n)\n";
+        }
     }
 
-    if (has_modules) {
-        auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
-        file << std::format("target_link_libraries({} {} {})\n", m.name, link_type, modules_lib);
-    } else if (!deps.empty()) {
-        auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
-        file << std::format("target_link_libraries({} {}", m.name, link_type);
-        for (auto const& dep : deps)
-            file << std::format("\n    {}", dep.name);
-        file << "\n)\n";
-    }
-
-    // テストタゲット
+    // test targets
     if (with_tests) {
         auto tests_dir = project_root / "tests";
         auto test_sf = detail::collect_sources(tests_dir);
@@ -282,14 +287,14 @@ int run_test(manifest::Manifest const& m, bool release = false) {
     if (rc != 0)
         return rc;
 
-    // テスト名を収集
+    // collect test names
     std::vector<std::string> test_names;
     for (auto const& test_cpp : test_sf.cpp) {
         test_names.push_back(
             std::format("test-{}", std::filesystem::path{test_cpp}.stem().string()));
     }
 
-    // ビルド
+    // build
     std::println("building tests...");
     for (auto const& name : test_names) {
         auto build_cmd =
@@ -299,7 +304,7 @@ int run_test(manifest::Manifest const& m, bool release = false) {
             return rc;
     }
 
-    // 実行
+    // run
     std::println("running tests...\n");
     int passed = 0;
     int failed = 0;
