@@ -141,6 +141,36 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
         throw std::runtime_error("no source files found in src/");
     }
 
+    // cppm이 있으면 공유 모듈 라이브러리 생성 (메인 + 테스트가 공유)
+    auto modules_lib = std::format("{}-modules", m.name);
+    bool has_modules = !sf.cppm.empty();
+
+    if (has_modules) {
+        file << std::format("add_library({})\n", modules_lib);
+        file << std::format(
+            "target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS / FILES", modules_lib);
+        for (auto const& src : sf.cppm)
+            file << std::format("\n    {}", src);
+        file << "\n)\n";
+
+        if (!deps.empty()) {
+            file << std::format("target_link_libraries({} PUBLIC", modules_lib);
+            for (auto const& dep : deps)
+                file << std::format("\n    {}", dep.name);
+            file << "\n)\n";
+        }
+
+        if (m.type == "lib") {
+            auto include_dir = project_root / "include";
+            if (std::filesystem::exists(include_dir)) {
+                file << std::format("target_include_directories({} PUBLIC {})\n", modules_lib,
+                                    std::filesystem::canonical(include_dir).string());
+            }
+        }
+        file << "\n";
+    }
+
+    // メインタゲット
     if (m.type == "lib") {
         file << std::format("add_library({})\n", m.name);
     } else {
@@ -152,54 +182,34 @@ void generate_cmake(manifest::Manifest const& m, std::filesystem::path const& pr
             file << std::format("\n    {}", src);
         file << "\n)\n";
     }
-    if (!sf.cppm.empty()) {
-        file << std::format(
-            "target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS / FILES", m.name);
-        for (auto const& src : sf.cppm)
-            file << std::format("\n    {}", src);
-        file << "\n)\n";
-    }
 
-    if (m.type == "lib") {
-        auto include_dir = project_root / "include";
-        if (std::filesystem::exists(include_dir)) {
-            file << std::format("target_include_directories({} PUBLIC {})\n", m.name,
-                                std::filesystem::canonical(include_dir).string());
-        }
-    }
-
-    if (!deps.empty()) {
+    if (has_modules) {
+        auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
+        file << std::format("target_link_libraries({} {} {})\n", m.name, link_type, modules_lib);
+    } else if (!deps.empty()) {
         auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
         file << std::format("target_link_libraries({} {}", m.name, link_type);
-        for (auto const& dep : deps) {
+        for (auto const& dep : deps)
             file << std::format("\n    {}", dep.name);
-        }
         file << "\n)\n";
     }
 
-    // テスト タゲット
+    // テストタゲット
     if (with_tests) {
         auto tests_dir = project_root / "tests";
         auto test_sf = detail::collect_sources(tests_dir);
 
         for (auto const& test_cpp : test_sf.cpp) {
-            auto test_stem =
-                std::filesystem::path{test_cpp}.stem().string(); // e.g. "test_registry"
+            auto test_stem = std::filesystem::path{test_cpp}.stem().string();
             auto test_name = std::format("test-{}", test_stem);
 
             file << std::format("\nadd_executable({})\n", test_name);
             file << std::format("target_sources({} PRIVATE\n    {}\n)\n", test_name, test_cpp);
 
-            if (!sf.cppm.empty()) {
-                file << std::format(
-                    "target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS / FILES",
-                    test_name);
-                for (auto const& src : sf.cppm)
-                    file << std::format("\n    {}", src);
-                file << "\n)\n";
-            }
-
-            if (!deps.empty()) {
+            if (has_modules) {
+                file << std::format("target_link_libraries({} PRIVATE {})\n", test_name,
+                                    modules_lib);
+            } else if (!deps.empty()) {
                 file << std::format("target_link_libraries({} PRIVATE", test_name);
                 for (auto const& dep : deps)
                     file << std::format("\n    {}", dep.name);
