@@ -3,6 +3,7 @@ import std;
 import toml;
 import manifest;
 import build;
+import fetch;
 import lock;
 import templates;
 
@@ -26,6 +27,7 @@ commands:
     add <pkg> <ver>        add a dependency
     remove <pkg>           remove a dependency
     update                 update dependencies to latest compatible versions
+    sync                   sync CMakeLists.txt with exon.toml
     fmt                    format source files with clang-format
     version                show exon version
 )";
@@ -345,6 +347,28 @@ int cmd_update() {
         }
 
         return build::run(m);
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
+}
+
+int cmd_sync() {
+    try {
+        auto m = load_manifest();
+        if (manifest::is_workspace(m)) {
+            return run_for_workspace(m, [](auto const&) {
+                auto member_m = manifest::load("exon.toml");
+                auto lock_path = (std::filesystem::current_path() / "exon.lock").string();
+                auto fetch_result = fetch::fetch_all(member_m, lock_path);
+                build::sync_root_cmake(member_m, fetch_result.deps);
+                return 0;
+            });
+        }
+        auto lock_path = (std::filesystem::current_path() / "exon.lock").string();
+        auto fetch_result = fetch::fetch_all(m, lock_path);
+        build::sync_root_cmake(m, fetch_result.deps);
+        return 0;
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
