@@ -358,6 +358,41 @@ int run(manifest::Manifest const& m, bool release = false) {
     return 0;
 }
 
+int run_check(manifest::Manifest const& m, bool release = false) {
+    detail::ensure_intron_tools();
+
+    auto project_root = std::filesystem::current_path();
+    auto exon_dir = project_root / ".exon";
+    auto profile = release ? "release" : "debug";
+    auto build_dir = exon_dir / profile;
+
+    auto tc = toolchain::detect();
+
+    auto lock_path = (project_root / "exon.lock").string();
+    auto fetch_result = fetch::fetch_all(m, lock_path);
+
+    auto content = generate_cmake(m, project_root, fetch_result.deps, tc);
+    bool changed = sync_cmake(content, exon_dir);
+    bool configured = std::filesystem::exists(build_dir / "build.ninja");
+
+    if (changed || !configured) {
+        std::println("configuring...");
+        int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release).c_str());
+        if (rc != 0)
+            return rc;
+    }
+
+    auto target = std::format("{}-modules", m.name);
+    auto build_cmd = std::format("{} --build {} --target {}", tc.cmake, build_dir.string(), target);
+    std::println("checking...");
+    int rc = std::system(build_cmd.c_str());
+    if (rc != 0)
+        return rc;
+
+    std::println("check succeeded");
+    return 0;
+}
+
 int run_test(manifest::Manifest const& m, bool release = false) {
     detail::ensure_intron_tools();
 

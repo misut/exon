@@ -8,7 +8,7 @@ import templates;
 
 export namespace commands {
 
-constexpr auto version = "0.7.1";
+constexpr auto version = "0.8.0";
 
 constexpr auto usage_text = R"(usage: exon <command> [args]
 
@@ -16,6 +16,7 @@ commands:
     init [--lib]           create a new exon.toml
     info                   show package information
     build [--release]      build the project
+    check [--release]      check syntax without linking
     run [--release] [args] build and run the project
     test [--release]       build and run tests
     clean                  remove build artifacts
@@ -127,6 +128,27 @@ int cmd_build(int argc, char* argv[]) {
             return 1;
         }
         return build::run(m, release);
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
+}
+
+int cmd_check(int argc, char* argv[]) {
+    try {
+        auto m = load_manifest();
+        bool release = (argc >= 3 && std::string_view{argv[2]} == "--release");
+        if (manifest::is_workspace(m)) {
+            return run_for_workspace(m, [release](auto const&) {
+                auto member_m = manifest::load("exon.toml");
+                return build::run_check(member_m, release);
+            });
+        }
+        if (m.name.empty()) {
+            std::println(std::cerr, "error: package name is required in exon.toml");
+            return 1;
+        }
+        return build::run_check(m, release);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
