@@ -24,8 +24,8 @@ commands:
     run [--release] [args] build and run the project
     test [--release]       build and run tests
     clean                  remove build artifacts
-    add <pkg> <ver>        add a dependency
-    remove <pkg>           remove a dependency
+    add [--dev] <pkg> <ver> add a dependency
+    remove <pkg>            remove a dependency
     update                 update dependencies to latest compatible versions
     sync                   sync CMakeLists.txt with exon.toml
     fmt                    format source files with clang-format
@@ -244,12 +244,18 @@ int cmd_clean() {
 }
 
 int cmd_add(int argc, char* argv[]) {
-    if (argc < 4) {
-        std::println(std::cerr, "usage: exon add <package> <version>");
+    bool dev = false;
+    int arg_start = 2;
+    if (argc >= 3 && std::string_view{argv[2]} == "--dev") {
+        dev = true;
+        arg_start = 3;
+    }
+    if (argc < arg_start + 2) {
+        std::println(std::cerr, "usage: exon add [--dev] <package> <version>");
         return 1;
     }
-    auto pkg = std::string{argv[2]};
-    auto ver = std::string{argv[3]};
+    auto pkg = std::string{argv[arg_start]};
+    auto ver = std::string{argv[arg_start + 1]};
 
     if (!std::filesystem::exists("exon.toml")) {
         std::println(std::cerr, "error: exon.toml not found. run 'exon init' first");
@@ -258,15 +264,16 @@ int cmd_add(int argc, char* argv[]) {
 
     auto content = read_file("exon.toml");
     auto m = manifest::load("exon.toml");
-    if (m.dependencies.contains(pkg)) {
+    if (m.dependencies.contains(pkg) || m.dev_dependencies.contains(pkg)) {
         std::println(std::cerr, "error: '{}' is already a dependency", pkg);
         return 1;
     }
 
+    auto section = dev ? "[dev-dependencies]" : "[dependencies]";
     auto dep_line = std::format("\"{}\" = \"{}\"\n", pkg, ver);
-    auto deps_pos = content.find("[dependencies]");
+    auto deps_pos = content.find(section);
     if (deps_pos == std::string::npos) {
-        content += "\n[dependencies]\n" + dep_line;
+        content += std::format("\n{}\n{}", section, dep_line);
     } else {
         auto insert_pos = content.find('\n', deps_pos);
         if (insert_pos != std::string::npos) {
@@ -278,7 +285,8 @@ int cmd_add(int argc, char* argv[]) {
 
     auto file = std::ofstream("exon.toml");
     file << content;
-    std::println("added {} = \"{}\"", pkg, ver);
+    auto label = dev ? "dev-dependency" : "dependency";
+    std::println("added {} {} = \"{}\"", label, pkg, ver);
     return 0;
 }
 
@@ -295,7 +303,7 @@ int cmd_remove(int argc, char* argv[]) {
     }
 
     auto m = manifest::load("exon.toml");
-    if (!m.dependencies.contains(pkg)) {
+    if (!m.dependencies.contains(pkg) && !m.dev_dependencies.contains(pkg)) {
         std::println(std::cerr, "error: '{}' is not a dependency", pkg);
         return 1;
     }

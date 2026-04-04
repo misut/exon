@@ -13,6 +13,7 @@ struct Manifest {
     std::string type = "bin"; // "bin" or "lib"
     int standard = 23;
     std::map<std::string, std::string> dependencies;
+    std::map<std::string, std::string> dev_dependencies; // [dev-dependencies]
     std::map<std::string, std::string> defines;         // [defines]
     std::map<std::string, std::string> defines_debug;   // [defines.debug]
     std::map<std::string, std::string> defines_release;  // [defines.release]
@@ -59,6 +60,13 @@ Manifest from_toml(toml::Table const& table) {
         auto const& deps = table.at("dependencies").as_table();
         for (auto const& [key, val] : deps) {
             m.dependencies.emplace(key, val.as_string());
+        }
+    }
+
+    if (table.contains("dev-dependencies")) {
+        auto const& deps = table.at("dev-dependencies").as_table();
+        for (auto const& [key, val] : deps) {
+            m.dev_dependencies.emplace(key, val.as_string());
         }
     }
 
