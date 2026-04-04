@@ -31,5 +31,10 @@ jobs:
           export PATH="$(brew --prefix llvm)/bin:$PATH"
           ./build/exon build
 
+      - name: Self-host test
+        run: |
+          export PATH="$(brew --prefix llvm)/bin:$PATH"
+          ./build/exon test
+
       - name: Verify
         run: .exon/debug/exon info

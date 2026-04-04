@@ -33,6 +33,26 @@ manifest::Manifest load_manifest() {
     return manifest::load("exon.toml");
 }
 
+// workspace일 때 각 멤버 디렉토리에서 함수를 실행
+int run_for_workspace(manifest::Manifest const& m,
+                      std::function<int(std::filesystem::path const&)> fn) {
+    auto root = std::filesystem::current_path();
+    for (auto const& member : m.workspace_members) {
+        auto member_path = root / member;
+        if (!std::filesystem::exists(member_path / "exon.toml")) {
+            std::println(std::cerr, "error: {} has no exon.toml", member);
+            return 1;
+        }
+        std::println("--- {} ---", member);
+        std::filesystem::current_path(member_path);
+        int rc = fn(member_path);
+        std::filesystem::current_path(root);
+        if (rc != 0)
+            return rc;
+    }
+    return 0;
+}
+
 std::string read_file(std::string_view path) {
     auto file = std::ifstream(std::string{path});
     return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
@@ -95,11 +115,17 @@ int cmd_info() {
 int cmd_build(int argc, char* argv[]) {
     try {
         auto m = load_manifest();
+        bool release = (argc >= 3 && std::string_view{argv[2]} == "--release");
+        if (manifest::is_workspace(m)) {
+            return run_for_workspace(m, [release](auto const&) {
+                auto member_m = manifest::load("exon.toml");
+                return build::run(member_m, release);
+            });
+        }
         if (m.name.empty()) {
             std::println(std::cerr, "error: package name is required in exon.toml");
             return 1;
         }
-        bool release = (argc >= 3 && std::string_view{argv[2]} == "--release");
         return build::run(m, release);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
@@ -145,11 +171,17 @@ int cmd_run(int argc, char* argv[]) {
 int cmd_test(int argc, char* argv[]) {
     try {
         auto m = load_manifest();
+        bool release = (argc >= 3 && std::string_view{argv[2]} == "--release");
+        if (manifest::is_workspace(m)) {
+            return run_for_workspace(m, [release](auto const&) {
+                auto member_m = manifest::load("exon.toml");
+                return build::run_test(member_m, release);
+            });
+        }
         if (m.name.empty()) {
             std::println(std::cerr, "error: package name is required in exon.toml");
             return 1;
         }
-        bool release = (argc >= 3 && std::string_view{argv[2]} == "--release");
         return build::run_test(m, release);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
@@ -158,6 +190,22 @@ int cmd_test(int argc, char* argv[]) {
 }
 
 int cmd_clean() {
+    try {
+        if (std::filesystem::exists("exon.toml")) {
+            auto m = load_manifest();
+            if (manifest::is_workspace(m)) {
+                return run_for_workspace(m, [](auto const&) {
+                    auto dir = std::filesystem::current_path() / ".exon";
+                    if (std::filesystem::exists(dir)) {
+                        std::filesystem::remove_all(dir);
+                        std::println("cleaned .exon/");
+                    }
+                    return 0;
+                });
+            }
+        }
+    } catch (...) {
+    }
     auto exon_dir = std::filesystem::current_path() / ".exon";
     if (std::filesystem::exists(exon_dir)) {
         std::filesystem::remove_all(exon_dir);
