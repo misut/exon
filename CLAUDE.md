@@ -12,18 +12,26 @@ mise install
 
 ## Build
 
-exon manages its own CMakeLists.txt. Bootstrap with `.github/cmake/`, then use `exon build`.
+```sh
+exon build
+exon test
+```
+
+<details>
+<summary>Build from source (bootstrap)</summary>
+
+For the first build without exon installed, use the bootstrap cmake:
 
 ```sh
-# bootstrap (first build only)
 git clone https://github.com/misut/tomlcpp.git /tmp/tomlcpp
 cmake -B build -S .github/cmake -G Ninja -DTOMLCPP_DIR=/tmp/tomlcpp
 cmake --build build
 
-# self-host (normal development)
+# then self-host
 ./build/exon build
-./build/exon test
 ```
+
+</details>
 
 ## Code Style
 
