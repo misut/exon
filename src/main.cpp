@@ -31,6 +31,8 @@ int main(int argc, char* argv[]) {
         return commands::cmd_remove(argc, argv);
     if (command == "update")
         return commands::cmd_update();
+    if (command == "sync")
+        return commands::cmd_sync();
     if (command == "fmt")
         return commands::cmd_fmt();
 
