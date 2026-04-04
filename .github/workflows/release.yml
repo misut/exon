@@ -58,8 +58,10 @@ jobs:
             CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_OSX_SYSROOT=$(xcrun --show-sdk-path)"
           fi
           if [ "$RUNNER_OS" = "Linux" ]; then
+            LIBCXX_DIR=$(dirname "$(find "$LLVM_ROOT" -name "libc++.so" -print -quit)")
             CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CXX_FLAGS=-stdlib=libc++"
-            CMAKE_ARGS="$CMAKE_ARGS \"-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -lc++abi -Wl,-rpath,$LLVM_ROOT/lib\""
+            CMAKE_ARGS="$CMAKE_ARGS \"-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -lc++abi -Wl,-rpath,$LIBCXX_DIR\""
+            export LD_LIBRARY_PATH="$LIBCXX_DIR:${LD_LIBRARY_PATH:-}"
           fi
           eval cmake $CMAKE_ARGS
           cmake --build build
