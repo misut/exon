@@ -13,6 +13,9 @@ struct Manifest {
     std::string type = "bin"; // "bin" or "lib"
     int standard = 23;
     std::map<std::string, std::string> dependencies;
+    std::map<std::string, std::string> defines;         // [defines]
+    std::map<std::string, std::string> defines_debug;   // [defines.debug]
+    std::map<std::string, std::string> defines_release;  // [defines.release]
     std::vector<std::string> workspace_members; // workspace member paths
 };
 
@@ -56,6 +59,21 @@ Manifest from_toml(toml::Table const& table) {
         auto const& deps = table.at("dependencies").as_table();
         for (auto const& [key, val] : deps) {
             m.dependencies.emplace(key, val.as_string());
+        }
+    }
+
+    if (table.contains("defines")) {
+        auto const& defs = table.at("defines").as_table();
+        for (auto const& [key, val] : defs) {
+            if (val.is_string()) {
+                m.defines.emplace(key, val.as_string());
+            } else if (val.is_table()) {
+                auto const& sub = val.as_table();
+                auto& target = (key == "debug") ? m.defines_debug : m.defines_release;
+                for (auto const& [k, v] : sub) {
+                    target.emplace(k, v.as_string());
+                }
+            }
         }
     }
 

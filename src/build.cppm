@@ -145,7 +145,8 @@ void ensure_intron_tools() {
 
 std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path const& project_root,
                            std::vector<fetch::FetchedDep> const& deps,
-                           toolchain::Toolchain const& tc, bool with_tests = false) {
+                           toolchain::Toolchain const& tc, bool with_tests = false,
+                           bool release = false) {
     std::ostringstream out;
 
     bool import_std = (m.standard >= 23 && !tc.stdlib_modules_json.empty());
@@ -281,6 +282,21 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         }
     }
 
+    // compile definitions (applied to modules library so .cppm files can use them)
+    {
+        auto def_target = has_modules ? modules_lib : std::string{m.name};
+        auto& profile_defs = release ? m.defines_release : m.defines_debug;
+
+        out << std::format("\ntarget_compile_definitions({} PUBLIC\n", def_target);
+        out << std::format("    EXON_PKG_NAME=\"{}\"\n", m.name);
+        out << std::format("    EXON_PKG_VERSION=\"{}\"\n", m.version);
+        for (auto const& [key, val] : m.defines)
+            out << std::format("    {}=\"{}\"\n", key, val);
+        for (auto const& [key, val] : profile_defs)
+            out << std::format("    {}=\"{}\"\n", key, val);
+        out << ")\n";
+    }
+
     // test targets
     if (with_tests) {
         auto tests_dir = project_root / "tests";
@@ -337,7 +353,7 @@ int run(manifest::Manifest const& m, bool release = false) {
     auto lock_path = (project_root / "exon.lock").string();
     auto fetch_result = fetch::fetch_all(m, lock_path);
 
-    auto content = generate_cmake(m, project_root, fetch_result.deps, tc);
+    auto content = generate_cmake(m, project_root, fetch_result.deps, tc, false, release);
     bool changed = sync_cmake(content, exon_dir);
     bool configured = std::filesystem::exists(build_dir / "build.ninja");
 
@@ -371,7 +387,7 @@ int run_check(manifest::Manifest const& m, bool release = false) {
     auto lock_path = (project_root / "exon.lock").string();
     auto fetch_result = fetch::fetch_all(m, lock_path);
 
-    auto content = generate_cmake(m, project_root, fetch_result.deps, tc);
+    auto content = generate_cmake(m, project_root, fetch_result.deps, tc, false, release);
     bool changed = sync_cmake(content, exon_dir);
     bool configured = std::filesystem::exists(build_dir / "build.ninja");
 
@@ -419,7 +435,7 @@ int run_test(manifest::Manifest const& m, bool release = false) {
     auto lock_path = (project_root / "exon.lock").string();
     auto fetch_result = fetch::fetch_all(m, lock_path);
 
-    auto content = generate_cmake(m, project_root, fetch_result.deps, tc, true);
+    auto content = generate_cmake(m, project_root, fetch_result.deps, tc, true, release);
     bool changed = sync_cmake(content, exon_dir);
     bool configured = std::filesystem::exists(build_dir / "build.ninja");
 
