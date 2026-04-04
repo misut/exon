@@ -165,6 +165,15 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
     }
 
+    // separate deps into regular and dev
+    std::vector<fetch::FetchedDep const*> regular_deps, dev_deps;
+    for (auto const& dep : deps) {
+        if (dep.is_dev)
+            dev_deps.push_back(&dep);
+        else
+            regular_deps.push_back(&dep);
+    }
+
     // build dependencies as static libraries
     for (auto const& dep : deps) {
         auto dep_src = dep.path / "src";
@@ -236,10 +245,10 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             out << std::format("\n    {}", src);
         out << "\n)\n";
 
-        if (!deps.empty()) {
+        if (!regular_deps.empty()) {
             out << std::format("target_link_libraries({} PUBLIC", modules_lib);
-            for (auto const& dep : deps)
-                out << std::format("\n    {}", dep.name);
+            for (auto const& dep : regular_deps)
+                out << std::format("\n    {}", dep->name);
             out << "\n)\n";
         }
 
@@ -273,11 +282,11 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         if (has_modules) {
             auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
             out << std::format("target_link_libraries({} {} {})\n", m.name, link_type, modules_lib);
-        } else if (!deps.empty()) {
+        } else if (!regular_deps.empty()) {
             auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
             out << std::format("target_link_libraries({} {}", m.name, link_type);
-            for (auto const& dep : deps)
-                out << std::format("\n    {}", dep.name);
+            for (auto const& dep : regular_deps)
+                out << std::format("\n    {}", dep->name);
             out << "\n)\n";
         }
     }
@@ -309,13 +318,17 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             out << std::format("\nadd_executable({})\n", test_name);
             out << std::format("target_sources({} PRIVATE\n    {}\n)\n", test_name, test_cpp);
 
-            if (has_modules) {
-                out << std::format("target_link_libraries({} PRIVATE {})\n", test_name,
-                                   modules_lib);
-            } else if (!deps.empty()) {
+            if (has_modules || !dev_deps.empty()) {
                 out << std::format("target_link_libraries({} PRIVATE", test_name);
-                for (auto const& dep : deps)
-                    out << std::format("\n    {}", dep.name);
+                if (has_modules)
+                    out << std::format("\n    {}", modules_lib);
+                for (auto const& dep : dev_deps)
+                    out << std::format("\n    {}", dep->name);
+                out << "\n)\n";
+            } else if (!regular_deps.empty()) {
+                out << std::format("target_link_libraries({} PRIVATE", test_name);
+                for (auto const& dep : regular_deps)
+                    out << std::format("\n    {}", dep->name);
                 out << "\n)\n";
             }
         }
@@ -596,7 +609,7 @@ int run_test(manifest::Manifest const& m, bool release = false) {
     auto tc = toolchain::detect();
 
     auto lock_path = (project_root / "exon.lock").string();
-    auto fetch_result = fetch::fetch_all(m, lock_path);
+    auto fetch_result = fetch::fetch_all(m, lock_path, true);
 
     auto content = generate_cmake(m, project_root, fetch_result.deps, tc, true, release);
     bool changed = sync_cmake(content, exon_dir);

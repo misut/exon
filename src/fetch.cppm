@@ -12,6 +12,7 @@ struct FetchedDep {
     std::string version;
     std::string commit;         // exact git commit hash
     std::filesystem::path path; // cached source path
+    bool is_dev = false;        // dev-dependency (test-only)
 };
 
 namespace detail {
@@ -153,10 +154,11 @@ struct FetchResult {
     lock::LockFile lock_file;
 };
 
-FetchResult fetch_all(manifest::Manifest const& m, std::string_view lock_path) {
+FetchResult fetch_all(manifest::Manifest const& m, std::string_view lock_path,
+                      bool include_dev = false) {
     FetchResult result;
 
-    if (m.dependencies.empty())
+    if (m.dependencies.empty() && (!include_dev || m.dev_dependencies.empty()))
         return result;
 
     result.lock_file = lock::load(lock_path);
@@ -165,6 +167,16 @@ FetchResult fetch_all(manifest::Manifest const& m, std::string_view lock_path) {
     std::set<std::string> visited;
     for (auto const& [key, version] : m.dependencies) {
         detail::fetch_recursive(key, version, result.lock_file, result.deps, visited);
+    }
+
+    if (include_dev) {
+        auto dev_start = result.deps.size();
+        for (auto const& [key, version] : m.dev_dependencies) {
+            detail::fetch_recursive(key, version, result.lock_file, result.deps, visited);
+        }
+        for (auto i = dev_start; i < result.deps.size(); ++i) {
+            result.deps[i].is_dev = true;
+        }
     }
 
     lock::save(result.lock_file, lock_path);
