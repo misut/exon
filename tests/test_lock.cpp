@@ -60,6 +60,37 @@ void test_save_and_load() {
     std::filesystem::remove(tmp);
 }
 
+void test_subdir_field_roundtrip() {
+    auto tmp = std::filesystem::temp_directory_path() / "exon_test_lock_subdir.toml";
+
+    lock::LockFile lf;
+    lf.add_or_update({
+        .name = "github.com/misut/txn#refl",
+        .version = "0.1.0",
+        .commit = "abc123",
+        .subdir = "refl",
+    });
+    lf.add_or_update({
+        .name = "github.com/user/plain",
+        .version = "2.0.0",
+        .commit = "xyz789",
+        // no subdir: plain git dep
+    });
+    lock::save(lf, tmp.string());
+
+    auto loaded = lock::load(tmp.string());
+    check(loaded.packages.size() == 2, "subdir: two entries loaded");
+    auto const* refl = loaded.find("github.com/misut/txn#refl", "0.1.0");
+    check(refl != nullptr, "subdir: composite-name entry found");
+    check(refl->subdir == "refl", "subdir: subdir field preserved");
+    check(refl->commit == "abc123", "subdir: commit preserved");
+    auto const* plain = loaded.find("github.com/user/plain", "2.0.0");
+    check(plain != nullptr, "subdir: plain git entry found");
+    check(plain->subdir.empty(), "subdir: plain entry subdir empty");
+
+    std::filesystem::remove(tmp);
+}
+
 void test_load_nonexistent() {
     auto lf = lock::load("/tmp/exon_nonexistent_lock.toml");
     check(lf.packages.empty(), "loading nonexistent file returns empty");
@@ -69,6 +100,7 @@ int main() {
     test_empty_lockfile();
     test_add_or_update();
     test_save_and_load();
+    test_subdir_field_roundtrip();
     test_load_nonexistent();
 
     if (failures > 0) {

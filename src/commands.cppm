@@ -29,6 +29,8 @@ commands:
     add [--dev] --workspace <name>     add a workspace member dependency
     add [--dev] --vcpkg <name> <ver> [--features a,b,c]
                                        add a vcpkg dependency
+    add [--dev] --git <repo> --version <ver> --subdir <dir> [--name <n>]
+                                       add a git dep pointing to a subdirectory
     remove <pkg>                       remove a dependency
     update                 update dependencies to latest compatible versions
     sync                   sync CMakeLists.txt with exon.toml
@@ -279,7 +281,8 @@ bool dep_exists(manifest::Manifest const& m, std::string const& name) {
     return m.dependencies.contains(name) || m.dev_dependencies.contains(name) ||
            m.path_deps.contains(name) || m.dev_path_deps.contains(name) ||
            m.workspace_deps.contains(name) || m.dev_workspace_deps.contains(name) ||
-           m.vcpkg_deps.contains(name) || m.dev_vcpkg_deps.contains(name);
+           m.vcpkg_deps.contains(name) || m.dev_vcpkg_deps.contains(name) ||
+           m.subdir_deps.contains(name) || m.dev_subdir_deps.contains(name);
 }
 
 int cmd_add(int argc, char* argv[]) {
@@ -287,7 +290,12 @@ int cmd_add(int argc, char* argv[]) {
     bool is_path = false;
     bool is_workspace_dep = false;
     bool is_vcpkg = false;
+    bool is_git_subdir = false;
     std::vector<std::string> features;
+    std::string git_repo;
+    std::string git_version;
+    std::string git_subdir;
+    std::string git_name;
     std::vector<std::string> positional;
     for (int i = 2; i < argc; ++i) {
         std::string_view a{argv[i]};
@@ -299,7 +307,36 @@ int cmd_add(int argc, char* argv[]) {
             is_workspace_dep = true;
         else if (a == "--vcpkg")
             is_vcpkg = true;
-        else if (a == "--features") {
+        else if (a == "--git") {
+            if (i + 1 >= argc) {
+                std::println(std::cerr, "error: --git requires a repo URL");
+                return 1;
+            }
+            is_git_subdir = true;
+            git_repo = argv[i + 1];
+            ++i;
+        } else if (a == "--subdir") {
+            if (i + 1 >= argc) {
+                std::println(std::cerr, "error: --subdir requires a directory name");
+                return 1;
+            }
+            git_subdir = argv[i + 1];
+            ++i;
+        } else if (a == "--version") {
+            if (i + 1 >= argc) {
+                std::println(std::cerr, "error: --version requires a value");
+                return 1;
+            }
+            git_version = argv[i + 1];
+            ++i;
+        } else if (a == "--name") {
+            if (i + 1 >= argc) {
+                std::println(std::cerr, "error: --name requires a value");
+                return 1;
+            }
+            git_name = argv[i + 1];
+            ++i;
+        } else if (a == "--features") {
             if (i + 1 >= argc) {
                 std::println(std::cerr, "error: --features requires a comma-separated list");
                 return 1;
@@ -331,9 +368,10 @@ int cmd_add(int argc, char* argv[]) {
         return 1;
     }
 
-    int exclusive_count = int(is_path) + int(is_workspace_dep) + int(is_vcpkg);
+    int exclusive_count = int(is_path) + int(is_workspace_dep) + int(is_vcpkg) + int(is_git_subdir);
     if (exclusive_count > 1) {
-        std::println(std::cerr, "error: --path, --workspace, --vcpkg are mutually exclusive");
+        std::println(std::cerr,
+                     "error: --path, --workspace, --vcpkg, --git are mutually exclusive");
         return 1;
     }
 
@@ -385,6 +423,21 @@ int cmd_add(int argc, char* argv[]) {
         section = section_prefix + ".workspace";
         dep_line = std::format("{} = true\n", name);
         display = std::format("workspace dep {}", name);
+    } else if (is_git_subdir) {
+        if (git_repo.empty() || git_version.empty() || git_subdir.empty()) {
+            std::println(std::cerr,
+                         "usage: exon add [--dev] --git <repo> --version <ver> --subdir <dir> "
+                         "[--name <name>]");
+            return 1;
+        }
+        name = git_name.empty() ? git_subdir : git_name;
+        section = section_prefix;
+        dep_line = std::format(
+            "{} = {{ git = \"{}\", version = \"{}\", subdir = \"{}\" }}\n",
+            name, git_repo, git_version, git_subdir);
+        display = std::format("git subdir dep {} = {{ git = \"{}\", version = \"{}\", "
+                              "subdir = \"{}\" }}",
+                              name, git_repo, git_version, git_subdir);
     } else if (is_vcpkg) {
         if (positional.size() < 2) {
             std::println(std::cerr,
@@ -415,7 +468,9 @@ int cmd_add(int argc, char* argv[]) {
                          "usage: exon add [--dev] <package> <version>\n"
                          "       exon add [--dev] --path <name> <path>\n"
                          "       exon add [--dev] --workspace <name>\n"
-                         "       exon add [--dev] --vcpkg <name> <version>");
+                         "       exon add [--dev] --vcpkg <name> <version>\n"
+                         "       exon add [--dev] --git <repo> --version <ver> --subdir <dir> "
+                         "[--name <name>]");
             return 1;
         }
         name = positional[0];
@@ -459,6 +514,18 @@ int cmd_remove(int argc, char* argv[]) {
         return 1;
     }
 
+    // if this is a subdir dep, compute the composite lock name to erase later
+    std::string lock_name_to_erase = pkg;
+    auto find_subdir = [&]() -> manifest::GitSubdirDep const* {
+        if (auto it = m.subdir_deps.find(pkg); it != m.subdir_deps.end())
+            return &it->second;
+        if (auto it = m.dev_subdir_deps.find(pkg); it != m.dev_subdir_deps.end())
+            return &it->second;
+        return nullptr;
+    };
+    if (auto const* sdep = find_subdir())
+        lock_name_to_erase = std::format("{}#{}", sdep->repo, sdep->subdir);
+
     auto content = read_file("exon.toml");
     // try quoted form first (git deps), then bare key (path/workspace deps)
     std::vector<std::string> candidates = {std::format("\"{}\"", pkg), std::format("{} =", pkg)};
@@ -493,7 +560,7 @@ done:
     if (std::filesystem::exists(lock_path)) {
         auto lf = lock::load(lock_path.string());
         auto& pkgs = lf.packages;
-        std::erase_if(pkgs, [&](auto const& p) { return p.name == pkg; });
+        std::erase_if(pkgs, [&](auto const& p) { return p.name == lock_name_to_erase; });
         lock::save(lf, lock_path.string());
     }
     return 0;
