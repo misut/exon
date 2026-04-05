@@ -426,13 +426,16 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
     }
 
-    // separate deps
-    std::vector<fetch::FetchedDep const*> p_regular, p_dev;
+    auto root = std::filesystem::current_path();
+
+    // separate deps (git vs path, regular vs dev)
+    std::vector<fetch::FetchedDep const*> p_git_regular, p_git_dev;
+    std::vector<fetch::FetchedDep const*> p_path_regular, p_path_dev;
     for (auto const& dep : deps) {
-        if (dep.is_dev)
-            p_dev.push_back(&dep);
-        else
-            p_regular.push_back(&dep);
+        auto& bucket = dep.is_dev
+                           ? (dep.is_path ? p_path_dev : p_git_dev)
+                           : (dep.is_path ? p_path_regular : p_git_regular);
+        bucket.push_back(&dep);
     }
 
     // split a space-separated target list
@@ -468,7 +471,7 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         for (auto& t : split_targets(tgts))
             p_dev_find.push_back(std::move(t));
 
-    // dependencies via FetchContent (regular only for main build)
+    // git deps via FetchContent
     auto emit_fetch = [&](std::vector<fetch::FetchedDep const*> const& dep_list) {
         for (auto const* dep : dep_list) {
             auto git_url = std::format("https://{}.git", dep->key);
@@ -484,24 +487,46 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             out << std::format("FetchContent_MakeAvailable({})\n", dep->name);
     };
 
-    if (!p_regular.empty() || !p_dev.empty()) {
+    if (!p_git_regular.empty() || !p_git_dev.empty()) {
         out << "include(FetchContent)\n";
-        emit_fetch(p_regular);
-        if (!p_dev.empty()) {
+        emit_fetch(p_git_regular);
+        if (!p_git_dev.empty()) {
             out << "\n# dev-dependencies (test-only)\n";
-            emit_fetch(p_dev);
+            emit_fetch(p_git_dev);
         }
         out << "\n";
     }
+
+    // path deps via add_subdirectory (binary_dir required for paths outside source tree)
+    auto emit_subdirs = [&](std::vector<fetch::FetchedDep const*> const& dep_list) {
+        for (auto const* dep : dep_list) {
+            auto rel = std::filesystem::relative(dep->path, root).string();
+            out << std::format("add_subdirectory(${{CMAKE_CURRENT_SOURCE_DIR}}/{} "
+                               "${{CMAKE_BINARY_DIR}}/_deps/{}-build)\n",
+                               rel, dep->name);
+        }
+    };
+
+    if (!p_path_regular.empty() || !p_path_dev.empty()) {
+        emit_subdirs(p_path_regular);
+        if (!p_path_dev.empty()) {
+            out << "\n# dev-dependencies (test-only)\n";
+            emit_subdirs(p_path_dev);
+        }
+        out << "\n";
+    }
+
+    // combined lists for link emission (order: git first, then path)
+    std::vector<fetch::FetchedDep const*> p_regular = p_git_regular;
+    p_regular.insert(p_regular.end(), p_path_regular.begin(), p_path_regular.end());
+    std::vector<fetch::FetchedDep const*> p_dev = p_git_dev;
+    p_dev.insert(p_dev.end(), p_path_dev.begin(), p_path_dev.end());
 
     // project sources (relative paths)
     auto src_dir = std::filesystem::current_path() / "src";
     auto sf = detail::collect_sources(src_dir);
     if (sf.cpp.empty() && sf.cppm.empty())
         throw std::runtime_error("no source files found in src/");
-
-    // convert to relative paths
-    auto root = std::filesystem::current_path();
     auto to_rel = [&](std::string const& abs) -> std::string {
         return std::format("${{CMAKE_CURRENT_SOURCE_DIR}}/{}",
             std::filesystem::relative(abs, root).string());

@@ -295,6 +295,44 @@ void test_dev_find_deps() {
     check(cmake_test.contains("GTest::gtest_main"), "test links dev target");
 }
 
+void test_path_dep_in_generate_cmake() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}");
+
+    // create a path dep directory
+    auto dep_path = std::filesystem::temp_directory_path() / "exon_test_pathdep";
+    std::filesystem::remove_all(dep_path);
+    std::filesystem::create_directories(dep_path / "src");
+    {
+        auto f = std::ofstream{dep_path / "src" / "mylib.cppm"};
+        f << "export module mylib;";
+    }
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    std::vector<fetch::FetchedDep> deps = {{
+        .key = "mylib",
+        .name = "mylib",
+        .version = "",
+        .commit = "",
+        .path = dep_path,
+        .is_dev = false,
+        .is_path = true,
+    }};
+
+    auto cmake = build::generate_cmake(m, proj.root, deps, make_tc());
+
+    // path deps reuse the existing add_library code path
+    check(cmake.contains("add_library(mylib)"), "path dep: add_library emitted");
+    check(cmake.contains("mylib.cppm"), "path dep: source file included");
+
+    std::filesystem::remove_all(dep_path);
+}
+
 void test_no_import_std_below_23() {
     TmpProject proj;
     proj.write("src/main.cpp", "int main() {}");
@@ -323,6 +361,7 @@ int main() {
     test_find_deps_with_modules();
     test_find_deps_multi_targets();
     test_dev_find_deps();
+    test_path_dep_in_generate_cmake();
     test_no_import_std_below_23();
 
     if (failures > 0) {

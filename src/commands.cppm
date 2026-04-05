@@ -24,8 +24,10 @@ commands:
     run [--release] [args] build and run the project
     test [--release]       build and run tests
     clean                  remove build artifacts
-    add [--dev] <pkg> <ver> add a dependency
-    remove <pkg>            remove a dependency
+    add [--dev] <pkg> <ver>            add a git dependency
+    add [--dev] --path <name> <path>   add a local path dependency
+    add [--dev] --workspace <name>     add a workspace member dependency
+    remove <pkg>                       remove a dependency
     update                 update dependencies to latest compatible versions
     sync                   sync CMakeLists.txt with exon.toml
     fmt                    format source files with clang-format
@@ -243,19 +245,62 @@ int cmd_clean() {
     return 0;
 }
 
+// insert `line` into [section] block; create section at EOF if missing
+void insert_into_section(std::string& content, std::string const& section,
+                         std::string const& line) {
+    auto header = std::format("[{}]", section);
+    auto pos = content.find(header);
+    if (pos == std::string::npos) {
+        if (!content.empty() && content.back() != '\n')
+            content += '\n';
+        content += std::format("\n{}\n{}", header, line);
+        return;
+    }
+    // verify this is an exact section header (preceded by start/newline, followed by newline)
+    // simple check: header should start at column 0
+    bool at_line_start = (pos == 0) || (content[pos - 1] == '\n');
+    if (!at_line_start) {
+        // header substring found mid-line; append as new section
+        if (!content.empty() && content.back() != '\n')
+            content += '\n';
+        content += std::format("\n{}\n{}", header, line);
+        return;
+    }
+    auto insert_pos = content.find('\n', pos);
+    if (insert_pos != std::string::npos)
+        content.insert(insert_pos + 1, line);
+    else
+        content += std::format("\n{}", line);
+}
+
+bool dep_exists(manifest::Manifest const& m, std::string const& name) {
+    return m.dependencies.contains(name) || m.dev_dependencies.contains(name) ||
+           m.path_deps.contains(name) || m.dev_path_deps.contains(name) ||
+           m.workspace_deps.contains(name) || m.dev_workspace_deps.contains(name);
+}
+
 int cmd_add(int argc, char* argv[]) {
     bool dev = false;
-    int arg_start = 2;
-    if (argc >= 3 && std::string_view{argv[2]} == "--dev") {
-        dev = true;
-        arg_start = 3;
+    bool is_path = false;
+    bool is_workspace_dep = false;
+    int i = 2;
+    while (i < argc) {
+        std::string_view a{argv[i]};
+        if (a == "--dev")
+            dev = true;
+        else if (a == "--path")
+            is_path = true;
+        else if (a == "--workspace")
+            is_workspace_dep = true;
+        else
+            break;
+        ++i;
     }
-    if (argc < arg_start + 2) {
-        std::println(std::cerr, "usage: exon add [--dev] <package> <version>");
+
+    if (is_path && is_workspace_dep) {
+        std::println(std::cerr, "error: --path and --workspace are mutually exclusive");
         return 1;
     }
-    auto pkg = std::string{argv[arg_start]};
-    auto ver = std::string{argv[arg_start + 1]};
 
     if (!std::filesystem::exists("exon.toml")) {
         std::println(std::cerr, "error: exon.toml not found. run 'exon init' first");
@@ -264,29 +309,75 @@ int cmd_add(int argc, char* argv[]) {
 
     auto content = read_file("exon.toml");
     auto m = manifest::load("exon.toml");
-    if (m.dependencies.contains(pkg) || m.dev_dependencies.contains(pkg)) {
-        std::println(std::cerr, "error: '{}' is already a dependency", pkg);
+
+    std::string name, value;
+    std::string section_prefix = dev ? "dev-dependencies" : "dependencies";
+    std::string section;
+    std::string dep_line;
+    std::string display;
+
+    if (is_path) {
+        if (argc < i + 2) {
+            std::println(std::cerr, "usage: exon add [--dev] --path <name> <path>");
+            return 1;
+        }
+        name = argv[i];
+        value = argv[i + 1];
+        auto target_dir = std::filesystem::current_path() / value;
+        if (!std::filesystem::exists(target_dir / "exon.toml")) {
+            std::println(std::cerr, "error: no exon.toml found at {}", target_dir.string());
+            return 1;
+        }
+        section = section_prefix + ".path";
+        dep_line = std::format("{} = \"{}\"\n", name, value);
+        display = std::format("path dep {} = \"{}\"", name, value);
+    } else if (is_workspace_dep) {
+        if (argc < i + 1) {
+            std::println(std::cerr, "usage: exon add [--dev] --workspace <name>");
+            return 1;
+        }
+        name = argv[i];
+        auto ws_root = manifest::find_workspace_root(std::filesystem::current_path());
+        if (!ws_root) {
+            std::println(std::cerr, "error: no workspace root found");
+            return 1;
+        }
+        auto ws_m = manifest::load((*ws_root / "exon.toml").string());
+        if (!manifest::resolve_workspace_member(*ws_root, ws_m, name)) {
+            std::println(std::cerr, "error: workspace member '{}' not found", name);
+            return 1;
+        }
+        section = section_prefix + ".workspace";
+        dep_line = std::format("{} = true\n", name);
+        display = std::format("workspace dep {}", name);
+    } else {
+        if (argc < i + 2) {
+            std::println(std::cerr,
+                         "usage: exon add [--dev] <package> <version>\n"
+                         "       exon add [--dev] --path <name> <path>\n"
+                         "       exon add [--dev] --workspace <name>");
+            return 1;
+        }
+        name = argv[i];
+        value = argv[i + 1];
+        section = section_prefix;
+        dep_line = std::format("\"{}\" = \"{}\"\n", name, value);
+        display = std::format("{} {} = \"{}\"",
+                              dev ? "dev-dependency" : "dependency", name, value);
+    }
+
+    // use the base name for duplicate check (for git deps, key is the full URL path)
+    auto dup_key = is_path || is_workspace_dep ? name : name;
+    if (dep_exists(m, dup_key)) {
+        std::println(std::cerr, "error: '{}' is already a dependency", dup_key);
         return 1;
     }
 
-    auto section = dev ? "[dev-dependencies]" : "[dependencies]";
-    auto dep_line = std::format("\"{}\" = \"{}\"\n", pkg, ver);
-    auto deps_pos = content.find(section);
-    if (deps_pos == std::string::npos) {
-        content += std::format("\n{}\n{}", section, dep_line);
-    } else {
-        auto insert_pos = content.find('\n', deps_pos);
-        if (insert_pos != std::string::npos) {
-            content.insert(insert_pos + 1, dep_line);
-        } else {
-            content += "\n" + dep_line;
-        }
-    }
+    insert_into_section(content, section, dep_line);
 
     auto file = std::ofstream("exon.toml");
     file << content;
-    auto label = dev ? "dev-dependency" : "dependency";
-    std::println("added {} {} = \"{}\"", label, pkg, ver);
+    std::println("added {}", display);
     return 0;
 }
 
@@ -303,24 +394,36 @@ int cmd_remove(int argc, char* argv[]) {
     }
 
     auto m = manifest::load("exon.toml");
-    if (!m.dependencies.contains(pkg) && !m.dev_dependencies.contains(pkg)) {
+    if (!dep_exists(m, pkg)) {
         std::println(std::cerr, "error: '{}' is not a dependency", pkg);
         return 1;
     }
 
     auto content = read_file("exon.toml");
-    auto search = std::format("\"{}\"", pkg);
-    auto pos = content.find(search);
-    if (pos != std::string::npos) {
-        auto line_start = content.rfind('\n', pos);
-        line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
-        auto line_end = content.find('\n', pos);
-        if (line_end != std::string::npos)
-            line_end += 1;
-        else
-            line_end = content.size();
-        content.erase(line_start, line_end - line_start);
+    // try quoted form first (git deps), then bare key (path/workspace deps)
+    std::vector<std::string> candidates = {std::format("\"{}\"", pkg), std::format("{} =", pkg)};
+    for (auto const& search : candidates) {
+        auto pos = content.find(search);
+        while (pos != std::string::npos) {
+            // verify match starts at line start (after optional whitespace)
+            auto line_start = content.rfind('\n', pos);
+            line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
+            auto prefix = content.substr(line_start, pos - line_start);
+            bool only_ws = std::all_of(prefix.begin(), prefix.end(),
+                                        [](char c) { return c == ' ' || c == '\t'; });
+            if (only_ws) {
+                auto line_end = content.find('\n', pos);
+                if (line_end != std::string::npos)
+                    line_end += 1;
+                else
+                    line_end = content.size();
+                content.erase(line_start, line_end - line_start);
+                goto done;
+            }
+            pos = content.find(search, pos + 1);
+        }
     }
+done:
 
     auto file = std::ofstream("exon.toml");
     file << content;

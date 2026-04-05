@@ -10,9 +10,10 @@ struct FetchedDep {
     std::string key;  // dep key (e.g. "github.com/user/repo")
     std::string name; // package name (repo name)
     std::string version;
-    std::string commit;         // exact git commit hash
+    std::string commit;         // exact git commit hash (empty for path deps)
     std::filesystem::path path; // cached source path
     bool is_dev = false;        // dev-dependency (test-only)
+    bool is_path = false;       // local path / workspace dep (no git, no lock)
 };
 
 namespace detail {
@@ -70,6 +71,62 @@ std::string get_git_commit(std::filesystem::path const& repo_path) {
         line.pop_back();
     }
     return line;
+}
+
+struct FetchContext {
+    lock::LockFile& lf;
+    std::vector<FetchedDep>& result;
+    std::set<std::string>& visited;          // git: "key@version"
+    std::set<std::filesystem::path>& visited_paths; // path/workspace: absolute paths
+};
+
+void fetch_recursive(std::string const& dep_key, std::string const& version, lock::LockFile& lf,
+                     std::vector<FetchedDep>& result, std::set<std::string>& visited);
+
+void fetch_path_recursive(std::filesystem::path const& abs_dir, std::string name,
+                          FetchContext ctx) {
+    auto canon = std::filesystem::weakly_canonical(abs_dir);
+    if (ctx.visited_paths.contains(canon))
+        return;
+    ctx.visited_paths.insert(canon);
+
+    auto dep_toml = canon / "exon.toml";
+    if (!std::filesystem::exists(dep_toml))
+        throw std::runtime_error(std::format("path dep '{}' has no exon.toml at {}", name,
+                                             canon.string()));
+
+    auto dep_m = manifest::load(dep_toml.string());
+
+    // recurse into transitive deps FIRST (topological: deps come before this package)
+    for (auto const& [sub_key, sub_version] : dep_m.dependencies)
+        fetch_recursive(sub_key, sub_version, ctx.lf, ctx.result, ctx.visited);
+    for (auto const& [sub_name, sub_rel] : dep_m.path_deps) {
+        auto sub_abs = canon / sub_rel;
+        fetch_path_recursive(sub_abs, sub_name, ctx);
+    }
+    if (!dep_m.workspace_deps.empty()) {
+        auto ws_root = manifest::find_workspace_root(canon);
+        if (!ws_root)
+            throw std::runtime_error(std::format(
+                "path dep '{}' uses [dependencies.workspace] but no workspace root found", name));
+        auto ws_m = manifest::load((*ws_root / "exon.toml").string());
+        for (auto const& ws_name : dep_m.workspace_deps) {
+            auto member_path = manifest::resolve_workspace_member(*ws_root, ws_m, ws_name);
+            if (!member_path)
+                throw std::runtime_error(
+                    std::format("workspace member '{}' not found in workspace", ws_name));
+            fetch_path_recursive(*member_path, ws_name, ctx);
+        }
+    }
+
+    // now add this dep (after its transitive deps)
+    std::println("  path: {} -> {}", name, canon.string());
+    FetchedDep d;
+    d.key = name;
+    d.name = dep_m.name.empty() ? name : dep_m.name;
+    d.path = canon;
+    d.is_path = true;
+    ctx.result.push_back(std::move(d));
 }
 
 void fetch_recursive(std::string const& dep_key, std::string const& version, lock::LockFile& lf,
@@ -158,25 +215,65 @@ FetchResult fetch_all(manifest::Manifest const& m, std::string_view lock_path,
                       bool include_dev = false) {
     FetchResult result;
 
-    if (m.dependencies.empty() && (!include_dev || m.dev_dependencies.empty()))
+    bool has_any = !m.dependencies.empty() || !m.path_deps.empty() || !m.workspace_deps.empty();
+    bool has_dev = include_dev && (!m.dev_dependencies.empty() || !m.dev_path_deps.empty() ||
+                                    !m.dev_workspace_deps.empty());
+    if (!has_any && !has_dev)
         return result;
 
     result.lock_file = lock::load(lock_path);
 
     std::println("fetching dependencies...");
     std::set<std::string> visited;
-    for (auto const& [key, version] : m.dependencies) {
+    std::set<std::filesystem::path> visited_paths;
+    detail::FetchContext ctx{result.lock_file, result.deps, visited, visited_paths};
+
+    auto cwd = std::filesystem::current_path();
+
+    // resolve workspace once (lazily) if needed
+    std::optional<std::filesystem::path> ws_root;
+    std::optional<manifest::Manifest> ws_m;
+    auto get_ws = [&]() {
+        if (!ws_root) {
+            ws_root = manifest::find_workspace_root(cwd);
+            if (ws_root)
+                ws_m = manifest::load((*ws_root / "exon.toml").string());
+        }
+        return ws_root && ws_m;
+    };
+
+    for (auto const& [key, version] : m.dependencies)
         detail::fetch_recursive(key, version, result.lock_file, result.deps, visited);
+    for (auto const& [name, rel] : m.path_deps)
+        detail::fetch_path_recursive(cwd / rel, name, ctx);
+    for (auto const& ws_name : m.workspace_deps) {
+        if (!get_ws())
+            throw std::runtime_error("[dependencies.workspace] used but no workspace root found");
+        auto member_path = manifest::resolve_workspace_member(*ws_root, *ws_m, ws_name);
+        if (!member_path)
+            throw std::runtime_error(
+                std::format("workspace member '{}' not found in workspace", ws_name));
+        detail::fetch_path_recursive(*member_path, ws_name, ctx);
     }
 
     if (include_dev) {
         auto dev_start = result.deps.size();
-        for (auto const& [key, version] : m.dev_dependencies) {
+        for (auto const& [key, version] : m.dev_dependencies)
             detail::fetch_recursive(key, version, result.lock_file, result.deps, visited);
+        for (auto const& [name, rel] : m.dev_path_deps)
+            detail::fetch_path_recursive(cwd / rel, name, ctx);
+        for (auto const& ws_name : m.dev_workspace_deps) {
+            if (!get_ws())
+                throw std::runtime_error(
+                    "[dev-dependencies.workspace] used but no workspace root found");
+            auto member_path = manifest::resolve_workspace_member(*ws_root, *ws_m, ws_name);
+            if (!member_path)
+                throw std::runtime_error(
+                    std::format("workspace member '{}' not found in workspace", ws_name));
+            detail::fetch_path_recursive(*member_path, ws_name, ctx);
         }
-        for (auto i = dev_start; i < result.deps.size(); ++i) {
+        for (auto i = dev_start; i < result.deps.size(); ++i)
             result.deps[i].is_dev = true;
-        }
     }
 
     lock::save(result.lock_file, lock_path);
