@@ -1,7 +1,16 @@
+#include <cstdio> // stdout/stderr/_IONBF macros (not exported by import std;)
 import std;
 import commands;
 
 int main(int argc, char* argv[]) {
+    // Disable stdout/stderr buffering so prints from exon appear in the
+    // correct order relative to child-process output from std::system.
+    // Without this, on Windows block-buffered stdout leaves "fetching..."
+    // / "building..." etc. queued up until after cmake/ninja have finished
+    // writing to the terminal.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
+
     if (argc < 2) {
         std::print("{}", commands::usage_text);
         return 1;
