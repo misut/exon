@@ -174,6 +174,41 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             regular_deps.push_back(&dep);
     }
 
+    // split a space-separated target list
+    auto split_targets = [](std::string_view s) {
+        std::vector<std::string> result;
+        std::size_t i = 0;
+        while (i < s.size()) {
+            while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i])))
+                ++i;
+            std::size_t start = i;
+            while (i < s.size() && !std::isspace(static_cast<unsigned char>(s[i])))
+                ++i;
+            if (start < i)
+                result.emplace_back(s.substr(start, i - start));
+        }
+        return result;
+    };
+
+    // emit find_package() calls
+    for (auto const& [pkg, _] : m.find_deps)
+        out << std::format("find_package({} REQUIRED)\n", pkg);
+    if (with_tests) {
+        for (auto const& [pkg, _] : m.dev_find_deps)
+            out << std::format("find_package({} REQUIRED)\n", pkg);
+    }
+    if (!m.find_deps.empty() || (with_tests && !m.dev_find_deps.empty()))
+        out << "\n";
+
+    // collect find_package imported targets for linkage
+    std::vector<std::string> find_targets, dev_find_targets;
+    for (auto const& [_, tgts] : m.find_deps)
+        for (auto& t : split_targets(tgts))
+            find_targets.push_back(std::move(t));
+    for (auto const& [_, tgts] : m.dev_find_deps)
+        for (auto& t : split_targets(tgts))
+            dev_find_targets.push_back(std::move(t));
+
     // emit dependency as static library
     auto emit_dep = [&](fetch::FetchedDep const& dep) {
         auto dep_src = dep.path / "src";
@@ -255,10 +290,12 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             out << std::format("\n    {}", src);
         out << "\n)\n";
 
-        if (!regular_deps.empty()) {
+        if (!regular_deps.empty() || !find_targets.empty()) {
             out << std::format("target_link_libraries({} PUBLIC", modules_lib);
             for (auto const& dep : regular_deps)
                 out << std::format("\n    {}", dep->name);
+            for (auto const& t : find_targets)
+                out << std::format("\n    {}", t);
             out << "\n)\n";
         }
 
@@ -292,11 +329,13 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         if (has_modules) {
             auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
             out << std::format("target_link_libraries({} {} {})\n", m.name, link_type, modules_lib);
-        } else if (!regular_deps.empty()) {
+        } else if (!regular_deps.empty() || !find_targets.empty()) {
             auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
             out << std::format("target_link_libraries({} {}", m.name, link_type);
             for (auto const& dep : regular_deps)
                 out << std::format("\n    {}", dep->name);
+            for (auto const& t : find_targets)
+                out << std::format("\n    {}", t);
             out << "\n)\n";
         }
     }
@@ -328,17 +367,21 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             out << std::format("\nadd_executable({})\n", test_name);
             out << std::format("target_sources({} PRIVATE\n    {}\n)\n", test_name, test_cpp);
 
-            if (has_modules || !dev_deps.empty()) {
+            if (has_modules || !dev_deps.empty() || !dev_find_targets.empty()) {
                 out << std::format("target_link_libraries({} PRIVATE", test_name);
                 if (has_modules)
                     out << std::format("\n    {}", modules_lib);
                 for (auto const& dep : dev_deps)
                     out << std::format("\n    {}", dep->name);
+                for (auto const& t : dev_find_targets)
+                    out << std::format("\n    {}", t);
                 out << "\n)\n";
-            } else if (!regular_deps.empty()) {
+            } else if (!regular_deps.empty() || !find_targets.empty()) {
                 out << std::format("target_link_libraries({} PRIVATE", test_name);
                 for (auto const& dep : regular_deps)
                     out << std::format("\n    {}", dep->name);
+                for (auto const& t : find_targets)
+                    out << std::format("\n    {}", t);
                 out << "\n)\n";
             }
         }
@@ -392,6 +435,39 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             p_regular.push_back(&dep);
     }
 
+    // split a space-separated target list
+    auto split_targets = [](std::string_view s) {
+        std::vector<std::string> result;
+        std::size_t i = 0;
+        while (i < s.size()) {
+            while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i])))
+                ++i;
+            std::size_t start = i;
+            while (i < s.size() && !std::isspace(static_cast<unsigned char>(s[i])))
+                ++i;
+            if (start < i)
+                result.emplace_back(s.substr(start, i - start));
+        }
+        return result;
+    };
+
+    // emit find_package() calls
+    for (auto const& [pkg, _] : m.find_deps)
+        out << std::format("find_package({} REQUIRED)\n", pkg);
+    for (auto const& [pkg, _] : m.dev_find_deps)
+        out << std::format("find_package({} REQUIRED)\n", pkg);
+    if (!m.find_deps.empty() || !m.dev_find_deps.empty())
+        out << "\n";
+
+    // collect imported targets
+    std::vector<std::string> p_find, p_dev_find;
+    for (auto const& [_, tgts] : m.find_deps)
+        for (auto& t : split_targets(tgts))
+            p_find.push_back(std::move(t));
+    for (auto const& [_, tgts] : m.dev_find_deps)
+        for (auto& t : split_targets(tgts))
+            p_dev_find.push_back(std::move(t));
+
     // dependencies via FetchContent (regular only for main build)
     auto emit_fetch = [&](std::vector<fetch::FetchedDep const*> const& dep_list) {
         for (auto const* dep : dep_list) {
@@ -443,10 +519,12 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             out << std::format("\n    {}", to_rel(src));
         out << "\n)\n";
 
-        if (!p_regular.empty()) {
+        if (!p_regular.empty() || !p_find.empty()) {
             out << std::format("target_link_libraries({} PUBLIC", modules_lib);
             for (auto const* dep : p_regular)
                 out << std::format("\n    {}", dep->name);
+            for (auto const& t : p_find)
+                out << std::format("\n    {}", t);
             out << "\n)\n";
         }
 
@@ -478,11 +556,13 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         if (has_modules) {
             auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
             out << std::format("target_link_libraries({} {} {})\n", m.name, link_type, modules_lib);
-        } else if (!p_regular.empty()) {
+        } else if (!p_regular.empty() || !p_find.empty()) {
             auto link_type = (m.type == "lib") ? "PUBLIC" : "PRIVATE";
             out << std::format("target_link_libraries({} {}", m.name, link_type);
             for (auto const* dep : p_regular)
                 out << std::format("\n    {}", dep->name);
+            for (auto const& t : p_find)
+                out << std::format("\n    {}", t);
             out << "\n)\n";
         }
     }
@@ -511,17 +591,21 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             out << std::format("\nadd_executable({})\n", test_name);
             out << std::format("target_sources({} PRIVATE\n    {}\n)\n", test_name, to_rel(test_cpp));
 
-            if (has_modules || !p_dev.empty()) {
+            if (has_modules || !p_dev.empty() || !p_dev_find.empty()) {
                 out << std::format("target_link_libraries({} PRIVATE", test_name);
                 if (has_modules)
                     out << std::format("\n    {}", modules_lib);
                 for (auto const* dep : p_dev)
                     out << std::format("\n    {}", dep->name);
+                for (auto const& t : p_dev_find)
+                    out << std::format("\n    {}", t);
                 out << "\n)\n";
-            } else if (!p_regular.empty()) {
+            } else if (!p_regular.empty() || !p_find.empty()) {
                 out << std::format("target_link_libraries({} PRIVATE", test_name);
                 for (auto const* dep : p_regular)
                     out << std::format("\n    {}", dep->name);
+                for (auto const& t : p_find)
+                    out << std::format("\n    {}", t);
                 out << "\n)\n";
             }
         }

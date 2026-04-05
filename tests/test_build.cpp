@@ -206,6 +206,95 @@ void test_defines() {
     check(!cmake_release.contains("DEBUG_LOG"), "no debug define in release");
 }
 
+void test_find_deps_bin() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}");
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+    m.find_deps = {{"Threads", "Threads::Threads"}, {"ZLIB", "ZLIB::ZLIB"}};
+
+    auto cmake = build::generate_cmake(m, proj.root, {}, make_tc());
+
+    check(cmake.contains("find_package(Threads REQUIRED)"), "find_package Threads");
+    check(cmake.contains("find_package(ZLIB REQUIRED)"), "find_package ZLIB");
+    // no modules, no git deps → targets linked on main executable
+    check(cmake.contains("target_link_libraries(app PRIVATE"), "app links");
+    check(cmake.contains("Threads::Threads"), "Threads target linked");
+    check(cmake.contains("ZLIB::ZLIB"), "ZLIB target linked");
+}
+
+void test_find_deps_with_modules() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}");
+    proj.write("src/app.cppm", "export module app;");
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+    m.find_deps = {{"Threads", "Threads::Threads"}};
+
+    auto cmake = build::generate_cmake(m, proj.root, {}, make_tc());
+
+    check(cmake.contains("find_package(Threads REQUIRED)"), "find_package Threads");
+    // with modules: find_target links PUBLIC on modules lib (transitively applied to app)
+    check(cmake.contains("target_link_libraries(app-modules PUBLIC"), "modules links");
+    check(cmake.contains("Threads::Threads"), "Threads target linked");
+}
+
+void test_find_deps_multi_targets() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}");
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+    // one find_package can expose multiple targets
+    m.find_deps = {{"fmt", "fmt::fmt fmt::fmt-header-only"}};
+
+    auto cmake = build::generate_cmake(m, proj.root, {}, make_tc());
+
+    check(cmake.contains("find_package(fmt REQUIRED)"), "find_package fmt");
+    check(cmake.contains("fmt::fmt"), "fmt::fmt target");
+    check(cmake.contains("fmt::fmt-header-only"), "fmt::fmt-header-only target");
+}
+
+void test_dev_find_deps() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}");
+    proj.write("src/app.cppm", "export module app;");
+    proj.write("tests/test_app.cpp", "int main() {}");
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+    m.dev_find_deps = {{"GTest", "GTest::gtest_main"}};
+
+    // without tests: dev find_package should NOT be emitted
+    auto cmake = build::generate_cmake(m, proj.root, {}, make_tc(), false);
+    check(!cmake.contains("find_package(GTest"), "no dev find_package without tests");
+    check(!cmake.contains("GTest::gtest_main"), "no dev target without tests");
+
+    // with tests: dev find_package emitted, linked to test target only
+    auto cmake_test = build::generate_cmake(m, proj.root, {}, make_tc(), true);
+    check(cmake_test.contains("find_package(GTest REQUIRED)"), "dev find_package emitted");
+    // modules should NOT link dev target
+    auto modules_link_pos = cmake_test.find("target_link_libraries(app-modules");
+    check(modules_link_pos == std::string::npos, "modules don't link dev find target");
+    // test target links dev target
+    check(cmake_test.contains("target_link_libraries(test-test_app PRIVATE"), "test links");
+    check(cmake_test.contains("GTest::gtest_main"), "test links dev target");
+}
+
 void test_no_import_std_below_23() {
     TmpProject proj;
     proj.write("src/main.cpp", "int main() {}");
@@ -230,6 +319,10 @@ int main() {
     test_dev_deps_excluded_from_main();
     test_with_tests();
     test_defines();
+    test_find_deps_bin();
+    test_find_deps_with_modules();
+    test_find_deps_multi_targets();
+    test_dev_find_deps();
     test_no_import_std_below_23();
 
     if (failures > 0) {

@@ -14,6 +14,8 @@ struct Manifest {
     int standard = 23;
     std::map<std::string, std::string> dependencies;
     std::map<std::string, std::string> dev_dependencies; // [dev-dependencies]
+    std::map<std::string, std::string> find_deps;        // [dependencies.find]
+    std::map<std::string, std::string> dev_find_deps;    // [dev-dependencies.find]
     std::map<std::string, std::string> defines;         // [defines]
     std::map<std::string, std::string> defines_debug;   // [defines.debug]
     std::map<std::string, std::string> defines_release;  // [defines.release]
@@ -59,14 +61,28 @@ Manifest from_toml(toml::Table const& table) {
     if (table.contains("dependencies")) {
         auto const& deps = table.at("dependencies").as_table();
         for (auto const& [key, val] : deps) {
-            m.dependencies.emplace(key, val.as_string());
+            if (val.is_string()) {
+                m.dependencies.emplace(key, val.as_string());
+            } else if (val.is_table() && key == "find") {
+                auto const& sub = val.as_table();
+                for (auto const& [k, v] : sub) {
+                    m.find_deps.emplace(k, v.as_string());
+                }
+            }
         }
     }
 
     if (table.contains("dev-dependencies")) {
         auto const& deps = table.at("dev-dependencies").as_table();
         for (auto const& [key, val] : deps) {
-            m.dev_dependencies.emplace(key, val.as_string());
+            if (val.is_string()) {
+                m.dev_dependencies.emplace(key, val.as_string());
+            } else if (val.is_table() && key == "find") {
+                auto const& sub = val.as_table();
+                for (auto const& [k, v] : sub) {
+                    m.dev_find_deps.emplace(k, v.as_string());
+                }
+            }
         }
     }
 

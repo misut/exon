@@ -156,6 +156,57 @@ NDEBUG = "1"
     check(m.defines_release.at("NDEBUG") == "1", "defines.release: NDEBUG");
 }
 
+void test_find_deps() {
+    auto input = R"(
+[package]
+name = "app"
+version = "1.0.0"
+
+[dependencies]
+"github.com/user/lib" = "0.1.0"
+
+[dependencies.find]
+Threads = "Threads::Threads"
+ZLIB = "ZLIB::ZLIB"
+
+[dev-dependencies]
+"github.com/user/testlib" = "0.2.0"
+
+[dev-dependencies.find]
+GTest = "GTest::gtest_main"
+)";
+
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    check(m.dependencies.size() == 1, "find: 1 regular git dep");
+    check(m.dependencies.contains("github.com/user/lib"), "find: git dep key");
+    check(m.find_deps.size() == 2, "find: 2 find deps");
+    check(m.find_deps.at("Threads") == "Threads::Threads", "find: Threads target");
+    check(m.find_deps.at("ZLIB") == "ZLIB::ZLIB", "find: ZLIB target");
+    check(m.dev_dependencies.size() == 1, "find: 1 regular dev dep");
+    check(m.dev_find_deps.size() == 1, "find: 1 dev find dep");
+    check(m.dev_find_deps.at("GTest") == "GTest::gtest_main", "find: GTest dev target");
+}
+
+void test_find_deps_only() {
+    auto input = R"(
+[package]
+name = "app"
+version = "1.0.0"
+
+[dependencies.find]
+Threads = "Threads::Threads"
+)";
+
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    check(m.dependencies.empty(), "find-only: no git deps");
+    check(m.find_deps.size() == 1, "find-only: 1 find dep");
+    check(m.find_deps.at("Threads") == "Threads::Threads", "find-only: Threads");
+}
+
 void test_no_dev_deps() {
     auto input = R"(
 [package]
@@ -167,6 +218,8 @@ version = "0.1.0"
     auto m = manifest::from_toml(table);
 
     check(m.dev_dependencies.empty(), "no dev-deps by default");
+    check(m.find_deps.empty(), "no find-deps by default");
+    check(m.dev_find_deps.empty(), "no dev find-deps by default");
     check(m.defines.empty(), "no defines by default");
     check(m.defines_debug.empty(), "no debug defines by default");
     check(m.defines_release.empty(), "no release defines by default");
@@ -179,6 +232,8 @@ int main() {
     test_workspace();
     test_non_workspace();
     test_dev_dependencies();
+    test_find_deps();
+    test_find_deps_only();
     test_defines();
     test_no_dev_deps();
 
