@@ -79,7 +79,7 @@ jobs:
       - name: Verify
         run: .exon/debug/exon info
 
-  bootstrap-windows:
+  windows:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v6
@@ -87,24 +87,34 @@ jobs:
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Install CMake
-        uses: jwlawson/actions-setup-cmake@v2
-        with:
-          cmake-version: '4.3.1'
+      - name: Install intron
+        shell: pwsh
+        run: |
+          iwr -useb https://raw.githubusercontent.com/misut/intron/main/install.ps1 | iex
+          echo "$env:USERPROFILE\.intron\bin" >> $env:GITHUB_PATH
 
-      - name: Install Ninja
-        run: choco install ninja
+      - name: Install toolchains
+        shell: pwsh
+        run: |
+          intron install cmake 4.3.1
+          intron install ninja 1.13.2
+          echo "$env:USERPROFILE\.intron\toolchains\cmake\4.3.1\bin" >> $env:GITHUB_PATH
+          echo "$env:USERPROFILE\.intron\toolchains\ninja\1.13.2" >> $env:GITHUB_PATH
 
       - name: Bootstrap build
+        shell: cmd
         run: |
           cmake -B build -G Ninja
           cmake --build build --target exon
 
       - name: Self-host build
+        shell: cmd
         run: .\build\exon.exe build
 
       - name: Self-host test
+        shell: cmd
         run: .\.exon\debug\exon.exe test
 
       - name: Verify
+        shell: cmd
         run: .\.exon\debug\exon.exe info
