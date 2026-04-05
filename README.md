@@ -9,7 +9,7 @@ A package manager for C++. Inspired by Cargo.
 | macOS | ARM64 (Apple Silicon) |
 | Linux | x86_64 |
 | Linux | aarch64 |
-| Windows | x86_64 (experimental, MSVC bootstrap) |
+| Windows | x86_64 (MSVC) |
 
 ## Installation
 
@@ -23,8 +23,8 @@ curl -fsSL https://raw.githubusercontent.com/misut/exon/main/install.sh | sh
 
 ```sh
 mise plugin add exon https://github.com/misut/mise-exon.git
-mise install exon@0.13.0
-mise use exon@0.13.0
+mise install exon@0.14.0
+mise use exon@0.14.0
 ```
 
 <details>
@@ -66,7 +66,7 @@ hello, world!
 
 | Command | Description |
 |---------|-------------|
-| `exon init [--lib]` | Create a new project |
+| `exon init [--lib] [name]` | Create a new project (in `name/` if given, else in current dir) |
 | `exon info` | Show package information |
 | `exon build [--release]` | Build the project |
 | `exon check [--release]` | Check syntax without linking |
@@ -261,7 +261,7 @@ Install (`[dependencies.vcpkg]`) and link (`[dependencies.find]`) are separate b
 - **CMakeLists.txt sync** — `exon sync` generates a portable CMakeLists.txt for plain cmake builds
 - **Syntax check** — `exon check` compiles modules without linking for fast feedback
 - **Self-hosting** — exon builds itself with `exon build`
-- **Cross-platform** — macOS (ARM64), Linux (x86_64, aarch64), and Windows (x86_64, experimental MSVC bootstrap)
+- **Cross-platform** — macOS (ARM64), Linux (x86_64, aarch64), and Windows (x86_64, MSVC)
 
 ## License
 
