@@ -47,9 +47,7 @@ jobs:
           eval "$(intron env)"
           LLVM_ROOT="$HOME/.intron/toolchains/llvm/22.1.2"
           MODULES_JSON=$(find "$LLVM_ROOT" -name "libc++.modules.json" -print -quit)
-          git clone https://github.com/misut/tomlcpp.git /tmp/tomlcpp
-          CMAKE_ARGS="-Wno-dev -B build -S .github/cmake -G Ninja"
-          CMAKE_ARGS="$CMAKE_ARGS -DTOMLCPP_DIR=/tmp/tomlcpp"
+          CMAKE_ARGS="-Wno-dev -B build -G Ninja"
           CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CXX_COMPILER=$LLVM_ROOT/bin/clang++"
           if [ -n "$MODULES_JSON" ]; then
             CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CXX_STDLIB_MODULES_JSON=$MODULES_JSON"
@@ -64,7 +62,7 @@ jobs:
             export LD_LIBRARY_PATH="$LIBCXX_DIR:${LD_LIBRARY_PATH:-}"
           fi
           eval cmake $CMAKE_ARGS
-          cmake --build build
+          cmake --build build --target exon
           ./build/exon build --release
 
       - name: Package
