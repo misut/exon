@@ -207,6 +207,132 @@ Threads = "Threads::Threads"
     check(m.find_deps.at("Threads") == "Threads::Threads", "find-only: Threads");
 }
 
+void test_path_deps() {
+    auto input = R"(
+[package]
+name = "app"
+version = "1.0.0"
+
+[dependencies]
+"github.com/user/lib" = "0.1.0"
+
+[dependencies.path]
+my-lib = "../my-lib"
+shared = "packages/shared"
+
+[dependencies.workspace]
+core = true
+utils = true
+
+[dev-dependencies.path]
+testlib = "../testlib"
+
+[dev-dependencies.workspace]
+mocks = true
+)";
+
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    check(m.dependencies.size() == 1, "path: 1 git dep");
+    check(m.path_deps.size() == 2, "path: 2 path deps");
+    check(m.path_deps.at("my-lib") == "../my-lib", "path: my-lib path");
+    check(m.path_deps.at("shared") == "packages/shared", "path: shared path");
+    check(m.workspace_deps.size() == 2, "path: 2 workspace deps");
+    check(m.workspace_deps.contains("core"), "path: workspace core");
+    check(m.workspace_deps.contains("utils"), "path: workspace utils");
+    check(m.dev_path_deps.size() == 1, "path: 1 dev path dep");
+    check(m.dev_path_deps.at("testlib") == "../testlib", "path: dev testlib");
+    check(m.dev_workspace_deps.size() == 1, "path: 1 dev workspace dep");
+    check(m.dev_workspace_deps.contains("mocks"), "path: dev workspace mocks");
+}
+
+void test_workspace_deps_false_ignored() {
+    auto input = R"(
+[package]
+name = "app"
+version = "1.0.0"
+
+[dependencies.workspace]
+yes = true
+no = false
+)";
+
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    check(m.workspace_deps.size() == 1, "ws: only true entries");
+    check(m.workspace_deps.contains("yes"), "ws: true kept");
+    check(!m.workspace_deps.contains("no"), "ws: false skipped");
+}
+
+void test_find_workspace_root() {
+    namespace fs = std::filesystem;
+    auto tmp = fs::temp_directory_path() / "exon_test_ws_root";
+    fs::remove_all(tmp);
+    fs::create_directories(tmp / "packages" / "app");
+
+    // workspace root
+    {
+        auto f = std::ofstream{tmp / "exon.toml"};
+        f << "[workspace]\nmembers = [\"packages/app\"]\n";
+    }
+    // member
+    {
+        auto f = std::ofstream{tmp / "packages" / "app" / "exon.toml"};
+        f << "[package]\nname = \"app\"\nversion = \"0.1.0\"\n";
+    }
+
+    auto root = manifest::find_workspace_root(tmp / "packages" / "app");
+    check(root.has_value(), "find_workspace_root: found");
+    if (root)
+        check(fs::weakly_canonical(*root) == fs::weakly_canonical(tmp),
+              "find_workspace_root: correct root");
+
+    // not in a workspace
+    auto other = fs::temp_directory_path() / "exon_test_no_ws";
+    fs::remove_all(other);
+    fs::create_directories(other);
+    auto no_root = manifest::find_workspace_root(other);
+    check(!no_root.has_value(), "find_workspace_root: no ws");
+
+    fs::remove_all(tmp);
+    fs::remove_all(other);
+}
+
+void test_resolve_workspace_member() {
+    namespace fs = std::filesystem;
+    auto tmp = fs::temp_directory_path() / "exon_test_resolve_ws";
+    fs::remove_all(tmp);
+    fs::create_directories(tmp / "pkg-a");
+    fs::create_directories(tmp / "pkg-b");
+
+    manifest::Manifest ws;
+    ws.workspace_members = {"pkg-a", "pkg-b"};
+
+    // member a: package name "alpha"
+    {
+        auto f = std::ofstream{tmp / "pkg-a" / "exon.toml"};
+        f << "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\n";
+    }
+    // member b: package name "beta"
+    {
+        auto f = std::ofstream{tmp / "pkg-b" / "exon.toml"};
+        f << "[package]\nname = \"beta\"\nversion = \"0.1.0\"\n";
+    }
+
+    auto alpha = manifest::resolve_workspace_member(tmp, ws, "alpha");
+    check(alpha.has_value() && alpha->filename() == "pkg-a", "resolve: alpha -> pkg-a");
+
+    auto beta = manifest::resolve_workspace_member(tmp, ws, "beta");
+    check(beta.has_value() && beta->filename() == "pkg-b", "resolve: beta -> pkg-b");
+
+    auto missing = manifest::resolve_workspace_member(tmp, ws, "gamma");
+    check(!missing.has_value(), "resolve: missing returns nullopt");
+
+    fs::remove_all(tmp);
+}
+
 void test_no_dev_deps() {
     auto input = R"(
 [package]
@@ -220,6 +346,10 @@ version = "0.1.0"
     check(m.dev_dependencies.empty(), "no dev-deps by default");
     check(m.find_deps.empty(), "no find-deps by default");
     check(m.dev_find_deps.empty(), "no dev find-deps by default");
+    check(m.path_deps.empty(), "no path-deps by default");
+    check(m.dev_path_deps.empty(), "no dev path-deps by default");
+    check(m.workspace_deps.empty(), "no workspace-deps by default");
+    check(m.dev_workspace_deps.empty(), "no dev workspace-deps by default");
     check(m.defines.empty(), "no defines by default");
     check(m.defines_debug.empty(), "no debug defines by default");
     check(m.defines_release.empty(), "no release defines by default");
@@ -234,6 +364,10 @@ int main() {
     test_dev_dependencies();
     test_find_deps();
     test_find_deps_only();
+    test_path_deps();
+    test_workspace_deps_false_ignored();
+    test_find_workspace_root();
+    test_resolve_workspace_member();
     test_defines();
     test_no_dev_deps();
 

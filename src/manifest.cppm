@@ -16,6 +16,10 @@ struct Manifest {
     std::map<std::string, std::string> dev_dependencies; // [dev-dependencies]
     std::map<std::string, std::string> find_deps;        // [dependencies.find]
     std::map<std::string, std::string> dev_find_deps;    // [dev-dependencies.find]
+    std::map<std::string, std::string> path_deps;        // [dependencies.path]
+    std::map<std::string, std::string> dev_path_deps;    // [dev-dependencies.path]
+    std::set<std::string> workspace_deps;                // [dependencies.workspace]
+    std::set<std::string> dev_workspace_deps;            // [dev-dependencies.workspace]
     std::map<std::string, std::string> defines;         // [defines]
     std::map<std::string, std::string> defines_debug;   // [defines.debug]
     std::map<std::string, std::string> defines_release;  // [defines.release]
@@ -58,32 +62,41 @@ Manifest from_toml(toml::Table const& table) {
         }
     }
 
-    if (table.contains("dependencies")) {
-        auto const& deps = table.at("dependencies").as_table();
+    auto parse_deps_section = [](toml::Table const& deps,
+                                  std::map<std::string, std::string>& string_deps,
+                                  std::map<std::string, std::string>& find_deps,
+                                  std::map<std::string, std::string>& path_deps,
+                                  std::set<std::string>& workspace_deps) {
         for (auto const& [key, val] : deps) {
             if (val.is_string()) {
-                m.dependencies.emplace(key, val.as_string());
+                string_deps.emplace(key, val.as_string());
             } else if (val.is_table() && key == "find") {
-                auto const& sub = val.as_table();
-                for (auto const& [k, v] : sub) {
-                    m.find_deps.emplace(k, v.as_string());
+                for (auto const& [k, v] : val.as_table()) {
+                    if (v.is_string())
+                        find_deps.emplace(k, v.as_string());
+                }
+            } else if (val.is_table() && key == "path") {
+                for (auto const& [k, v] : val.as_table()) {
+                    if (v.is_string())
+                        path_deps.emplace(k, v.as_string());
+                }
+            } else if (val.is_table() && key == "workspace") {
+                for (auto const& [k, v] : val.as_table()) {
+                    if (v.is_bool() && v.as_bool())
+                        workspace_deps.insert(k);
                 }
             }
         }
+    };
+
+    if (table.contains("dependencies")) {
+        parse_deps_section(table.at("dependencies").as_table(), m.dependencies, m.find_deps,
+                           m.path_deps, m.workspace_deps);
     }
 
     if (table.contains("dev-dependencies")) {
-        auto const& deps = table.at("dev-dependencies").as_table();
-        for (auto const& [key, val] : deps) {
-            if (val.is_string()) {
-                m.dev_dependencies.emplace(key, val.as_string());
-            } else if (val.is_table() && key == "find") {
-                auto const& sub = val.as_table();
-                for (auto const& [k, v] : sub) {
-                    m.dev_find_deps.emplace(k, v.as_string());
-                }
-            }
-        }
+        parse_deps_section(table.at("dev-dependencies").as_table(), m.dev_dependencies,
+                           m.dev_find_deps, m.dev_path_deps, m.dev_workspace_deps);
     }
 
     if (table.contains("defines")) {
@@ -107,6 +120,51 @@ Manifest from_toml(toml::Table const& table) {
 Manifest load(std::string_view path) {
     auto table = toml::parse_file(path);
     return from_toml(table);
+}
+
+// walk up from `start` looking for a workspace exon.toml; stop at HOME or filesystem root
+std::optional<std::filesystem::path> find_workspace_root(std::filesystem::path start) {
+    auto home_env = std::getenv("HOME");
+    std::filesystem::path home = home_env ? std::filesystem::path{home_env} : std::filesystem::path{};
+    start = std::filesystem::weakly_canonical(start);
+    while (true) {
+        auto toml_path = start / "exon.toml";
+        if (std::filesystem::exists(toml_path)) {
+            try {
+                auto m = load(toml_path.string());
+                if (is_workspace(m))
+                    return start;
+            } catch (...) {
+                // unreadable manifest: ignore and keep walking up
+            }
+        }
+        if (!home.empty() && start == home)
+            return std::nullopt;
+        auto parent = start.parent_path();
+        if (parent == start)
+            return std::nullopt;
+        start = parent;
+    }
+}
+
+// resolve a workspace dep name (matches member's package.name) to absolute path
+std::optional<std::filesystem::path> resolve_workspace_member(
+    std::filesystem::path const& workspace_root, Manifest const& ws_manifest,
+    std::string_view name) {
+    for (auto const& member : ws_manifest.workspace_members) {
+        auto member_path = workspace_root / member;
+        auto member_toml = member_path / "exon.toml";
+        if (!std::filesystem::exists(member_toml))
+            continue;
+        try {
+            auto mm = load(member_toml.string());
+            if (mm.name == name)
+                return member_path;
+        } catch (...) {
+            // skip malformed
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace manifest
