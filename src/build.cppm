@@ -4,6 +4,7 @@ import toml;
 import manifest;
 import toolchain;
 import fetch;
+import vcpkg;
 
 export namespace build {
 
@@ -82,7 +83,9 @@ BuildFlags resolve_flags(toolchain::Toolchain const& tc, manifest::Manifest cons
 
 std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest const& m,
                           std::filesystem::path const& build_dir,
-                          std::filesystem::path const& source_dir, bool release) {
+                          std::filesystem::path const& source_dir, bool release,
+                          std::string_view vcpkg_toolchain = {},
+                          std::filesystem::path const& vcpkg_manifest_dir = {}) {
     auto build_type = release ? "Release" : "Debug";
     auto cmd = std::format("{} -B {} -S {} -G Ninja -DCMAKE_BUILD_TYPE={}", tc.cmake,
                            build_dir.string(), source_dir.string(), build_type);
@@ -92,6 +95,10 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
         cmd += std::format(" -DCMAKE_OSX_SYSROOT={}", tc.sysroot);
     if (!tc.stdlib_modules_json.empty() && m.standard >= 23)
         cmd += std::format(" -DCMAKE_CXX_STDLIB_MODULES_JSON={}", tc.stdlib_modules_json);
+    if (!vcpkg_toolchain.empty()) {
+        cmd += std::format(" -DCMAKE_TOOLCHAIN_FILE={}", vcpkg_toolchain);
+        cmd += std::format(" -DVCPKG_MANIFEST_DIR={}", vcpkg_manifest_dir.string());
+    }
 
     auto flags = resolve_flags(tc, m, release);
     if (!flags.cxx_flags.empty())
@@ -139,6 +146,16 @@ void ensure_intron_tools() {
         if (std::system(cmd.c_str()) != 0)
             std::println(std::cerr, "warning: failed to install {} {}", tool, version);
     }
+}
+
+// set up vcpkg.json + return toolchain file path, or empty path if no vcpkg deps
+std::filesystem::path setup_vcpkg(manifest::Manifest const& m,
+                                   std::filesystem::path const& exon_dir) {
+    if (m.vcpkg_deps.empty() && m.dev_vcpkg_deps.empty())
+        return {};
+    auto root = vcpkg::require_root();
+    vcpkg::write_manifest(m, exon_dir / "vcpkg.json");
+    return root / "scripts" / "buildsystems" / "vcpkg.cmake";
 }
 
 } // namespace detail
@@ -667,6 +684,7 @@ int run(manifest::Manifest const& m, bool release = false) {
 
     auto lock_path = (project_root / "exon.lock").string();
     auto fetch_result = fetch::fetch_all(m, lock_path);
+    auto vcpkg_toolchain = detail::setup_vcpkg(m, exon_dir);
 
     auto content = generate_cmake(m, project_root, fetch_result.deps, tc, false, release);
     bool changed = sync_cmake(content, exon_dir);
@@ -675,7 +693,8 @@ int run(manifest::Manifest const& m, bool release = false) {
 
     if (changed || !configured) {
         std::println("configuring...");
-        int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release).c_str());
+        int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release,
+                                                    vcpkg_toolchain.string(), exon_dir).c_str());
         if (rc != 0)
             return rc;
     }
@@ -702,6 +721,7 @@ int run_check(manifest::Manifest const& m, bool release = false) {
 
     auto lock_path = (project_root / "exon.lock").string();
     auto fetch_result = fetch::fetch_all(m, lock_path);
+    auto vcpkg_toolchain = detail::setup_vcpkg(m, exon_dir);
 
     auto content = generate_cmake(m, project_root, fetch_result.deps, tc, false, release);
     bool changed = sync_cmake(content, exon_dir);
@@ -710,7 +730,8 @@ int run_check(manifest::Manifest const& m, bool release = false) {
 
     if (changed || !configured) {
         std::println("configuring...");
-        int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release).c_str());
+        int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release,
+                                                    vcpkg_toolchain.string(), exon_dir).c_str());
         if (rc != 0)
             return rc;
     }
@@ -751,6 +772,7 @@ int run_test(manifest::Manifest const& m, bool release = false) {
 
     auto lock_path = (project_root / "exon.lock").string();
     auto fetch_result = fetch::fetch_all(m, lock_path, true);
+    auto vcpkg_toolchain = detail::setup_vcpkg(m, exon_dir);
 
     auto content = generate_cmake(m, project_root, fetch_result.deps, tc, true, release);
     bool changed = sync_cmake(content, exon_dir);
@@ -759,7 +781,8 @@ int run_test(manifest::Manifest const& m, bool release = false) {
 
     if (changed || !configured) {
         std::println("configuring...");
-        int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release).c_str());
+        int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release,
+                                                    vcpkg_toolchain.string(), exon_dir).c_str());
         if (rc != 0)
             return rc;
     }

@@ -333,6 +333,32 @@ void test_resolve_workspace_member() {
     fs::remove_all(tmp);
 }
 
+void test_vcpkg_deps() {
+    auto input = R"(
+[package]
+name = "app"
+version = "1.0.0"
+
+[dependencies.vcpkg]
+fmt = "11.0.0"
+zlib = "*"
+
+[dev-dependencies.vcpkg]
+gtest = "*"
+benchmark = "1.9.0"
+)";
+
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    check(m.vcpkg_deps.size() == 2, "vcpkg: 2 regular deps");
+    check(m.vcpkg_deps.at("fmt") == "11.0.0", "vcpkg: fmt version");
+    check(m.vcpkg_deps.at("zlib") == "*", "vcpkg: zlib wildcard");
+    check(m.dev_vcpkg_deps.size() == 2, "vcpkg: 2 dev deps");
+    check(m.dev_vcpkg_deps.at("gtest") == "*", "vcpkg: dev gtest");
+    check(m.dev_vcpkg_deps.at("benchmark") == "1.9.0", "vcpkg: dev benchmark version");
+}
+
 void test_no_dev_deps() {
     auto input = R"(
 [package]
@@ -350,6 +376,8 @@ version = "0.1.0"
     check(m.dev_path_deps.empty(), "no dev path-deps by default");
     check(m.workspace_deps.empty(), "no workspace-deps by default");
     check(m.dev_workspace_deps.empty(), "no dev workspace-deps by default");
+    check(m.vcpkg_deps.empty(), "no vcpkg-deps by default");
+    check(m.dev_vcpkg_deps.empty(), "no dev vcpkg-deps by default");
     check(m.defines.empty(), "no defines by default");
     check(m.defines_debug.empty(), "no debug defines by default");
     check(m.defines_release.empty(), "no release defines by default");
@@ -368,6 +396,7 @@ int main() {
     test_workspace_deps_false_ignored();
     test_find_workspace_root();
     test_resolve_workspace_member();
+    test_vcpkg_deps();
     test_defines();
     test_no_dev_deps();
 

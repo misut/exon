@@ -20,6 +20,8 @@ struct Manifest {
     std::map<std::string, std::string> dev_path_deps;    // [dev-dependencies.path]
     std::set<std::string> workspace_deps;                // [dependencies.workspace]
     std::set<std::string> dev_workspace_deps;            // [dev-dependencies.workspace]
+    std::map<std::string, std::string> vcpkg_deps;       // [dependencies.vcpkg]
+    std::map<std::string, std::string> dev_vcpkg_deps;   // [dev-dependencies.vcpkg]
     std::map<std::string, std::string> defines;         // [defines]
     std::map<std::string, std::string> defines_debug;   // [defines.debug]
     std::map<std::string, std::string> defines_release;  // [defines.release]
@@ -66,7 +68,8 @@ Manifest from_toml(toml::Table const& table) {
                                   std::map<std::string, std::string>& string_deps,
                                   std::map<std::string, std::string>& find_deps,
                                   std::map<std::string, std::string>& path_deps,
-                                  std::set<std::string>& workspace_deps) {
+                                  std::set<std::string>& workspace_deps,
+                                  std::map<std::string, std::string>& vcpkg_deps) {
         for (auto const& [key, val] : deps) {
             if (val.is_string()) {
                 string_deps.emplace(key, val.as_string());
@@ -85,18 +88,23 @@ Manifest from_toml(toml::Table const& table) {
                     if (v.is_bool() && v.as_bool())
                         workspace_deps.insert(k);
                 }
+            } else if (val.is_table() && key == "vcpkg") {
+                for (auto const& [k, v] : val.as_table()) {
+                    if (v.is_string())
+                        vcpkg_deps.emplace(k, v.as_string());
+                }
             }
         }
     };
 
     if (table.contains("dependencies")) {
         parse_deps_section(table.at("dependencies").as_table(), m.dependencies, m.find_deps,
-                           m.path_deps, m.workspace_deps);
+                           m.path_deps, m.workspace_deps, m.vcpkg_deps);
     }
 
     if (table.contains("dev-dependencies")) {
         parse_deps_section(table.at("dev-dependencies").as_table(), m.dev_dependencies,
-                           m.dev_find_deps, m.dev_path_deps, m.dev_workspace_deps);
+                           m.dev_find_deps, m.dev_path_deps, m.dev_workspace_deps, m.dev_vcpkg_deps);
     }
 
     if (table.contains("defines")) {

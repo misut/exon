@@ -27,6 +27,7 @@ commands:
     add [--dev] <pkg> <ver>            add a git dependency
     add [--dev] --path <name> <path>   add a local path dependency
     add [--dev] --workspace <name>     add a workspace member dependency
+    add [--dev] --vcpkg <name> <ver>   add a vcpkg dependency
     remove <pkg>                       remove a dependency
     update                 update dependencies to latest compatible versions
     sync                   sync CMakeLists.txt with exon.toml
@@ -276,13 +277,15 @@ void insert_into_section(std::string& content, std::string const& section,
 bool dep_exists(manifest::Manifest const& m, std::string const& name) {
     return m.dependencies.contains(name) || m.dev_dependencies.contains(name) ||
            m.path_deps.contains(name) || m.dev_path_deps.contains(name) ||
-           m.workspace_deps.contains(name) || m.dev_workspace_deps.contains(name);
+           m.workspace_deps.contains(name) || m.dev_workspace_deps.contains(name) ||
+           m.vcpkg_deps.contains(name) || m.dev_vcpkg_deps.contains(name);
 }
 
 int cmd_add(int argc, char* argv[]) {
     bool dev = false;
     bool is_path = false;
     bool is_workspace_dep = false;
+    bool is_vcpkg = false;
     int i = 2;
     while (i < argc) {
         std::string_view a{argv[i]};
@@ -292,13 +295,16 @@ int cmd_add(int argc, char* argv[]) {
             is_path = true;
         else if (a == "--workspace")
             is_workspace_dep = true;
+        else if (a == "--vcpkg")
+            is_vcpkg = true;
         else
             break;
         ++i;
     }
 
-    if (is_path && is_workspace_dep) {
-        std::println(std::cerr, "error: --path and --workspace are mutually exclusive");
+    int exclusive_count = int(is_path) + int(is_workspace_dep) + int(is_vcpkg);
+    if (exclusive_count > 1) {
+        std::println(std::cerr, "error: --path, --workspace, --vcpkg are mutually exclusive");
         return 1;
     }
 
@@ -350,12 +356,23 @@ int cmd_add(int argc, char* argv[]) {
         section = section_prefix + ".workspace";
         dep_line = std::format("{} = true\n", name);
         display = std::format("workspace dep {}", name);
+    } else if (is_vcpkg) {
+        if (argc < i + 2) {
+            std::println(std::cerr, "usage: exon add [--dev] --vcpkg <name> <version>");
+            return 1;
+        }
+        name = argv[i];
+        value = argv[i + 1];
+        section = section_prefix + ".vcpkg";
+        dep_line = std::format("{} = \"{}\"\n", name, value);
+        display = std::format("vcpkg dep {} = \"{}\"", name, value);
     } else {
         if (argc < i + 2) {
             std::println(std::cerr,
                          "usage: exon add [--dev] <package> <version>\n"
                          "       exon add [--dev] --path <name> <path>\n"
-                         "       exon add [--dev] --workspace <name>");
+                         "       exon add [--dev] --workspace <name>\n"
+                         "       exon add [--dev] --vcpkg <name> <version>");
             return 1;
         }
         name = argv[i];
@@ -367,7 +384,7 @@ int cmd_add(int argc, char* argv[]) {
     }
 
     // use the base name for duplicate check (for git deps, key is the full URL path)
-    auto dup_key = is_path || is_workspace_dep ? name : name;
+    auto dup_key = name;
     if (dep_exists(m, dup_key)) {
         std::println(std::cerr, "error: '{}' is already a dependency", dup_key);
         return 1;
