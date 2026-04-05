@@ -148,6 +148,12 @@ void ensure_intron_tools() {
 
     auto const& tools = table.at("toolchain").as_table();
     for (auto const& [tool, ver_val] : tools) {
+        // Windows uses MSVC's native `import std;` — llvm/libc++ is not needed
+        // and the clang+llvm Windows archive is ~800MB compressed, slow to install.
+#if defined(_WIN32)
+        if (tool == "llvm")
+            continue;
+#endif
         auto version = ver_val.as_string();
         auto tool_path = intron_root / tool / version;
         if (std::filesystem::exists(tool_path))
