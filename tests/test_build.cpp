@@ -70,8 +70,10 @@ void test_basic_bin() {
     check(cmake.contains("add_executable(hello)"), "add_executable");
     check(cmake.contains("main.cpp"), "main.cpp source");
     check(cmake.contains("CMAKE_CXX_STANDARD 23"), "standard 23");
-    check(cmake.contains("EXON_PKG_NAME=\"hello\""), "built-in define name");
-    check(cmake.contains("EXON_PKG_VERSION=\"1.0.0\""), "built-in define version");
+    // defines are emitted via set_source_files_properties COMPILE_DEFINITIONS
+    // where embedded quotes must be CMake-escaped (backslash-quote)
+    check(cmake.contains("EXON_PKG_NAME=\\\"hello\\\""), "built-in define name");
+    check(cmake.contains("EXON_PKG_VERSION=\\\"1.0.0\\\""), "built-in define version");
 }
 
 void test_lib_with_modules() {

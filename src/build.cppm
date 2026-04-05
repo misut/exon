@@ -118,7 +118,7 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
 }
 
 std::string read_file(std::filesystem::path const& path) {
-    auto file = std::ifstream(path);
+    auto file = std::ifstream(path, std::ios::binary);
     if (!file)
         return {};
     return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
@@ -397,19 +397,36 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         }
     }
 
-    // compile definitions (applied to modules library so .cppm files can use them)
+    // compile definitions
+    // EXON_PKG_NAME/VERSION are set per-source so our value wins over any
+    // same-named macro inherited from a dependency's compile definitions
+    // (every exon package exposes these macros). CMake applies inherited
+    // target definitions after the target's own, so a target-level define
+    // would be overridden.
     {
-        auto def_target = has_modules ? modules_lib : std::string{m.name};
         auto& profile_defs = release ? m.defines_release : m.defines_debug;
 
-        out << std::format("\ntarget_compile_definitions({} PUBLIC\n", def_target);
-        out << std::format("    EXON_PKG_NAME=\"{}\"\n", m.name);
-        out << std::format("    EXON_PKG_VERSION=\"{}\"\n", m.version);
-        for (auto const& [key, val] : m.defines)
-            out << std::format("    {}=\"{}\"\n", key, val);
-        for (auto const& [key, val] : profile_defs)
-            out << std::format("    {}=\"{}\"\n", key, val);
-        out << ")\n";
+        if (!sf.cpp.empty() || !sf.cppm.empty()) {
+            out << "\nset_source_files_properties(\n";
+            for (auto const& src : sf.cppm)
+                out << std::format("    {}\n", src);
+            for (auto const& src : sf.cpp)
+                out << std::format("    {}\n", src);
+            out << "    PROPERTIES COMPILE_DEFINITIONS\n";
+            out << std::format("    \"EXON_PKG_NAME=\\\"{}\\\";EXON_PKG_VERSION=\\\"{}\\\"\"\n",
+                               m.name, m.version);
+            out << ")\n";
+        }
+
+        if (!m.defines.empty() || !profile_defs.empty()) {
+            auto def_target = has_modules ? modules_lib : std::string{m.name};
+            out << std::format("\ntarget_compile_definitions({} PUBLIC\n", def_target);
+            for (auto const& [key, val] : m.defines)
+                out << std::format("    {}=\"{}\"\n", key, val);
+            for (auto const& [key, val] : profile_defs)
+                out << std::format("    {}=\"{}\"\n", key, val);
+            out << ")\n";
+        }
     }
 
     // test targets
@@ -456,7 +473,7 @@ bool sync_cmake(std::string const& content, std::filesystem::path const& output_
     if (existing == content)
         return false;
 
-    auto file = std::ofstream(cmake_path);
+    auto file = std::ofstream(cmake_path, std::ios::binary);
     if (!file)
         throw std::runtime_error(std::format("failed to create {}", cmake_path.string()));
     file << content;
@@ -658,16 +675,32 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
     }
 
     // compile definitions
+    // EXON_PKG_NAME/VERSION are set per-source so our value wins over any
+    // same-named macro inherited from a dependency's compile definitions
+    // (every exon package exposes these macros). CMake applies inherited
+    // target definitions after the target's own, so a target-level define
+    // would be overridden.
     {
-        bool is_alias = (m.type == "lib" && has_modules && sf.cpp.empty());
-        auto def_target = is_alias ? modules_lib : std::string{m.name};
+        if (!sf.cpp.empty() || !sf.cppm.empty()) {
+            out << "\nset_source_files_properties(\n";
+            for (auto const& src : sf.cppm)
+                out << std::format("    {}\n", to_rel(src));
+            for (auto const& src : sf.cpp)
+                out << std::format("    {}\n", to_rel(src));
+            out << "    PROPERTIES COMPILE_DEFINITIONS\n";
+            out << std::format("    \"EXON_PKG_NAME=\\\"{}\\\";EXON_PKG_VERSION=\\\"{}\\\"\"\n",
+                               m.name, m.version);
+            out << ")\n";
+        }
 
-        out << std::format("\ntarget_compile_definitions({} PUBLIC\n", def_target);
-        out << std::format("    EXON_PKG_NAME=\"{}\"\n", m.name);
-        out << std::format("    EXON_PKG_VERSION=\"{}\"\n", m.version);
-        for (auto const& [key, val] : m.defines)
-            out << std::format("    {}=\"{}\"\n", key, val);
-        out << ")\n";
+        if (!m.defines.empty()) {
+            bool is_alias = (m.type == "lib" && has_modules && sf.cpp.empty());
+            auto def_target = is_alias ? modules_lib : std::string{m.name};
+            out << std::format("\ntarget_compile_definitions({} PUBLIC\n", def_target);
+            for (auto const& [key, val] : m.defines)
+                out << std::format("    {}=\"{}\"\n", key, val);
+            out << ")\n";
+        }
     }
 
     // test targets
@@ -712,7 +745,7 @@ bool sync_root_cmake(manifest::Manifest const& m, std::vector<fetch::FetchedDep>
     if (existing == content)
         return false;
 
-    auto file = std::ofstream(cmake_path);
+    auto file = std::ofstream(cmake_path, std::ios::binary);
     if (!file)
         throw std::runtime_error(std::format("failed to create {}", cmake_path.string()));
     file << content;
@@ -785,7 +818,14 @@ int run_check(manifest::Manifest const& m, bool release = false) {
             return rc;
     }
 
-    auto target = std::format("{}-modules", m.name);
+    // Prefer building just the modules library (skips linking). If the
+    // project has no .cppm files there is no <name>-modules target, so
+    // fall back to building the main target.
+    auto src_dir = project_root / "src";
+    auto src_sf = detail::collect_sources(src_dir);
+    auto target = src_sf.cppm.empty()
+        ? std::string{m.name}
+        : std::format("{}-modules", m.name);
     auto build_cmd = std::format("{} --build {} --target {}", toolchain::shell_quote(tc.cmake),
                                  toolchain::shell_quote(build_dir.string()), target);
     std::println("checking...");

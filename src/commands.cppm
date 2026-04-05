@@ -18,7 +18,7 @@ constexpr auto version = EXON_PKG_VERSION;
 constexpr auto usage_text = R"(usage: exon <command> [args]
 
 commands:
-    init [--lib]           create a new exon.toml
+    init [--lib] [name]    create a new exon.toml
     info                   show package information
     build [--release]      build the project
     check [--release]      check syntax without linking
@@ -77,18 +77,56 @@ int cmd_version() {
 }
 
 int cmd_init(int argc, char* argv[]) {
-    if (std::filesystem::exists("exon.toml")) {
-        std::println(std::cerr, "error: exon.toml already exists");
+    // Parse args: [--lib] [name] in any order.
+    bool is_lib = false;
+    std::string name;
+    for (int i = 2; i < argc; ++i) {
+        auto arg = std::string_view{argv[i]};
+        if (arg == "--lib") {
+            is_lib = true;
+        } else if (arg.starts_with("--")) {
+            std::println(std::cerr, "error: unknown flag '{}'", arg);
+            return 1;
+        } else if (name.empty()) {
+            name = arg;
+        } else {
+            std::println(std::cerr, "error: unexpected argument '{}'", arg);
+            return 1;
+        }
+    }
+
+    auto target_dir = std::filesystem::current_path();
+    if (!name.empty()) {
+        target_dir /= name;
+        std::error_code ec;
+        std::filesystem::create_directories(target_dir, ec);
+        if (ec) {
+            std::println(std::cerr, "error: failed to create directory '{}': {}",
+                         target_dir.string(), ec.message());
+            return 1;
+        }
+    } else {
+        // Default package name to the current directory name.
+        name = target_dir.filename().string();
+    }
+
+    auto manifest_path = target_dir / "exon.toml";
+    if (std::filesystem::exists(manifest_path)) {
+        std::println(std::cerr, "error: {} already exists", manifest_path.string());
         return 1;
     }
-    auto file = std::ofstream("exon.toml");
+    auto file = std::ofstream(manifest_path);
     if (!file) {
-        std::println(std::cerr, "error: failed to create exon.toml");
+        std::println(std::cerr, "error: failed to create {}", manifest_path.string());
         return 1;
     }
-    bool is_lib = (argc >= 3 && std::string_view{argv[2]} == "--lib");
-    file << (is_lib ? templates::exon_toml_lib : templates::exon_toml_bin);
-    std::println("created exon.toml ({})", is_lib ? "lib" : "bin");
+    auto tmpl = std::string{is_lib ? templates::exon_toml_lib : templates::exon_toml_bin};
+    // Fill in the package name (template has `name = ""`).
+    auto pos = tmpl.find("name = \"\"");
+    if (pos != std::string::npos)
+        tmpl.replace(pos, 9, std::format("name = \"{}\"", name));
+    file << tmpl;
+    std::println("created {} ({})", manifest_path.string(), is_lib ? "lib" : "bin");
     return 0;
 }
 
@@ -553,6 +591,60 @@ int cmd_remove(int argc, char* argv[]) {
         }
     }
 done:
+
+    // Drop subsection headers that have no entries after removing the dep,
+    // e.g. `[dependencies.vcpkg]` that became empty. Leave the top-level
+    // `[dependencies]` and `[package]` alone.
+    {
+        auto cleaned = std::string{};
+        cleaned.reserve(content.size());
+        std::size_t i = 0;
+        while (i < content.size()) {
+            auto line_end = content.find('\n', i);
+            auto next = (line_end == std::string::npos) ? content.size() : line_end + 1;
+            auto line = std::string_view{content}.substr(i, next - i);
+            auto trimmed = line;
+            while (!trimmed.empty() && (trimmed.back() == '\n' || trimmed.back() == '\r' ||
+                                         trimmed.back() == ' ' || trimmed.back() == '\t'))
+                trimmed.remove_suffix(1);
+            while (!trimmed.empty() && (trimmed.front() == ' ' || trimmed.front() == '\t'))
+                trimmed.remove_prefix(1);
+
+            // Only strip subsection headers ([x.y] or [[x.y]]), never top-level ones.
+            bool is_subsection = trimmed.starts_with("[") &&
+                                 trimmed.ends_with("]") &&
+                                 trimmed.find('.') != std::string_view::npos;
+            if (is_subsection) {
+                // Look ahead: is the next non-blank line another section header, or EOF?
+                std::size_t j = next;
+                bool empty_section = true;
+                while (j < content.size()) {
+                    auto je = content.find('\n', j);
+                    auto jnext = (je == std::string::npos) ? content.size() : je + 1;
+                    auto peek = std::string_view{content}.substr(j, jnext - j);
+                    auto pt = peek;
+                    while (!pt.empty() && (pt.back() == '\n' || pt.back() == '\r' ||
+                                            pt.back() == ' ' || pt.back() == '\t'))
+                        pt.remove_suffix(1);
+                    while (!pt.empty() && (pt.front() == ' ' || pt.front() == '\t'))
+                        pt.remove_prefix(1);
+                    if (pt.empty() || pt.starts_with("#")) { j = jnext; continue; }
+                    if (pt.starts_with("[")) break; // hit next section header
+                    empty_section = false;
+                    break;
+                }
+                if (empty_section) {
+                    // drop header line; also drop a single trailing blank line if present
+                    i = next;
+                    if (i < content.size() && content[i] == '\n') ++i;
+                    continue;
+                }
+            }
+            cleaned.append(line);
+            i = next;
+        }
+        content = std::move(cleaned);
+    }
 
     auto file = std::ofstream("exon.toml");
     file << content;
