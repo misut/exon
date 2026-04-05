@@ -272,7 +272,7 @@ void test_fetch_subdir_dep() {
 
     // init + commit + tag
     auto git = [&](std::string const& cmd) {
-        auto full = std::format("cd \"{}\" && git {} {}", repo.generic_string(), cmd, null_redirect);
+        auto full = std::format("git -C \"{}\" {} {}", repo.generic_string(), cmd, null_redirect);
         return std::system(full.c_str());
     };
     git("init -q");
@@ -364,7 +364,7 @@ void test_fetch_subdir_dedup_clone() {
         f << std::format("add_library({} INTERFACE)\n", name);
     }
     auto git = [&](std::string const& cmd) {
-        auto full = std::format("cd \"{}\" && git {} {}", repo.generic_string(), cmd, null_redirect);
+        auto full = std::format("git -C \"{}\" {} {}", repo.generic_string(), cmd, null_redirect);
         return std::system(full.c_str());
     };
     git("init -q");
@@ -434,7 +434,7 @@ void test_fetch_subdir_missing() {
         f << "[package]\nname = \"x\"\nversion = \"0.1.0\"\n";
     }
     auto git = [&](std::string const& cmd) {
-        auto full = std::format("cd \"{}\" && git {} {}", repo.generic_string(), cmd, null_redirect);
+        auto full = std::format("git -C \"{}\" {} {}", repo.generic_string(), cmd, null_redirect);
         return std::system(full.c_str());
     };
     git("init -q");
