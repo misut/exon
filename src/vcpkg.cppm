@@ -1,6 +1,7 @@
 export module vcpkg;
 import std;
 import manifest;
+import toolchain;
 
 export namespace vcpkg {
 
@@ -111,9 +112,9 @@ std::filesystem::path find_root() {
         "/opt/homebrew/share/vcpkg",
         "/usr/local/share/vcpkg",
     };
-    if (auto const* home = std::getenv("HOME"); home && *home) {
-        candidates.push_back(std::filesystem::path{home} / "vcpkg");
-        candidates.push_back(std::filesystem::path{home} / ".vcpkg");
+    if (auto home = toolchain::home_dir(); !home.empty()) {
+        candidates.push_back(home / "vcpkg");
+        candidates.push_back(home / ".vcpkg");
     }
     for (auto const& c : candidates) {
         if (looks_like_vcpkg_root(c))

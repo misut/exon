@@ -3,6 +3,32 @@ import std;
 
 export namespace toolchain {
 
+// platform-specific executable suffix (".exe" on Windows, empty otherwise)
+#if defined(_WIN32)
+constexpr std::string_view exe_suffix = ".exe";
+#else
+constexpr std::string_view exe_suffix = "";
+#endif
+
+// wrap a path/command in double quotes if it contains whitespace, so that
+// `std::system()` can invoke binaries at paths like "C:\Program Files\...".
+std::string shell_quote(std::string_view s) {
+    if (s.find_first_of(" \t") == std::string_view::npos)
+        return std::string{s};
+    return std::format("\"{}\"", s);
+}
+
+// cross-platform home directory (HOME, falling back to USERPROFILE on Windows)
+std::filesystem::path home_dir() {
+    if (auto const* h = std::getenv("HOME"); h && *h)
+        return std::filesystem::path{h};
+#if defined(_WIN32)
+    if (auto const* up = std::getenv("USERPROFILE"); up && *up)
+        return std::filesystem::path{up};
+#endif
+    return {};
+}
+
 struct Toolchain {
     std::string cmake;
     std::string ninja;
@@ -12,9 +38,19 @@ struct Toolchain {
     std::string sysroot;             // macOS SDK path
     bool has_clang_config = false;   // if clang config exists, linker flags are unnecessary
     bool needs_stdlib_flag = false;  // if -stdlib=libc++ is needed (Linux)
+    bool is_msvc = false;            // compiler is MSVC cl.exe (Windows)
+    bool native_import_std = false;  // compiler has native `import std;` (no modules json needed)
 };
 
 namespace detail {
+
+#if defined(_WIN32)
+constexpr char path_separator = ';';
+constexpr std::string_view exe_suffix = ".exe";
+#else
+constexpr char path_separator = ':';
+constexpr std::string_view exe_suffix = "";
+#endif
 
 std::string find_in_path(std::string_view name) {
     auto path_env = std::getenv("PATH");
@@ -24,11 +60,17 @@ std::string find_in_path(std::string_view name) {
     auto path_str = std::string_view{path_env};
     std::size_t pos = 0;
     while (pos < path_str.size()) {
-        auto sep = path_str.find(':', pos);
+        auto sep = path_str.find(path_separator, pos);
         auto dir = path_str.substr(pos, sep == std::string_view::npos ? sep : sep - pos);
         auto full = std::filesystem::path{dir} / name;
         if (std::filesystem::exists(full)) {
             return std::filesystem::canonical(full).string();
+        }
+        if constexpr (!exe_suffix.empty()) {
+            auto full_exe = full;
+            full_exe += exe_suffix;
+            if (std::filesystem::exists(full_exe))
+                return std::filesystem::canonical(full_exe).string();
         }
         if (sep == std::string_view::npos)
             break;
@@ -38,10 +80,10 @@ std::string find_in_path(std::string_view name) {
 }
 
 std::filesystem::path intron_root() {
-    auto home = std::getenv("HOME");
-    if (!home)
+    auto home = home_dir();
+    if (home.empty())
         return {};
-    return std::filesystem::path{home} / ".intron" / "toolchains";
+    return home / ".intron" / "toolchains";
 }
 
 // find the highest version in intron toolchains directory
@@ -88,14 +130,57 @@ std::string find_system_llvm() {
 #endif
 }
 
+// look for a binary with optional .exe suffix on Windows
+bool exists_bin(std::filesystem::path const& p) {
+    if (std::filesystem::exists(p))
+        return true;
+#if defined(_WIN32)
+    auto with_exe = p;
+    with_exe += ".exe";
+    return std::filesystem::exists(with_exe);
+#else
+    return false;
+#endif
+}
+
+std::filesystem::path canonical_bin(std::filesystem::path const& p) {
+    if (std::filesystem::exists(p))
+        return std::filesystem::canonical(p);
+#if defined(_WIN32)
+    auto with_exe = p;
+    with_exe += ".exe";
+    if (std::filesystem::exists(with_exe))
+        return std::filesystem::canonical(with_exe);
+#endif
+    return p;
+}
+
+// detect MSVC cl.exe (Windows). Requires a Visual Studio developer environment
+// (vcvars64.bat) so that cl.exe is on PATH and INCLUDE/LIB env vars are set.
+void detect_msvc(Toolchain& tc) {
+#if defined(_WIN32)
+    auto cl = find_in_path("cl.exe");
+    if (cl == "cl.exe")
+        return; // not found
+    auto include = std::getenv("INCLUDE");
+    if (!include || !*include)
+        return; // no developer env loaded
+    tc.is_msvc = true;
+    tc.native_import_std = true;
+    // leave cxx_compiler empty: CMake auto-detects MSVC from the environment.
+#else
+    (void)tc;
+#endif
+}
+
 // detect clang++ from intron, fall back to system LLVM, then PATH
 void detect_clang(Toolchain& tc) {
     // 1. intron LLVM
     auto intron_llvm = find_intron_latest("llvm");
     if (!intron_llvm.empty()) {
         auto clangpp = std::filesystem::path{intron_llvm} / "bin" / "clang++";
-        if (std::filesystem::exists(clangpp)) {
-            tc.cxx_compiler = std::filesystem::canonical(clangpp).string();
+        if (exists_bin(clangpp)) {
+            tc.cxx_compiler = canonical_bin(clangpp).string();
         }
     }
 
@@ -104,8 +189,8 @@ void detect_clang(Toolchain& tc) {
         auto sys_llvm = find_system_llvm();
         if (!sys_llvm.empty()) {
             auto clangpp = std::filesystem::path{sys_llvm} / "bin" / "clang++";
-            if (std::filesystem::exists(clangpp)) {
-                tc.cxx_compiler = std::filesystem::canonical(clangpp).string();
+            if (exists_bin(clangpp)) {
+                tc.cxx_compiler = canonical_bin(clangpp).string();
             }
         }
     }
@@ -168,8 +253,8 @@ Toolchain detect() {
     auto intron_cmake = detail::find_intron_latest("cmake");
     if (!intron_cmake.empty()) {
         auto bin = std::filesystem::path{intron_cmake} / "bin" / "cmake";
-        if (std::filesystem::exists(bin))
-            tc.cmake = std::filesystem::canonical(bin).string();
+        if (detail::exists_bin(bin))
+            tc.cmake = detail::canonical_bin(bin).string();
     }
     if (tc.cmake.empty())
         tc.cmake = detail::find_in_path("cmake");
@@ -178,14 +263,16 @@ Toolchain detect() {
     auto intron_ninja = detail::find_intron_latest("ninja");
     if (!intron_ninja.empty()) {
         auto bin = std::filesystem::path{intron_ninja} / "ninja";
-        if (std::filesystem::exists(bin))
-            tc.ninja = std::filesystem::canonical(bin).string();
+        if (detail::exists_bin(bin))
+            tc.ninja = detail::canonical_bin(bin).string();
     }
     if (tc.ninja.empty())
         tc.ninja = detail::find_in_path("ninja");
 
-    // clang: intron → system LLVM → PATH
-    detail::detect_clang(tc);
+    // compiler: MSVC (Windows dev env) → clang (intron → system LLVM → PATH)
+    detail::detect_msvc(tc);
+    if (!tc.is_msvc)
+        detail::detect_clang(tc);
 
     // detect macOS sysroot
 #if defined(__APPLE__)

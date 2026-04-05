@@ -9,6 +9,7 @@ A package manager for C++. Inspired by Cargo.
 | macOS | ARM64 (Apple Silicon) |
 | Linux | x86_64 |
 | Linux | aarch64 |
+| Windows | x86_64 (experimental, MSVC bootstrap) |
 
 ## Installation
 
@@ -29,7 +30,7 @@ mise use exon@0.13.0
 <details>
 <summary>Build from source</summary>
 
-Requires LLVM with libc++ modules: [Homebrew LLVM](https://formulae.brew.sh/formula/llvm) (macOS) or [LLVM 20+](https://apt.llvm.org/) (Linux).
+Requires LLVM with libc++ modules: [Homebrew LLVM](https://formulae.brew.sh/formula/llvm) (macOS) or [LLVM 20+](https://apt.llvm.org/) (Linux). Or on **Windows**, Visual Studio 2022 17.5+ with MSVC.
 
 ```sh
 # bootstrap (uses FetchContent for tomlcpp)
@@ -39,6 +40,8 @@ cmake --build build --target exon
 # self-host
 ./build/exon build
 ```
+
+On Windows, run the commands from a **Visual Studio Developer Command Prompt** (or PowerShell for VS 2022) so that `cl.exe` is on PATH. Requires CMake 3.30+ and Ninja.
 </details>
 
 ## Quick Start
@@ -258,7 +261,7 @@ Install (`[dependencies.vcpkg]`) and link (`[dependencies.find]`) are separate b
 - **CMakeLists.txt sync** — `exon sync` generates a portable CMakeLists.txt for plain cmake builds
 - **Syntax check** — `exon check` compiles modules without linking for fast feedback
 - **Self-hosting** — exon builds itself with `exon build`
-- **Cross-platform** — macOS (ARM64) and Linux (x86_64, aarch64)
+- **Cross-platform** — macOS (ARM64), Linux (x86_64, aarch64), and Windows (x86_64, experimental MSVC bootstrap)
 
 ## License
 

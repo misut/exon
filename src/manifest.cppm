@@ -1,6 +1,7 @@
 export module manifest;
 import std;
 import toml;
+import toolchain;
 
 export namespace manifest {
 
@@ -183,8 +184,7 @@ Manifest load(std::string_view path) {
 
 // walk up from `start` looking for a workspace exon.toml; stop at HOME or filesystem root
 std::optional<std::filesystem::path> find_workspace_root(std::filesystem::path start) {
-    auto home_env = std::getenv("HOME");
-    std::filesystem::path home = home_env ? std::filesystem::path{home_env} : std::filesystem::path{};
+    auto home = toolchain::home_dir();
     start = std::filesystem::weakly_canonical(start);
     while (true) {
         auto toml_path = start / "exon.toml";

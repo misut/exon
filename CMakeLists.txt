@@ -8,6 +8,11 @@ set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
 set(CMAKE_CXX_MODULE_STD ON)
 project(exon LANGUAGES CXX)
 
+if(MSVC)
+    add_compile_options(/W4 /wd4996 /utf-8)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+endif()
+
 include(FetchContent)
 FetchContent_Declare(tomlcpp
     GIT_REPOSITORY https://github.com/misut/tomlcpp.git
