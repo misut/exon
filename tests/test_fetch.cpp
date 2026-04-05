@@ -3,6 +3,9 @@ import fetch;
 import manifest;
 import toml;
 
+extern "C" int setenv(char const* name, char const* value, int overwrite);
+extern "C" int unsetenv(char const* name);
+
 int failures = 0;
 
 void check(bool cond, std::string_view msg) {
@@ -220,6 +223,233 @@ type = "lib"
     fs::current_path(saved_cwd);
 }
 
+// test: fetch a git+subdir dep from a local bare repo via file:// URL
+void test_fetch_subdir_dep() {
+    TmpWorkspace ws{"exon_test_fetch_subdir"};
+
+    // set EXON_CACHE_DIR to an isolated cache under the tmp workspace
+    auto cache = ws.root / "cache";
+    setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
+
+    // create a fake workspace repo to be cloned: workspace root + `refl/` member
+    auto repo = ws.root / "fake-repo";
+    fs::create_directories(repo / "refl" / "src");
+    {
+        auto f = std::ofstream{repo / "exon.toml"};
+        f << "[workspace]\nmembers = [\"refl\"]\n";
+    }
+    {
+        auto f = std::ofstream{repo / "refl" / "exon.toml"};
+        f << "[package]\nname = \"refl\"\nversion = \"0.1.0\"\ntype = \"lib\"\n";
+    }
+    {
+        auto f = std::ofstream{repo / "refl" / "src" / "refl.cppm"};
+        f << "export module refl;\n";
+    }
+    {
+        auto f = std::ofstream{repo / "refl" / "CMakeLists.txt"};
+        f << "add_library(refl INTERFACE)\n";
+    }
+
+    // init + commit + tag
+    auto git = [&](std::string const& cmd) {
+        auto full = std::format("cd {} && git {} >/dev/null 2>&1", repo.string(), cmd);
+        return std::system(full.c_str());
+    };
+    git("init -q");
+    git("config user.email test@example.com");
+    git("config user.name Test");
+    git("add .");
+    git("commit -q -m init");
+    git("tag v0.1.0");
+
+    // consumer project in its own dir
+    fs::create_directories(ws.root / "app" / "src");
+    {
+        auto f = std::ofstream{ws.root / "app" / "exon.toml"};
+        f << std::format(R"(
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+refl = {{ git = "{}", version = "0.1.0", subdir = "refl" }}
+)", repo.string());
+    }
+
+    auto saved_cwd = fs::current_path();
+    fs::current_path(ws.root / "app");
+
+    try {
+        auto m = manifest::load("exon.toml");
+        auto lock_path = (ws.root / "app" / "exon.lock").string();
+        auto result = fetch::fetch_all(m, lock_path);
+
+        check(result.deps.size() == 1, "subdir fetch: 1 dep");
+        if (!result.deps.empty()) {
+            auto& d = result.deps[0];
+            check(d.name == "refl", "subdir fetch: name");
+            check(d.subdir == "refl", "subdir fetch: subdir");
+            check(!d.is_path, "subdir fetch: not is_path");
+            check(!d.commit.empty(), "subdir fetch: has commit");
+            check(d.path.filename() == "refl", "subdir fetch: path ends in subdir");
+            check(fs::exists(d.path / "exon.toml"), "subdir fetch: subdir has exon.toml");
+        }
+
+        // lock entry should use composite name
+        auto const* locked = result.lock_file.find(
+            std::format("{}#{}", repo.string(), "refl"), "0.1.0");
+        check(locked != nullptr, "subdir fetch: composite-name lock entry exists");
+        if (locked)
+            check(locked->subdir == "refl", "subdir fetch: lock subdir field");
+
+        // verify clone happened under EXON_CACHE_DIR (not under HOME/.exon/cache)
+        // absolute-path keys have their leading "/" stripped so the cache path composes cleanly
+        auto repo_key = repo.string();
+        while (!repo_key.empty() && repo_key.front() == '/')
+            repo_key.erase(repo_key.begin());
+        auto expected_clone = cache / repo_key / "v0.1.0";
+        check(fs::exists(expected_clone / "exon.toml"),
+              "subdir fetch: clone landed under EXON_CACHE_DIR");
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "  exception: {}", e.what());
+        ++failures;
+    }
+
+    fs::current_path(saved_cwd);
+    unsetenv("EXON_CACHE_DIR");
+}
+
+// test: same (repo, version) with two different subdirs shares one clone
+void test_fetch_subdir_dedup_clone() {
+    TmpWorkspace ws{"exon_test_fetch_subdir_dedup"};
+    auto cache = ws.root / "cache";
+    setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
+
+    auto repo = ws.root / "fake-repo";
+    fs::create_directories(repo / "a" / "src");
+    fs::create_directories(repo / "b" / "src");
+    {
+        auto f = std::ofstream{repo / "exon.toml"};
+        f << "[workspace]\nmembers = [\"a\", \"b\"]\n";
+    }
+    for (auto const* name : {"a", "b"}) {
+        auto f = std::ofstream{repo / name / "exon.toml"};
+        f << std::format("[package]\nname = \"{}\"\nversion = \"0.1.0\"\ntype = \"lib\"\n", name);
+    }
+    for (auto const* name : {"a", "b"}) {
+        auto f = std::ofstream{repo / name / "CMakeLists.txt"};
+        f << std::format("add_library({} INTERFACE)\n", name);
+    }
+    auto git = [&](std::string const& cmd) {
+        auto full = std::format("cd {} && git {} >/dev/null 2>&1", repo.string(), cmd);
+        return std::system(full.c_str());
+    };
+    git("init -q");
+    git("config user.email test@example.com");
+    git("config user.name Test");
+    git("add .");
+    git("commit -q -m init");
+    git("tag v0.1.0");
+
+    fs::create_directories(ws.root / "app" / "src");
+    {
+        auto f = std::ofstream{ws.root / "app" / "exon.toml"};
+        f << std::format(R"(
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+a = {{ git = "{0}", version = "0.1.0", subdir = "a" }}
+b = {{ git = "{0}", version = "0.1.0", subdir = "b" }}
+)", repo.string());
+    }
+
+    auto saved_cwd = fs::current_path();
+    fs::current_path(ws.root / "app");
+
+    try {
+        auto m = manifest::load("exon.toml");
+        auto lock_path = (ws.root / "app" / "exon.lock").string();
+        auto result = fetch::fetch_all(m, lock_path);
+
+        check(result.deps.size() == 2, "subdir dedup: 2 deps");
+
+        // only one clone directory (leading slash stripped from absolute-path keys)
+        auto repo_key = repo.string();
+        while (!repo_key.empty() && repo_key.front() == '/')
+            repo_key.erase(repo_key.begin());
+        auto clone_root = cache / repo_key / "v0.1.0";
+        check(fs::exists(clone_root / "a" / "exon.toml"), "subdir dedup: a present in clone");
+        check(fs::exists(clone_root / "b" / "exon.toml"), "subdir dedup: b present in clone");
+
+        // both deps point into the same clone
+        auto parent_a = result.deps[0].path.parent_path();
+        auto parent_b = result.deps[1].path.parent_path();
+        check(parent_a == parent_b, "subdir dedup: both paths share parent clone");
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "  exception: {}", e.what());
+        ++failures;
+    }
+
+    fs::current_path(saved_cwd);
+    unsetenv("EXON_CACHE_DIR");
+}
+
+// test: subdir that doesn't exist in the cloned repo throws
+void test_fetch_subdir_missing() {
+    TmpWorkspace ws{"exon_test_fetch_subdir_missing"};
+    auto cache = ws.root / "cache";
+    setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
+
+    auto repo = ws.root / "fake-repo";
+    fs::create_directories(repo);
+    {
+        auto f = std::ofstream{repo / "exon.toml"};
+        f << "[package]\nname = \"x\"\nversion = \"0.1.0\"\n";
+    }
+    auto git = [&](std::string const& cmd) {
+        auto full = std::format("cd {} && git {} >/dev/null 2>&1", repo.string(), cmd);
+        return std::system(full.c_str());
+    };
+    git("init -q");
+    git("config user.email test@example.com");
+    git("config user.name Test");
+    git("add .");
+    git("commit -q -m init");
+    git("tag v0.1.0");
+
+    fs::create_directories(ws.root / "app" / "src");
+    {
+        auto f = std::ofstream{ws.root / "app" / "exon.toml"};
+        f << std::format(R"(
+[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+nope = {{ git = "{}", version = "0.1.0", subdir = "does-not-exist" }}
+)", repo.string());
+    }
+
+    auto saved_cwd = fs::current_path();
+    fs::current_path(ws.root / "app");
+
+    bool threw = false;
+    try {
+        auto m = manifest::load("exon.toml");
+        auto lock_path = (ws.root / "app" / "exon.lock").string();
+        fetch::fetch_all(m, lock_path);
+    } catch (std::exception const&) {
+        threw = true;
+    }
+    check(threw, "subdir missing: throws");
+
+    fs::current_path(saved_cwd);
+    unsetenv("EXON_CACHE_DIR");
+}
+
 // test: unknown workspace member errors
 void test_fetch_missing_workspace_member() {
     TmpWorkspace ws{"exon_test_fetch_missing"};
@@ -259,6 +489,9 @@ int main() {
     test_fetch_transitive_path();
     test_fetch_dev_path_dep();
     test_fetch_missing_workspace_member();
+    test_fetch_subdir_dep();
+    test_fetch_subdir_dedup_clone();
+    test_fetch_subdir_missing();
 
     if (failures > 0) {
         std::println("{} test(s) failed", failures);

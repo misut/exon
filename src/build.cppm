@@ -228,6 +228,18 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
 
     // emit dependency as static library
     auto emit_dep = [&](fetch::FetchedDep const& dep) {
+        // git+subdir deps: always use add_subdirectory on the member's own CMakeLists.txt
+        if (!dep.subdir.empty()) {
+            auto dep_cmake = dep.path / "CMakeLists.txt";
+            if (!std::filesystem::exists(dep_cmake))
+                throw std::runtime_error(std::format(
+                    "git dep '{}': {}/CMakeLists.txt not found (run `exon sync` in the upstream "
+                    "repo, or add a CMakeLists.txt to the subdir)", dep.name, dep.subdir));
+            out << std::format("add_subdirectory({} {})\n\n",
+                               std::filesystem::canonical(dep.path).string(), dep.name);
+            return;
+        }
+
         auto dep_src = dep.path / "src";
         auto dep_sf = detail::collect_sources(dep_src);
 
@@ -498,6 +510,8 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             out << std::format("    GIT_REPOSITORY {}\n", git_url);
             out << std::format("    GIT_TAG {}\n", tag);
             out << "    GIT_SHALLOW ON\n";
+            if (!dep->subdir.empty())
+                out << std::format("    SOURCE_SUBDIR {}\n", dep->subdir);
             out << ")\n";
         }
         for (auto const* dep : dep_list)

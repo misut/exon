@@ -5,9 +5,10 @@ import toml;
 export namespace lock {
 
 struct LockedDep {
-    std::string name; // dep key (e.g. "github.com/user/repo")
+    std::string name; // dep key (e.g. "github.com/user/repo" or "github.com/user/repo#member")
     std::string version;
     std::string commit; // exact git commit hash
+    std::string subdir; // non-empty for git+subdir deps
 };
 
 struct LockFile {
@@ -33,6 +34,7 @@ struct LockFile {
         for (auto& p : packages) {
             if (p.name == dep.name && p.version == dep.version) {
                 p.commit = std::move(dep.commit);
+                p.subdir = std::move(dep.subdir);
                 return;
             }
         }
@@ -59,6 +61,8 @@ LockFile load(std::string_view path) {
                 dep.version = pkg.at("version").as_string();
             if (pkg.contains("commit"))
                 dep.commit = pkg.at("commit").as_string();
+            if (pkg.contains("subdir"))
+                dep.subdir = pkg.at("subdir").as_string();
             lf.packages.push_back(std::move(dep));
         }
     }
@@ -79,6 +83,8 @@ void save(LockFile const& lf, std::string_view path) {
         file << std::format("name = \"{}\"\n", pkg.name);
         file << std::format("version = \"{}\"\n", pkg.version);
         file << std::format("commit = \"{}\"\n", pkg.commit);
+        if (!pkg.subdir.empty())
+            file << std::format("subdir = \"{}\"\n", pkg.subdir);
         file << "\n";
     }
 }

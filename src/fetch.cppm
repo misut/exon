@@ -8,10 +8,11 @@ export namespace fetch {
 
 struct FetchedDep {
     std::string key;  // dep key (e.g. "github.com/user/repo")
-    std::string name; // package name (repo name)
+    std::string name; // package name (repo name, or TOML key for subdir deps)
     std::string version;
     std::string commit;         // exact git commit hash (empty for path deps)
     std::filesystem::path path; // cached source path
+    std::string subdir;         // non-empty for git+subdir deps
     bool is_dev = false;        // dev-dependency (test-only)
     bool is_path = false;       // local path / workspace dep (no git, no lock)
 };
@@ -19,10 +20,20 @@ struct FetchedDep {
 namespace detail {
 
 std::filesystem::path cache_dir() {
+    if (auto const* override_dir = std::getenv("EXON_CACHE_DIR"); override_dir && *override_dir)
+        return std::filesystem::path{override_dir};
     auto home = std::getenv("HOME");
     if (!home)
         throw std::runtime_error("HOME environment variable not set");
     return std::filesystem::path{home} / ".exon" / "cache";
+}
+
+// strip leading "/" from absolute-path keys so they compose safely under cache_dir
+std::string cache_safe_key(std::string const& dep_key) {
+    std::string k = dep_key;
+    while (!k.empty() && k.front() == '/')
+        k.erase(k.begin());
+    return k;
 }
 
 // "github.com/user/repo" → "https://github.com/user/repo.git"
@@ -83,6 +94,34 @@ struct FetchContext {
 void fetch_recursive(std::string const& dep_key, std::string const& version, lock::LockFile& lf,
                      std::vector<FetchedDep>& result, std::set<std::string>& visited);
 
+// clone (or use cached) a git repo at the given tag; returns (cache_path, commit)
+struct EnsureCloneResult {
+    std::filesystem::path path;
+    std::string commit;
+};
+EnsureCloneResult ensure_git_clone(std::string const& repo, std::string const& version) {
+    auto cache_root = cache_dir();
+    auto tag = to_git_tag(version);
+    auto dep_cache = cache_root / cache_safe_key(repo) / tag;
+
+    if (std::filesystem::exists(dep_cache)) {
+        auto commit = get_git_commit(dep_cache);
+        return {.path = dep_cache, .commit = commit};
+    }
+
+    std::filesystem::create_directories(dep_cache);
+    auto git_url = to_git_url(repo);
+    auto cmd = std::format("git clone --depth 1 --branch {} {} {} 2>&1", tag, git_url,
+                           dep_cache.string());
+    std::println("  fetching: {} {}...", repo, tag);
+    int rc = std::system(cmd.c_str());
+    if (rc != 0) {
+        std::filesystem::remove_all(dep_cache);
+        throw std::runtime_error(std::format("failed to fetch {} {}", repo, tag));
+    }
+    return {.path = dep_cache, .commit = get_git_commit(dep_cache)};
+}
+
 void fetch_path_recursive(std::filesystem::path const& abs_dir, std::string name,
                           FetchContext ctx) {
     auto canon = std::filesystem::weakly_canonical(abs_dir);
@@ -129,6 +168,70 @@ void fetch_path_recursive(std::filesystem::path const& abs_dir, std::string name
     ctx.result.push_back(std::move(d));
 }
 
+void fetch_subdir_recursive(std::string const& name, manifest::GitSubdirDep const& sdep,
+                             FetchContext ctx) {
+    auto visit_key = std::format("{}#{}@{}", sdep.repo, sdep.subdir, sdep.version);
+    if (ctx.visited.contains(visit_key))
+        return;
+    ctx.visited.insert(visit_key);
+
+    auto clone = ensure_git_clone(sdep.repo, sdep.version);
+    auto subdir_path = clone.path / sdep.subdir;
+    if (!std::filesystem::exists(subdir_path))
+        throw std::runtime_error(std::format(
+            "git dep '{}' ({}@{}): subdir '{}' not found in repo", name, sdep.repo, sdep.version,
+            sdep.subdir));
+    auto dep_toml = subdir_path / "exon.toml";
+    if (!std::filesystem::exists(dep_toml))
+        throw std::runtime_error(std::format(
+            "git dep '{}': {}/exon.toml not found (not a valid exon package)", name, sdep.subdir));
+
+    auto lock_name = std::format("{}#{}", sdep.repo, sdep.subdir);
+    auto msg_tag = to_git_tag(sdep.version);
+    std::println("  subdir: {} {} {} [{}] ({})", name, sdep.repo, msg_tag, sdep.subdir,
+                 clone.commit.substr(0, 8));
+
+    // recurse only into deps that need external resolution (git-based); path/workspace deps
+    // within the cloned repo are handled by the member's own CMakeLists via relative paths.
+    auto dep_m = manifest::load(dep_toml.string());
+    for (auto const& [sub_key, sub_version] : dep_m.dependencies)
+        fetch_recursive(sub_key, sub_version, ctx.lf, ctx.result, ctx.visited);
+    for (auto const& [sub_name, sub_sdep] : dep_m.subdir_deps)
+        fetch_subdir_recursive(sub_name, sub_sdep, ctx);
+    // validate sibling workspace members exist in the clone (fail fast with a clear error)
+    if (!dep_m.workspace_deps.empty()) {
+        auto ws_root = manifest::find_workspace_root(subdir_path);
+        if (!ws_root)
+            throw std::runtime_error(std::format(
+                "git dep '{}' uses [dependencies.workspace] but no workspace root found in repo",
+                name));
+        auto ws_m = manifest::load((*ws_root / "exon.toml").string());
+        for (auto const& ws_name : dep_m.workspace_deps) {
+            if (!manifest::resolve_workspace_member(*ws_root, ws_m, ws_name))
+                throw std::runtime_error(std::format(
+                    "git dep '{}' needs workspace sibling '{}', not found in repo", name,
+                    ws_name));
+        }
+    }
+
+    ctx.lf.add_or_update({
+        .name = lock_name,
+        .version = sdep.version,
+        .commit = clone.commit,
+        .subdir = sdep.subdir,
+    });
+
+    FetchedDep d;
+    d.key = sdep.repo;
+    d.name = name;
+    d.version = sdep.version;
+    d.commit = clone.commit;
+    d.path = subdir_path;
+    d.subdir = sdep.subdir;
+    d.is_path = false;
+    ctx.result.push_back(std::move(d));
+}
+
 void fetch_recursive(std::string const& dep_key, std::string const& version, lock::LockFile& lf,
                      std::vector<FetchedDep>& result, std::set<std::string>& visited) {
     // prevent circular dependencies and duplicates
@@ -139,7 +242,7 @@ void fetch_recursive(std::string const& dep_key, std::string const& version, loc
 
     auto cache_root = cache_dir();
     auto tag = to_git_tag(version);
-    auto dep_cache = cache_root / dep_key / tag;
+    auto dep_cache = cache_root / cache_safe_key(dep_key) / tag;
 
     auto locked = lf.find(dep_key, version);
 
@@ -215,9 +318,10 @@ FetchResult fetch_all(manifest::Manifest const& m, std::string_view lock_path,
                       bool include_dev = false) {
     FetchResult result;
 
-    bool has_any = !m.dependencies.empty() || !m.path_deps.empty() || !m.workspace_deps.empty();
+    bool has_any = !m.dependencies.empty() || !m.path_deps.empty() || !m.workspace_deps.empty() ||
+                   !m.subdir_deps.empty();
     bool has_dev = include_dev && (!m.dev_dependencies.empty() || !m.dev_path_deps.empty() ||
-                                    !m.dev_workspace_deps.empty());
+                                    !m.dev_workspace_deps.empty() || !m.dev_subdir_deps.empty());
     if (!has_any && !has_dev)
         return result;
 
@@ -244,6 +348,8 @@ FetchResult fetch_all(manifest::Manifest const& m, std::string_view lock_path,
 
     for (auto const& [key, version] : m.dependencies)
         detail::fetch_recursive(key, version, result.lock_file, result.deps, visited);
+    for (auto const& [name, sdep] : m.subdir_deps)
+        detail::fetch_subdir_recursive(name, sdep, ctx);
     for (auto const& [name, rel] : m.path_deps)
         detail::fetch_path_recursive(cwd / rel, name, ctx);
     for (auto const& ws_name : m.workspace_deps) {
@@ -260,6 +366,8 @@ FetchResult fetch_all(manifest::Manifest const& m, std::string_view lock_path,
         auto dev_start = result.deps.size();
         for (auto const& [key, version] : m.dev_dependencies)
             detail::fetch_recursive(key, version, result.lock_file, result.deps, visited);
+        for (auto const& [name, sdep] : m.dev_subdir_deps)
+            detail::fetch_subdir_recursive(name, sdep, ctx);
         for (auto const& [name, rel] : m.dev_path_deps)
             detail::fetch_path_recursive(cwd / rel, name, ctx);
         for (auto const& ws_name : m.dev_workspace_deps) {

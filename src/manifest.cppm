@@ -9,6 +9,12 @@ struct VcpkgDep {
     std::vector<std::string> features;  // optional vcpkg features
 };
 
+struct GitSubdirDep {
+    std::string repo;     // "github.com/misut/txn"
+    std::string version;  // "0.1.0"
+    std::string subdir;   // "refl" (required, non-empty)
+};
+
 struct Manifest {
     std::string name;
     std::string version;
@@ -27,6 +33,8 @@ struct Manifest {
     std::set<std::string> dev_workspace_deps;            // [dev-dependencies.workspace]
     std::map<std::string, VcpkgDep> vcpkg_deps;          // [dependencies.vcpkg]
     std::map<std::string, VcpkgDep> dev_vcpkg_deps;      // [dev-dependencies.vcpkg]
+    std::map<std::string, GitSubdirDep> subdir_deps;     // [dependencies] inline-table form
+    std::map<std::string, GitSubdirDep> dev_subdir_deps; // [dev-dependencies] inline-table form
     std::map<std::string, std::string> defines;         // [defines]
     std::map<std::string, std::string> defines_debug;   // [defines.debug]
     std::map<std::string, std::string> defines_release;  // [defines.release]
@@ -74,7 +82,8 @@ Manifest from_toml(toml::Table const& table) {
                                   std::map<std::string, std::string>& find_deps,
                                   std::map<std::string, std::string>& path_deps,
                                   std::set<std::string>& workspace_deps,
-                                  std::map<std::string, VcpkgDep>& vcpkg_deps) {
+                                  std::map<std::string, VcpkgDep>& vcpkg_deps,
+                                  std::map<std::string, GitSubdirDep>& subdir_deps) {
         for (auto const& [key, val] : deps) {
             if (val.is_string()) {
                 string_deps.emplace(key, val.as_string());
@@ -113,18 +122,40 @@ Manifest from_toml(toml::Table const& table) {
                     }
                     vcpkg_deps.emplace(k, std::move(dep));
                 }
+            } else if (val.is_table()) {
+                // inline-table git dep: name = { git = "...", version = "...", subdir = "..." }
+                auto const& t = val.as_table();
+                GitSubdirDep dep;
+                if (!t.contains("git") || !t.at("git").is_string())
+                    throw std::runtime_error(std::format(
+                        "dependency '{}': missing required 'git' field", key));
+                dep.repo = t.at("git").as_string();
+                if (!t.contains("version") || !t.at("version").is_string())
+                    throw std::runtime_error(std::format(
+                        "dependency '{}': missing required 'version' field", key));
+                dep.version = t.at("version").as_string();
+                if (!t.contains("subdir") || !t.at("subdir").is_string())
+                    throw std::runtime_error(std::format(
+                        "dependency '{}': missing required 'subdir' field "
+                        "(use string form for no-subdir git deps)", key));
+                dep.subdir = t.at("subdir").as_string();
+                if (dep.subdir.empty())
+                    throw std::runtime_error(std::format(
+                        "dependency '{}': 'subdir' must be non-empty", key));
+                subdir_deps.emplace(key, std::move(dep));
             }
         }
     };
 
     if (table.contains("dependencies")) {
         parse_deps_section(table.at("dependencies").as_table(), m.dependencies, m.find_deps,
-                           m.path_deps, m.workspace_deps, m.vcpkg_deps);
+                           m.path_deps, m.workspace_deps, m.vcpkg_deps, m.subdir_deps);
     }
 
     if (table.contains("dev-dependencies")) {
         parse_deps_section(table.at("dev-dependencies").as_table(), m.dev_dependencies,
-                           m.dev_find_deps, m.dev_path_deps, m.dev_workspace_deps, m.dev_vcpkg_deps);
+                           m.dev_find_deps, m.dev_path_deps, m.dev_workspace_deps, m.dev_vcpkg_deps,
+                           m.dev_subdir_deps);
     }
 
     if (table.contains("defines")) {

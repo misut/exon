@@ -393,6 +393,91 @@ empty = { version = "1.0.0", features = [] }
     check(m.vcpkg_deps.at("empty").features.empty(), "vcpkg features: empty array");
 }
 
+void test_subdir_deps() {
+    auto input = R"(
+[package]
+name = "app"
+version = "1.0.0"
+
+[dependencies]
+"github.com/user/lib" = "0.1.0"
+refl = { git = "github.com/misut/txn", version = "0.1.0", subdir = "refl" }
+txn  = { git = "github.com/misut/txn", version = "0.2.0", subdir = "txn"  }
+
+[dev-dependencies]
+helpers = { git = "github.com/misut/tools", version = "1.0.0", subdir = "helpers" }
+)";
+
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    // string-form git dep still parsed
+    check(m.dependencies.size() == 1, "subdir: string git dep still parsed");
+    check(m.dependencies.at("github.com/user/lib") == "0.1.0", "subdir: string dep version");
+
+    // inline-table subdir deps
+    check(m.subdir_deps.size() == 2, "subdir: 2 regular subdir deps");
+    check(m.subdir_deps.at("refl").repo == "github.com/misut/txn", "subdir: refl repo");
+    check(m.subdir_deps.at("refl").version == "0.1.0", "subdir: refl version");
+    check(m.subdir_deps.at("refl").subdir == "refl", "subdir: refl subdir");
+    check(m.subdir_deps.at("txn").version == "0.2.0", "subdir: txn version");
+    check(m.subdir_deps.at("txn").subdir == "txn", "subdir: txn subdir");
+
+    // dev-dependencies variant
+    check(m.dev_subdir_deps.size() == 1, "subdir: 1 dev subdir dep");
+    check(m.dev_subdir_deps.at("helpers").repo == "github.com/misut/tools",
+          "subdir: dev helpers repo");
+    check(m.dev_subdir_deps.at("helpers").subdir == "helpers", "subdir: dev helpers subdir");
+}
+
+void test_subdir_deps_missing_fields() {
+    auto parse_throws = [](char const* input) {
+        try {
+            auto table = toml::parse(input);
+            (void)manifest::from_toml(table);
+            return false;
+        } catch (std::runtime_error const&) {
+            return true;
+        }
+    };
+
+    // missing git
+    check(parse_throws(R"(
+[package]
+name = "app"
+version = "1.0.0"
+[dependencies]
+refl = { version = "0.1.0", subdir = "refl" }
+)"), "subdir: missing git throws");
+
+    // missing version
+    check(parse_throws(R"(
+[package]
+name = "app"
+version = "1.0.0"
+[dependencies]
+refl = { git = "github.com/misut/txn", subdir = "refl" }
+)"), "subdir: missing version throws");
+
+    // missing subdir
+    check(parse_throws(R"(
+[package]
+name = "app"
+version = "1.0.0"
+[dependencies]
+refl = { git = "github.com/misut/txn", version = "0.1.0" }
+)"), "subdir: missing subdir throws");
+
+    // empty subdir
+    check(parse_throws(R"(
+[package]
+name = "app"
+version = "1.0.0"
+[dependencies]
+refl = { git = "github.com/misut/txn", version = "0.1.0", subdir = "" }
+)"), "subdir: empty subdir throws");
+}
+
 void test_no_dev_deps() {
     auto input = R"(
 [package]
@@ -412,6 +497,8 @@ version = "0.1.0"
     check(m.dev_workspace_deps.empty(), "no dev workspace-deps by default");
     check(m.vcpkg_deps.empty(), "no vcpkg-deps by default");
     check(m.dev_vcpkg_deps.empty(), "no dev vcpkg-deps by default");
+    check(m.subdir_deps.empty(), "no subdir-deps by default");
+    check(m.dev_subdir_deps.empty(), "no dev subdir-deps by default");
     check(m.defines.empty(), "no defines by default");
     check(m.defines_debug.empty(), "no debug defines by default");
     check(m.defines_release.empty(), "no release defines by default");
@@ -432,6 +519,8 @@ int main() {
     test_resolve_workspace_member();
     test_vcpkg_deps();
     test_vcpkg_deps_with_features();
+    test_subdir_deps();
+    test_subdir_deps_missing_fields();
     test_defines();
     test_no_dev_deps();
 
