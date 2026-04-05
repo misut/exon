@@ -41,7 +41,7 @@ target_link_libraries(exon PRIVATE exon-modules)
 
 target_compile_definitions(exon PUBLIC
     EXON_PKG_NAME="exon"
-    EXON_PKG_VERSION="0.12.0"
+    EXON_PKG_VERSION="0.13.0"
 )
 
 add_executable(test-test_build)
