@@ -76,8 +76,47 @@ jobs:
           name: exon-${{ matrix.platform }}
           path: exon-*.tar.gz
 
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install intron
+        shell: pwsh
+        run: |
+          iwr -useb https://raw.githubusercontent.com/misut/intron/main/install.ps1 | iex
+          echo "$env:USERPROFILE\.intron\bin" >> $env:GITHUB_PATH
+
+      - name: Install toolchains
+        shell: pwsh
+        run: |
+          intron install cmake 4.3.1
+          intron install ninja 1.13.2
+          echo "$env:USERPROFILE\.intron\toolchains\cmake\4.3.1\bin" >> $env:GITHUB_PATH
+          echo "$env:USERPROFILE\.intron\toolchains\ninja\1.13.2" >> $env:GITHUB_PATH
+
+      - name: Bootstrap and release build
+        shell: cmd
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target exon
+          .\build\exon.exe build --release
+
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path .exon/release/exon.exe -DestinationPath exon-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: exon-x86_64-pc-windows-msvc
+          path: exon-*.zip
+
   release:
-    needs: build
+    needs: [build, build-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
@@ -88,5 +127,7 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          files: exon-*.tar.gz
+          files: |
+            exon-*.tar.gz
+            exon-*.zip
           generate_release_notes: true
