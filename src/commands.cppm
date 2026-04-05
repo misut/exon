@@ -27,7 +27,8 @@ commands:
     add [--dev] <pkg> <ver>            add a git dependency
     add [--dev] --path <name> <path>   add a local path dependency
     add [--dev] --workspace <name>     add a workspace member dependency
-    add [--dev] --vcpkg <name> <ver>   add a vcpkg dependency
+    add [--dev] --vcpkg <name> <ver> [--features a,b,c]
+                                       add a vcpkg dependency
     remove <pkg>                       remove a dependency
     update                 update dependencies to latest compatible versions
     sync                   sync CMakeLists.txt with exon.toml
@@ -286,8 +287,9 @@ int cmd_add(int argc, char* argv[]) {
     bool is_path = false;
     bool is_workspace_dep = false;
     bool is_vcpkg = false;
-    int i = 2;
-    while (i < argc) {
+    std::vector<std::string> features;
+    std::vector<std::string> positional;
+    for (int i = 2; i < argc; ++i) {
         std::string_view a{argv[i]};
         if (a == "--dev")
             dev = true;
@@ -297,9 +299,36 @@ int cmd_add(int argc, char* argv[]) {
             is_workspace_dep = true;
         else if (a == "--vcpkg")
             is_vcpkg = true;
-        else
-            break;
-        ++i;
+        else if (a == "--features") {
+            if (i + 1 >= argc) {
+                std::println(std::cerr, "error: --features requires a comma-separated list");
+                return 1;
+            }
+            std::string_view list{argv[i + 1]};
+            std::size_t start = 0;
+            while (start < list.size()) {
+                auto comma = list.find(',', start);
+                auto end = (comma == std::string_view::npos) ? list.size() : comma;
+                auto tok = list.substr(start, end - start);
+                while (!tok.empty() && std::isspace(static_cast<unsigned char>(tok.front())))
+                    tok.remove_prefix(1);
+                while (!tok.empty() && std::isspace(static_cast<unsigned char>(tok.back())))
+                    tok.remove_suffix(1);
+                if (!tok.empty())
+                    features.emplace_back(tok);
+                start = end + 1;
+            }
+            ++i;
+        } else if (a.starts_with("--")) {
+            std::println(std::cerr, "error: unknown flag '{}'", a);
+            return 1;
+        } else {
+            positional.emplace_back(a);
+        }
+    }
+    if (!features.empty() && !is_vcpkg) {
+        std::println(std::cerr, "error: --features is only valid with --vcpkg");
+        return 1;
     }
 
     int exclusive_count = int(is_path) + int(is_workspace_dep) + int(is_vcpkg);
@@ -323,12 +352,12 @@ int cmd_add(int argc, char* argv[]) {
     std::string display;
 
     if (is_path) {
-        if (argc < i + 2) {
+        if (positional.size() < 2) {
             std::println(std::cerr, "usage: exon add [--dev] --path <name> <path>");
             return 1;
         }
-        name = argv[i];
-        value = argv[i + 1];
+        name = positional[0];
+        value = positional[1];
         auto target_dir = std::filesystem::current_path() / value;
         if (!std::filesystem::exists(target_dir / "exon.toml")) {
             std::println(std::cerr, "error: no exon.toml found at {}", target_dir.string());
@@ -338,11 +367,11 @@ int cmd_add(int argc, char* argv[]) {
         dep_line = std::format("{} = \"{}\"\n", name, value);
         display = std::format("path dep {} = \"{}\"", name, value);
     } else if (is_workspace_dep) {
-        if (argc < i + 1) {
+        if (positional.size() < 1) {
             std::println(std::cerr, "usage: exon add [--dev] --workspace <name>");
             return 1;
         }
-        name = argv[i];
+        name = positional[0];
         auto ws_root = manifest::find_workspace_root(std::filesystem::current_path());
         if (!ws_root) {
             std::println(std::cerr, "error: no workspace root found");
@@ -357,17 +386,31 @@ int cmd_add(int argc, char* argv[]) {
         dep_line = std::format("{} = true\n", name);
         display = std::format("workspace dep {}", name);
     } else if (is_vcpkg) {
-        if (argc < i + 2) {
-            std::println(std::cerr, "usage: exon add [--dev] --vcpkg <name> <version>");
+        if (positional.size() < 2) {
+            std::println(std::cerr,
+                         "usage: exon add [--dev] --vcpkg <name> <version> [--features a,b,c]");
             return 1;
         }
-        name = argv[i];
-        value = argv[i + 1];
+        name = positional[0];
+        value = positional[1];
         section = section_prefix + ".vcpkg";
-        dep_line = std::format("{} = \"{}\"\n", name, value);
-        display = std::format("vcpkg dep {} = \"{}\"", name, value);
+        if (features.empty()) {
+            dep_line = std::format("{} = \"{}\"\n", name, value);
+            display = std::format("vcpkg dep {} = \"{}\"", name, value);
+        } else {
+            std::string feat_list;
+            for (std::size_t fi = 0; fi < features.size(); ++fi) {
+                if (fi > 0)
+                    feat_list += ", ";
+                feat_list += std::format("\"{}\"", features[fi]);
+            }
+            dep_line = std::format("{} = {{ version = \"{}\", features = [{}] }}\n",
+                                    name, value, feat_list);
+            display = std::format("vcpkg dep {} = {{ version = \"{}\", features = [{}] }}",
+                                   name, value, feat_list);
+        }
     } else {
-        if (argc < i + 2) {
+        if (positional.size() < 2) {
             std::println(std::cerr,
                          "usage: exon add [--dev] <package> <version>\n"
                          "       exon add [--dev] --path <name> <path>\n"
@@ -375,8 +418,8 @@ int cmd_add(int argc, char* argv[]) {
                          "       exon add [--dev] --vcpkg <name> <version>");
             return 1;
         }
-        name = argv[i];
-        value = argv[i + 1];
+        name = positional[0];
+        value = positional[1];
         section = section_prefix;
         dep_line = std::format("\"{}\" = \"{}\"\n", name, value);
         display = std::format("{} {} = \"{}\"",
