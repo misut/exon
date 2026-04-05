@@ -44,9 +44,19 @@ target_sources(exon PRIVATE
 )
 target_link_libraries(exon PRIVATE exon-modules)
 
-target_compile_definitions(exon PUBLIC
-    EXON_PKG_NAME="exon"
-    EXON_PKG_VERSION="0.13.0"
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/build.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/commands.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/fetch.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/lock.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/manifest.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/semver.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/templates.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/toolchain.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vcpkg.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
+    PROPERTIES COMPILE_DEFINITIONS
+    "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.13.0\""
 )
 
 add_executable(test-test_build)
