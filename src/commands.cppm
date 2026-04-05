@@ -6,6 +6,7 @@ import build;
 import fetch;
 import lock;
 import templates;
+import toolchain;
 
 export namespace commands {
 
@@ -188,8 +189,9 @@ int cmd_run(int argc, char* argv[]) {
             return rc;
 
         auto profile = release ? "release" : "debug";
-        auto exe = std::filesystem::current_path() / ".exon" / profile / m.name;
-        auto run_cmd = exe.string();
+        auto exe = std::filesystem::current_path() / ".exon" / profile /
+                   (m.name + std::string{toolchain::exe_suffix});
+        auto run_cmd = toolchain::shell_quote(exe.string());
         for (int i = args_start; i < argc; ++i) {
             run_cmd += std::format(" {}", argv[i]);
         }

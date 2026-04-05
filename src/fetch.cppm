@@ -22,25 +22,33 @@ namespace detail {
 std::filesystem::path cache_dir() {
     if (auto const* override_dir = std::getenv("EXON_CACHE_DIR"); override_dir && *override_dir)
         return std::filesystem::path{override_dir};
-    auto home = std::getenv("HOME");
-    if (!home)
-        throw std::runtime_error("HOME environment variable not set");
-    return std::filesystem::path{home} / ".exon" / "cache";
+    auto home = toolchain::home_dir();
+    if (home.empty())
+        throw std::runtime_error("HOME (or USERPROFILE on Windows) not set");
+    return home / ".exon" / "cache";
 }
 
-// strip leading "/" from absolute-path keys so they compose safely under cache_dir
+// strip leading "/" and Windows drive colon from absolute-path keys so they
+// compose safely as directories under cache_dir ("C:/x" → "C_/x").
 std::string cache_safe_key(std::string const& dep_key) {
     std::string k = dep_key;
     while (!k.empty() && k.front() == '/')
         k.erase(k.begin());
+    if (k.size() >= 2 && k[1] == ':')
+        k[1] = '_';
     return k;
 }
 
 // "github.com/user/repo" → "https://github.com/user/repo.git"
 // "/path/to/local/repo" → "file:///path/to/local/repo"
+// "C:/path/to/local/repo" → "file:///C:/path/to/local/repo" (Windows)
 std::string to_git_url(std::string const& dep_key) {
     if (dep_key.starts_with("/")) {
         return std::format("file://{}", dep_key);
+    }
+    // Windows absolute path: drive letter like "C:/..." or "C:\..."
+    if (dep_key.size() >= 2 && dep_key[1] == ':') {
+        return std::format("file:///{}", dep_key);
     }
     return std::format("https://{}.git", dep_key);
 }
@@ -112,7 +120,7 @@ EnsureCloneResult ensure_git_clone(std::string const& repo, std::string const& v
     std::filesystem::create_directories(dep_cache);
     auto git_url = to_git_url(repo);
     auto cmd = std::format("git clone --depth 1 --branch {} {} {} 2>&1", tag, git_url,
-                           dep_cache.string());
+                           toolchain::shell_quote(dep_cache.string()));
     std::println("  fetching: {} {}...", repo, tag);
     int rc = std::system(cmd.c_str());
     if (rc != 0) {
@@ -275,7 +283,7 @@ void fetch_recursive(std::string const& dep_key, std::string const& version, loc
 
         auto git_url = to_git_url(dep_key);
         auto cmd = std::format("git clone --depth 1 --branch {} {} {} 2>&1", tag, git_url,
-                               dep_cache.string());
+                               toolchain::shell_quote(dep_cache.string()));
 
         std::println("  fetching: {} {}...", dep_key, tag);
         int rc = std::system(cmd.c_str());

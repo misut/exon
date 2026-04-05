@@ -78,3 +78,33 @@ jobs:
 
       - name: Verify
         run: .exon/debug/exon info
+
+  bootstrap-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '4.3.1'
+
+      - name: Install Ninja
+        run: choco install ninja
+
+      - name: Bootstrap build
+        run: |
+          cmake -B build -G Ninja
+          cmake --build build --target exon
+
+      - name: Self-host build
+        run: .\build\exon.exe build
+
+      - name: Self-host test
+        run: .\.exon\debug\exon.exe test
+
+      - name: Verify
+        run: .\.exon\debug\exon.exe info

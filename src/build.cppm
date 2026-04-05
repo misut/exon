@@ -23,7 +23,7 @@ SourceFiles collect_sources(std::filesystem::path const& src_dir) {
         if (!entry.is_regular_file())
             continue;
         auto ext = entry.path().extension();
-        auto path = std::filesystem::canonical(entry.path()).string();
+        auto path = std::filesystem::canonical(entry.path()).generic_string();
         if (ext == ".cpp")
             sf.cpp.push_back(path);
         else if (ext == ".cppm")
@@ -43,6 +43,10 @@ struct BuildFlags {
 BuildFlags resolve_flags(toolchain::Toolchain const& tc, manifest::Manifest const& m,
                          bool release) {
     BuildFlags flags;
+
+    // MSVC has no libc++ linker flags; rely on CMake defaults.
+    if (tc.is_msvc)
+        return flags;
 
     if (tc.stdlib_modules_json.empty() || m.standard < 23)
         return flags;
@@ -87,10 +91,12 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
                           std::string_view vcpkg_toolchain = {},
                           std::filesystem::path const& vcpkg_manifest_dir = {}) {
     auto build_type = release ? "Release" : "Debug";
-    auto cmd = std::format("{} -B {} -S {} -G Ninja -DCMAKE_BUILD_TYPE={}", tc.cmake,
-                           build_dir.string(), source_dir.string(), build_type);
+    auto cmd = std::format("{} -B {} -S {} -G Ninja -DCMAKE_BUILD_TYPE={}",
+                           toolchain::shell_quote(tc.cmake),
+                           toolchain::shell_quote(build_dir.string()),
+                           toolchain::shell_quote(source_dir.string()), build_type);
     if (!tc.cxx_compiler.empty())
-        cmd += std::format(" -DCMAKE_CXX_COMPILER={}", tc.cxx_compiler);
+        cmd += std::format(" -DCMAKE_CXX_COMPILER={}", toolchain::shell_quote(tc.cxx_compiler));
     if (!tc.sysroot.empty())
         cmd += std::format(" -DCMAKE_OSX_SYSROOT={}", tc.sysroot);
     if (!tc.stdlib_modules_json.empty() && m.standard >= 23)
@@ -123,17 +129,22 @@ void ensure_intron_tools() {
         return;
 
     // check if intron is available
-    if (std::system("intron help > /dev/null 2>&1") != 0)
+#if defined(_WIN32)
+    constexpr auto null_redirect = "intron help > NUL 2>&1";
+#else
+    constexpr auto null_redirect = "intron help > /dev/null 2>&1";
+#endif
+    if (std::system(null_redirect) != 0)
         return;
 
     auto table = toml::parse_file(".intron.toml");
     if (!table.contains("toolchain"))
         return;
 
-    auto home = std::getenv("HOME");
-    if (!home)
+    auto home = toolchain::home_dir();
+    if (home.empty())
         return;
-    auto intron_root = std::filesystem::path{home} / ".intron" / "toolchains";
+    auto intron_root = home / ".intron" / "toolchains";
 
     auto const& tools = table.at("toolchain").as_table();
     for (auto const& [tool, ver_val] : tools) {
@@ -166,7 +177,8 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
                            bool release = false) {
     std::ostringstream out;
 
-    bool import_std = (m.standard >= 23 && !tc.stdlib_modules_json.empty());
+    bool import_std = (m.standard >= 23 &&
+                       (!tc.stdlib_modules_json.empty() || tc.native_import_std));
 
     if (import_std) {
         out << "cmake_minimum_required(VERSION 3.30)\n\n";
@@ -180,6 +192,14 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         out << std::format("project({} LANGUAGES CXX)\n\n", m.name);
         out << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
         out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
+    }
+
+    // MSVC-specific compile options (keep warnings informative but non-fatal)
+    if (tc.is_msvc) {
+        out << "if(MSVC)\n";
+        out << "    add_compile_options(/W4 /wd4996 /utf-8)\n";
+        out << "    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)\n";
+        out << "endif()\n\n";
     }
 
     // separate deps into regular and dev
@@ -236,7 +256,7 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
                     "git dep '{}': {}/CMakeLists.txt not found (run `exon sync` in the upstream "
                     "repo, or add a CMakeLists.txt to the subdir)", dep.name, dep.subdir));
             out << std::format("add_subdirectory({} {})\n\n",
-                               std::filesystem::canonical(dep.path).string(), dep.name);
+                               std::filesystem::canonical(dep.path).generic_string(), dep.name);
             return;
         }
 
@@ -247,7 +267,7 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             auto dep_cmake = dep.path / "CMakeLists.txt";
             if (std::filesystem::exists(dep_cmake)) {
                 out << std::format("add_subdirectory({} {})\n\n",
-                                   std::filesystem::canonical(dep.path).string(), dep.name);
+                                   std::filesystem::canonical(dep.path).generic_string(), dep.name);
                 return;
             }
             throw std::runtime_error(std::format(
@@ -263,7 +283,8 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         }
         if (!dep_sf.cppm.empty()) {
             out << std::format(
-                "target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS / FILES", dep.name);
+                "target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS {} FILES", dep.name,
+                std::filesystem::canonical(dep.path).generic_string());
             for (auto const& src : dep_sf.cppm)
                 out << std::format("\n    {}", src);
             out << "\n)\n";
@@ -272,7 +293,7 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         auto include_dir = dep.path / "include";
         if (std::filesystem::exists(include_dir)) {
             out << std::format("target_include_directories({} PUBLIC {})\n", dep.name,
-                               std::filesystem::canonical(include_dir).string());
+                               std::filesystem::canonical(include_dir).generic_string());
         }
 
         auto dep_manifest_path = dep.path / "exon.toml";
@@ -314,7 +335,8 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
     if (has_modules) {
         out << std::format("add_library({})\n", modules_lib);
         out << std::format(
-            "target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS / FILES", modules_lib);
+            "target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS {} FILES", modules_lib,
+            std::filesystem::canonical(project_root).generic_string());
         for (auto const& src : sf.cppm)
             out << std::format("\n    {}", src);
         out << "\n)\n";
@@ -332,7 +354,7 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             auto include_dir = project_root / "include";
             if (std::filesystem::exists(include_dir)) {
                 out << std::format("target_include_directories({} PUBLIC {})\n", modules_lib,
-                                   std::filesystem::canonical(include_dir).string());
+                                   std::filesystem::canonical(include_dir).generic_string());
             }
         }
         out << "\n";
@@ -455,6 +477,12 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
     }
 
+    // MSVC-specific compile options (no-op on clang/gcc)
+    out << "if(MSVC)\n";
+    out << "    add_compile_options(/W4 /wd4996 /utf-8)\n";
+    out << "    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)\n";
+    out << "endif()\n\n";
+
     auto root = std::filesystem::current_path();
 
     // separate deps (git vs path, regular vs dev)
@@ -531,7 +559,7 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
     // path deps via add_subdirectory (binary_dir required for paths outside source tree)
     auto emit_subdirs = [&](std::vector<fetch::FetchedDep const*> const& dep_list) {
         for (auto const* dep : dep_list) {
-            auto rel = std::filesystem::relative(dep->path, root).string();
+            auto rel = std::filesystem::relative(dep->path, root).generic_string();
             out << std::format("add_subdirectory(${{CMAKE_CURRENT_SOURCE_DIR}}/{} "
                                "${{CMAKE_BINARY_DIR}}/_deps/{}-build)\n",
                                rel, dep->name);
@@ -560,7 +588,7 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         throw std::runtime_error("no source files found in src/");
     auto to_rel = [&](std::string const& abs) -> std::string {
         return std::format("${{CMAKE_CURRENT_SOURCE_DIR}}/{}",
-            std::filesystem::relative(abs, root).string());
+            std::filesystem::relative(abs, root).generic_string());
     };
 
     auto modules_lib = std::format("{}-modules", m.name);
@@ -713,7 +741,8 @@ int run(manifest::Manifest const& m, bool release = false) {
             return rc;
     }
 
-    auto build_cmd = std::format("{} --build {}", tc.cmake, build_dir.string());
+    auto build_cmd = std::format("{} --build {}", toolchain::shell_quote(tc.cmake),
+                                 toolchain::shell_quote(build_dir.string()));
     std::println("building...");
     int rc = std::system(build_cmd.c_str());
     if (rc != 0)
@@ -751,7 +780,8 @@ int run_check(manifest::Manifest const& m, bool release = false) {
     }
 
     auto target = std::format("{}-modules", m.name);
-    auto build_cmd = std::format("{} --build {} --target {}", tc.cmake, build_dir.string(), target);
+    auto build_cmd = std::format("{} --build {} --target {}", toolchain::shell_quote(tc.cmake),
+                                 toolchain::shell_quote(build_dir.string()), target);
     std::println("checking...");
     int rc = std::system(build_cmd.c_str());
     if (rc != 0)
@@ -811,8 +841,8 @@ int run_test(manifest::Manifest const& m, bool release = false) {
     // build
     std::println("building tests...");
     for (auto const& name : test_names) {
-        auto build_cmd =
-            std::format("{} --build {} --target {}", tc.cmake, build_dir.string(), name);
+        auto build_cmd = std::format("{} --build {} --target {}", toolchain::shell_quote(tc.cmake),
+                                     toolchain::shell_quote(build_dir.string()), name);
         int rc = std::system(build_cmd.c_str());
         if (rc != 0)
             return rc;
@@ -823,8 +853,8 @@ int run_test(manifest::Manifest const& m, bool release = false) {
     int passed = 0;
     int failed = 0;
     for (auto const& name : test_names) {
-        auto exe = build_dir / name;
-        int rc = std::system(exe.string().c_str());
+        auto exe = build_dir / (name + std::string{toolchain::exe_suffix});
+        int rc = std::system(toolchain::shell_quote(exe.string()).c_str());
         if (rc == 0) {
             std::println("  {} ... ok", name);
             ++passed;

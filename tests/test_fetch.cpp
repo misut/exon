@@ -3,8 +3,27 @@ import fetch;
 import manifest;
 import toml;
 
+#if defined(_WIN32)
+extern "C" int _putenv_s(char const* name, char const* value);
+static int setenv(char const* name, char const* value, int /*overwrite*/) {
+    return _putenv_s(name, value);
+}
+static int unsetenv(char const* name) {
+    return _putenv_s(name, "");
+}
+constexpr auto null_redirect = ">NUL 2>&1";
+extern "C" unsigned int __stdcall SetErrorMode(unsigned int);
+extern "C" int _set_abort_behavior(unsigned int, unsigned int);
+static int _crash_suppression = []() {
+    SetErrorMode(0x0001u | 0x0002u);
+    _set_abort_behavior(0, 0x1u | 0x4u);
+    return 0;
+}();
+#else
 extern "C" int setenv(char const* name, char const* value, int overwrite);
 extern "C" int unsetenv(char const* name);
+constexpr auto null_redirect = ">/dev/null 2>&1";
+#endif
 
 int failures = 0;
 
@@ -253,7 +272,7 @@ void test_fetch_subdir_dep() {
 
     // init + commit + tag
     auto git = [&](std::string const& cmd) {
-        auto full = std::format("cd {} && git {} >/dev/null 2>&1", repo.string(), cmd);
+        auto full = std::format("git -C \"{}\" {} {}", repo.generic_string(), cmd, null_redirect);
         return std::system(full.c_str());
     };
     git("init -q");
@@ -274,7 +293,7 @@ version = "0.1.0"
 
 [dependencies]
 refl = {{ git = "{}", version = "0.1.0", subdir = "refl" }}
-)", repo.string());
+)", repo.generic_string());
     }
 
     auto saved_cwd = fs::current_path();
@@ -298,16 +317,19 @@ refl = {{ git = "{}", version = "0.1.0", subdir = "refl" }}
 
         // lock entry should use composite name
         auto const* locked = result.lock_file.find(
-            std::format("{}#{}", repo.string(), "refl"), "0.1.0");
+            std::format("{}#{}", repo.generic_string(), "refl"), "0.1.0");
         check(locked != nullptr, "subdir fetch: composite-name lock entry exists");
         if (locked)
             check(locked->subdir == "refl", "subdir fetch: lock subdir field");
 
         // verify clone happened under EXON_CACHE_DIR (not under HOME/.exon/cache)
-        // absolute-path keys have their leading "/" stripped so the cache path composes cleanly
-        auto repo_key = repo.string();
+        // absolute-path keys have their leading "/" and Windows drive colon stripped
+        // so the cache path composes cleanly as a directory
+        auto repo_key = repo.generic_string();
         while (!repo_key.empty() && repo_key.front() == '/')
             repo_key.erase(repo_key.begin());
+        if (repo_key.size() >= 2 && repo_key[1] == ':')
+            repo_key[1] = '_';
         auto expected_clone = cache / repo_key / "v0.1.0";
         check(fs::exists(expected_clone / "exon.toml"),
               "subdir fetch: clone landed under EXON_CACHE_DIR");
@@ -342,7 +364,7 @@ void test_fetch_subdir_dedup_clone() {
         f << std::format("add_library({} INTERFACE)\n", name);
     }
     auto git = [&](std::string const& cmd) {
-        auto full = std::format("cd {} && git {} >/dev/null 2>&1", repo.string(), cmd);
+        auto full = std::format("git -C \"{}\" {} {}", repo.generic_string(), cmd, null_redirect);
         return std::system(full.c_str());
     };
     git("init -q");
@@ -363,7 +385,7 @@ version = "0.1.0"
 [dependencies]
 a = {{ git = "{0}", version = "0.1.0", subdir = "a" }}
 b = {{ git = "{0}", version = "0.1.0", subdir = "b" }}
-)", repo.string());
+)", repo.generic_string());
     }
 
     auto saved_cwd = fs::current_path();
@@ -376,10 +398,12 @@ b = {{ git = "{0}", version = "0.1.0", subdir = "b" }}
 
         check(result.deps.size() == 2, "subdir dedup: 2 deps");
 
-        // only one clone directory (leading slash stripped from absolute-path keys)
-        auto repo_key = repo.string();
+        // only one clone directory (leading "/" and drive colon stripped from absolute-path keys)
+        auto repo_key = repo.generic_string();
         while (!repo_key.empty() && repo_key.front() == '/')
             repo_key.erase(repo_key.begin());
+        if (repo_key.size() >= 2 && repo_key[1] == ':')
+            repo_key[1] = '_';
         auto clone_root = cache / repo_key / "v0.1.0";
         check(fs::exists(clone_root / "a" / "exon.toml"), "subdir dedup: a present in clone");
         check(fs::exists(clone_root / "b" / "exon.toml"), "subdir dedup: b present in clone");
@@ -410,7 +434,7 @@ void test_fetch_subdir_missing() {
         f << "[package]\nname = \"x\"\nversion = \"0.1.0\"\n";
     }
     auto git = [&](std::string const& cmd) {
-        auto full = std::format("cd {} && git {} >/dev/null 2>&1", repo.string(), cmd);
+        auto full = std::format("git -C \"{}\" {} {}", repo.generic_string(), cmd, null_redirect);
         return std::system(full.c_str());
     };
     git("init -q");
@@ -430,7 +454,7 @@ version = "0.1.0"
 
 [dependencies]
 nope = {{ git = "{}", version = "0.1.0", subdir = "does-not-exist" }}
-)", repo.string());
+)", repo.generic_string());
     }
 
     auto saved_cwd = fs::current_path();
