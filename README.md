@@ -22,8 +22,8 @@ curl -fsSL https://raw.githubusercontent.com/misut/exon/main/install.sh | sh
 
 ```sh
 mise plugin add exon https://github.com/misut/mise-exon.git
-mise install exon@0.11.0
-mise use exon@0.11.0
+mise install exon@0.12.0
+mise use exon@0.12.0
 ```
 
 <details>
@@ -32,10 +32,9 @@ mise use exon@0.11.0
 Requires LLVM with libc++ modules: [Homebrew LLVM](https://formulae.brew.sh/formula/llvm) (macOS) or [LLVM 20+](https://apt.llvm.org/) (Linux).
 
 ```sh
-# bootstrap
-git clone https://github.com/misut/tomlcpp.git /tmp/tomlcpp
-cmake -B build -S .github/cmake -G Ninja -DTOMLCPP_DIR=/tmp/tomlcpp
-cmake --build build
+# bootstrap (uses FetchContent for tomlcpp)
+cmake -B build -G Ninja
+cmake --build build --target exon
 
 # self-host
 ./build/exon build
@@ -74,6 +73,7 @@ hello, world!
 | `exon add [--dev] <pkg> <ver>` | Add a git dependency |
 | `exon add [--dev] --path <name> <path>` | Add a local path dependency |
 | `exon add [--dev] --workspace <name>` | Add a workspace member dependency |
+| `exon add [--dev] --vcpkg <name> <ver>` | Add a vcpkg dependency |
 | `exon remove <pkg>` | Remove a dependency |
 | `exon update` | Update dependencies |
 | `exon sync` | Sync CMakeLists.txt with exon.toml |
@@ -103,6 +103,9 @@ shared = "../shared"                       # local path
 [dependencies.workspace]
 core = true                                # workspace sibling
 
+[dependencies.vcpkg]
+fmt = "11.0.0"                             # vcpkg manifest
+
 [dev-dependencies]
 "github.com/user/testlib" = "0.1.0"       # test-only
 
@@ -115,7 +118,7 @@ DEBUG_MODE = "1"
 
 ## Dependencies
 
-Exon supports four kinds of dependencies, all with `[dev-dependencies.*]` variants that are only pulled in for `exon test`.
+Exon supports five kinds of dependencies, all with `[dev-dependencies.*]` variants that are only pulled in for `exon test`.
 
 ### Git dependencies
 
@@ -194,6 +197,33 @@ exon add --workspace core
 
 See [docs/workspace.md](docs/workspace.md) for a full monorepo walkthrough.
 
+### vcpkg dependencies
+
+Install packages through [vcpkg](https://vcpkg.io) in manifest mode. Exon generates `.exon/vcpkg.json` and passes `CMAKE_TOOLCHAIN_FILE` to CMake, which installs packages automatically at configure time.
+
+```toml
+[dependencies.vcpkg]
+fmt = "11.0.0"                             # pinned via version>=
+zlib = "*"                                 # baseline version
+
+[dependencies.find]
+fmt = "fmt::fmt"                           # link target (required)
+ZLIB = "ZLIB::ZLIB"
+
+[dev-dependencies.vcpkg]
+gtest = "*"
+
+[dev-dependencies.find]
+GTest = "GTest::gtest_main"
+```
+
+```sh
+exon add --vcpkg fmt 11.0.0
+exon add --dev --vcpkg gtest '*'
+```
+
+Install (`[dependencies.vcpkg]`) and link (`[dependencies.find]`) are separate because vcpkg package names and CMake `find_package` names often differ (vcpkg `zlib` ↔ `find_package(ZLIB)`). Exon requires `VCPKG_ROOT` or a standard install path (e.g. `/opt/vcpkg`, `~/vcpkg`, GitHub Actions `VCPKG_INSTALLATION_ROOT`); if vcpkg cannot be located, the build fails with a clear error.
+
 ## Features
 
 - **C++23 `import std;`** — automatically detected when `standard >= 23` and clang with libc++ modules is available
@@ -203,7 +233,7 @@ See [docs/workspace.md](docs/workspace.md) for a full monorepo walkthrough.
 - **Incremental builds** — CMake configuration is cached and skipped when unchanged
 - **Build profiles** — debug (default) and release (`--release`, statically links libc++ for portable binaries)
 - **Dev dependencies** — `[dev-dependencies.*]` for test-only packages, excluded from builds
-- **Four dependency kinds** — git, find_package, local path, workspace sibling
+- **Five dependency kinds** — git, find_package, local path, workspace sibling, vcpkg
 - **Workspaces** — monorepos with `[workspace] members = [...]` and member-to-member references
 - **Compile definitions** — built-in (`EXON_PKG_NAME`, `EXON_PKG_VERSION`) and user-defined via `[defines]`
 - **CMakeLists.txt sync** — `exon sync` generates a portable CMakeLists.txt for plain cmake builds
