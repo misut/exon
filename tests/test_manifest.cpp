@@ -352,11 +352,45 @@ benchmark = "1.9.0"
     auto m = manifest::from_toml(table);
 
     check(m.vcpkg_deps.size() == 2, "vcpkg: 2 regular deps");
-    check(m.vcpkg_deps.at("fmt") == "11.0.0", "vcpkg: fmt version");
-    check(m.vcpkg_deps.at("zlib") == "*", "vcpkg: zlib wildcard");
+    check(m.vcpkg_deps.at("fmt").version == "11.0.0", "vcpkg: fmt version");
+    check(m.vcpkg_deps.at("fmt").features.empty(), "vcpkg: fmt no features");
+    check(m.vcpkg_deps.at("zlib").version == "*", "vcpkg: zlib wildcard");
     check(m.dev_vcpkg_deps.size() == 2, "vcpkg: 2 dev deps");
-    check(m.dev_vcpkg_deps.at("gtest") == "*", "vcpkg: dev gtest");
-    check(m.dev_vcpkg_deps.at("benchmark") == "1.9.0", "vcpkg: dev benchmark version");
+    check(m.dev_vcpkg_deps.at("gtest").version == "*", "vcpkg: dev gtest");
+    check(m.dev_vcpkg_deps.at("benchmark").version == "1.9.0", "vcpkg: dev benchmark version");
+}
+
+void test_vcpkg_deps_with_features() {
+    auto input = R"(
+[package]
+name = "app"
+version = "1.0.0"
+
+[dependencies.vcpkg]
+zlib = "*"
+fmt = { version = "11.0.0", features = ["xchar"] }
+boost-asio = { version = "*", features = ["ssl"] }
+opencv = { features = ["contrib", "cuda"] }
+empty = { version = "1.0.0", features = [] }
+)";
+
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    check(m.vcpkg_deps.size() == 5, "vcpkg features: 5 deps");
+    check(m.vcpkg_deps.at("zlib").version == "*", "vcpkg features: zlib string form");
+    check(m.vcpkg_deps.at("zlib").features.empty(), "vcpkg features: zlib no features");
+    check(m.vcpkg_deps.at("fmt").version == "11.0.0", "vcpkg features: fmt version");
+    check(m.vcpkg_deps.at("fmt").features.size() == 1, "vcpkg features: fmt one feature");
+    check(m.vcpkg_deps.at("fmt").features[0] == "xchar", "vcpkg features: fmt feature name");
+    check(m.vcpkg_deps.at("boost-asio").version == "*", "vcpkg features: boost-asio version");
+    check(m.vcpkg_deps.at("boost-asio").features.size() == 1, "vcpkg features: boost-asio features");
+    check(m.vcpkg_deps.at("opencv").version.empty(), "vcpkg features: opencv version omitted");
+    check(m.vcpkg_deps.at("opencv").features.size() == 2, "vcpkg features: opencv 2 features");
+    check(m.vcpkg_deps.at("opencv").features[0] == "contrib", "vcpkg features: opencv[0]");
+    check(m.vcpkg_deps.at("opencv").features[1] == "cuda", "vcpkg features: opencv[1]");
+    check(m.vcpkg_deps.at("empty").version == "1.0.0", "vcpkg features: empty features ok");
+    check(m.vcpkg_deps.at("empty").features.empty(), "vcpkg features: empty array");
 }
 
 void test_no_dev_deps() {
@@ -397,6 +431,7 @@ int main() {
     test_find_workspace_root();
     test_resolve_workspace_member();
     test_vcpkg_deps();
+    test_vcpkg_deps_with_features();
     test_defines();
     test_no_dev_deps();
 

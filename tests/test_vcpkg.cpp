@@ -32,7 +32,7 @@ void test_render_wildcard() {
     manifest::Manifest m;
     m.name = "app";
     m.version = "1.0.0";
-    m.vcpkg_deps = {{"fmt", "*"}, {"zlib", "*"}};
+    m.vcpkg_deps = {{"fmt", {.version = "*"}}, {"zlib", {.version = "*"}}};
     auto s = vcpkg::render_manifest(m);
     // wildcard → bare string in dependencies array
     check(s.contains("\"fmt\""), "wildcard: fmt bare");
@@ -45,7 +45,7 @@ void test_render_pinned() {
     manifest::Manifest m;
     m.name = "app";
     m.version = "1.0.0";
-    m.vcpkg_deps = {{"fmt", "11.0.0"}};
+    m.vcpkg_deps = {{"fmt", {.version = "11.0.0"}}};
     auto s = vcpkg::render_manifest(m);
     check(s.contains("\"name\": \"fmt\""), "pinned: fmt object");
     check(s.contains("\"version>=\": \"11.0.0\""), "pinned: version constraint");
@@ -55,8 +55,8 @@ void test_render_mixed_and_dev() {
     manifest::Manifest m;
     m.name = "app";
     m.version = "1.0.0";
-    m.vcpkg_deps = {{"fmt", "11.0.0"}, {"zlib", "*"}};
-    m.dev_vcpkg_deps = {{"gtest", "*"}};
+    m.vcpkg_deps = {{"fmt", {.version = "11.0.0"}}, {"zlib", {.version = "*"}}};
+    m.dev_vcpkg_deps = {{"gtest", {.version = "*"}}};
     auto s = vcpkg::render_manifest(m);
     check(s.contains("\"fmt\""), "mixed: fmt");
     check(s.contains("\"zlib\""), "mixed: zlib");
@@ -68,8 +68,8 @@ void test_render_dev_overridden_by_regular() {
     manifest::Manifest m;
     m.name = "app";
     m.version = "1.0.0";
-    m.vcpkg_deps = {{"fmt", "11.0.0"}};
-    m.dev_vcpkg_deps = {{"fmt", "*"}};
+    m.vcpkg_deps = {{"fmt", {.version = "11.0.0"}}};
+    m.dev_vcpkg_deps = {{"fmt", {.version = "*"}}};
     auto s = vcpkg::render_manifest(m);
     // regular wins: only 11.0.0 constraint
     check(s.contains("\"version>=\": \"11.0.0\""), "dedup: regular wins");
@@ -83,6 +83,42 @@ void test_render_dev_overridden_by_regular() {
     check(count == 1, "dedup: fmt appears once");
 }
 
+void test_render_features() {
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.vcpkg_deps = {
+        {"fmt", {.version = "11.0.0", .features = {"xchar"}}},
+        {"opencv", {.version = "", .features = {"contrib", "cuda"}}},
+    };
+    auto s = vcpkg::render_manifest(m);
+    check(s.contains("\"features\": [\"xchar\"]"), "features: single fmt feature");
+    check(s.contains("\"version>=\": \"11.0.0\""), "features: fmt version preserved");
+    check(s.contains("\"features\": [\"contrib\", \"cuda\"]"),
+          "features: opencv two features");
+    // opencv has no version → no version>= in its entry
+    // (rough check: fmt has one version>= and opencv's object has none)
+    std::size_t count = 0;
+    std::size_t pos = 0;
+    while ((pos = s.find("version>=", pos)) != std::string::npos) {
+        ++count;
+        ++pos;
+    }
+    check(count == 1, "features: only fmt has version>=");
+}
+
+void test_render_features_wildcard_version() {
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    // version "*" + features → object form with features, no version>=
+    m.vcpkg_deps = {{"boost-asio", {.version = "*", .features = {"ssl"}}}};
+    auto s = vcpkg::render_manifest(m);
+    check(s.contains("\"name\": \"boost-asio\""), "features+wildcard: object form");
+    check(s.contains("\"features\": [\"ssl\"]"), "features+wildcard: features array");
+    check(!s.contains("version>="), "features+wildcard: no version constraint");
+}
+
 void test_write_manifest() {
     namespace fs = std::filesystem;
     auto tmp = fs::temp_directory_path() / "exon_test_vcpkg_write";
@@ -91,7 +127,7 @@ void test_write_manifest() {
     manifest::Manifest m;
     m.name = "app";
     m.version = "0.1.0";
-    m.vcpkg_deps = {{"fmt", "*"}};
+    m.vcpkg_deps = {{"fmt", {.version = "*"}}};
 
     auto out = tmp / "sub" / "vcpkg.json";
     vcpkg::write_manifest(m, out);
@@ -129,6 +165,8 @@ int main() {
     test_render_pinned();
     test_render_mixed_and_dev();
     test_render_dev_overridden_by_regular();
+    test_render_features();
+    test_render_features_wildcard_version();
     test_write_manifest();
     test_looks_like_root();
 

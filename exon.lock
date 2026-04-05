@@ -2,6 +2,6 @@
 
 [[package]]
 name = "github.com/misut/tomlcpp"
-version = "0.2.0"
-commit = "b541448e96ee76a16949c79abe6444e9b1ea77e3"
+version = "0.3.0"
+commit = "53ddc4c4b3213f5aabc0b08829d8666e6aa86fb3"
 

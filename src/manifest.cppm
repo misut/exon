@@ -4,6 +4,11 @@ import toml;
 
 export namespace manifest {
 
+struct VcpkgDep {
+    std::string version;                // "" or "*" means baseline
+    std::vector<std::string> features;  // optional vcpkg features
+};
+
 struct Manifest {
     std::string name;
     std::string version;
@@ -20,8 +25,8 @@ struct Manifest {
     std::map<std::string, std::string> dev_path_deps;    // [dev-dependencies.path]
     std::set<std::string> workspace_deps;                // [dependencies.workspace]
     std::set<std::string> dev_workspace_deps;            // [dev-dependencies.workspace]
-    std::map<std::string, std::string> vcpkg_deps;       // [dependencies.vcpkg]
-    std::map<std::string, std::string> dev_vcpkg_deps;   // [dev-dependencies.vcpkg]
+    std::map<std::string, VcpkgDep> vcpkg_deps;          // [dependencies.vcpkg]
+    std::map<std::string, VcpkgDep> dev_vcpkg_deps;      // [dev-dependencies.vcpkg]
     std::map<std::string, std::string> defines;         // [defines]
     std::map<std::string, std::string> defines_debug;   // [defines.debug]
     std::map<std::string, std::string> defines_release;  // [defines.release]
@@ -69,7 +74,7 @@ Manifest from_toml(toml::Table const& table) {
                                   std::map<std::string, std::string>& find_deps,
                                   std::map<std::string, std::string>& path_deps,
                                   std::set<std::string>& workspace_deps,
-                                  std::map<std::string, std::string>& vcpkg_deps) {
+                                  std::map<std::string, VcpkgDep>& vcpkg_deps) {
         for (auto const& [key, val] : deps) {
             if (val.is_string()) {
                 string_deps.emplace(key, val.as_string());
@@ -90,8 +95,23 @@ Manifest from_toml(toml::Table const& table) {
                 }
             } else if (val.is_table() && key == "vcpkg") {
                 for (auto const& [k, v] : val.as_table()) {
-                    if (v.is_string())
-                        vcpkg_deps.emplace(k, v.as_string());
+                    VcpkgDep dep;
+                    if (v.is_string()) {
+                        dep.version = v.as_string();
+                    } else if (v.is_table()) {
+                        auto const& t = v.as_table();
+                        if (t.contains("version") && t.at("version").is_string())
+                            dep.version = t.at("version").as_string();
+                        if (t.contains("features") && t.at("features").is_array()) {
+                            for (auto const& f : t.at("features").as_array()) {
+                                if (f.is_string())
+                                    dep.features.push_back(f.as_string());
+                            }
+                        }
+                    } else {
+                        continue;
+                    }
+                    vcpkg_deps.emplace(k, std::move(dep));
                 }
             }
         }

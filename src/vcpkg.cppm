@@ -39,22 +39,35 @@ std::string render_manifest(manifest::Manifest const& m) {
     out << "  \"dependencies\": [";
 
     // deduplicate: dev + regular, regular wins when key collides
-    std::map<std::string, std::string> all;
+    std::map<std::string, manifest::VcpkgDep> all;
     for (auto const& [k, v] : m.dev_vcpkg_deps)
         all[k] = v;
     for (auto const& [k, v] : m.vcpkg_deps)
         all[k] = v; // overwrites dev if same key
 
     bool first = true;
-    for (auto const& [pkg, version] : all) {
+    for (auto const& [pkg, dep] : all) {
         if (!first)
             out << ",";
         out << "\n    ";
-        if (version == "*" || version.empty()) {
+        bool has_version = !(dep.version.empty() || dep.version == "*");
+        bool has_features = !dep.features.empty();
+        if (!has_version && !has_features) {
             out << json_escape(pkg);
         } else {
-            out << "{\"name\": " << json_escape(pkg) << ", \"version>=\": "
-                << json_escape(version) << "}";
+            out << "{\"name\": " << json_escape(pkg);
+            if (has_version)
+                out << ", \"version>=\": " << json_escape(dep.version);
+            if (has_features) {
+                out << ", \"features\": [";
+                for (std::size_t i = 0; i < dep.features.size(); ++i) {
+                    if (i > 0)
+                        out << ", ";
+                    out << json_escape(dep.features[i]);
+                }
+                out << "]";
+            }
+            out << "}";
         }
         first = false;
     }

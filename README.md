@@ -73,7 +73,7 @@ hello, world!
 | `exon add [--dev] <pkg> <ver>` | Add a git dependency |
 | `exon add [--dev] --path <name> <path>` | Add a local path dependency |
 | `exon add [--dev] --workspace <name>` | Add a workspace member dependency |
-| `exon add [--dev] --vcpkg <name> <ver>` | Add a vcpkg dependency |
+| `exon add [--dev] --vcpkg <name> <ver> [--features a,b]` | Add a vcpkg dependency |
 | `exon remove <pkg>` | Remove a dependency |
 | `exon update` | Update dependencies |
 | `exon sync` | Sync CMakeLists.txt with exon.toml |
@@ -203,8 +203,10 @@ Install packages through [vcpkg](https://vcpkg.io) in manifest mode. Exon genera
 
 ```toml
 [dependencies.vcpkg]
-fmt = "11.0.0"                             # pinned via version>=
-zlib = "*"                                 # baseline version
+fmt = "11.0.0"                                            # pinned via version>=
+zlib = "*"                                                # baseline version
+boost-asio = { version = "*", features = ["ssl"] }        # select vcpkg features
+opencv = { features = ["contrib", "cuda"] }               # version omitted = "*"
 
 [dependencies.find]
 fmt = "fmt::fmt"                           # link target (required)
@@ -219,10 +221,11 @@ GTest = "GTest::gtest_main"
 
 ```sh
 exon add --vcpkg fmt 11.0.0
+exon add --vcpkg boost-asio '*' --features ssl
 exon add --dev --vcpkg gtest '*'
 ```
 
-Install (`[dependencies.vcpkg]`) and link (`[dependencies.find]`) are separate because vcpkg package names and CMake `find_package` names often differ (vcpkg `zlib` ↔ `find_package(ZLIB)`). Exon requires `VCPKG_ROOT` or a standard install path (e.g. `/opt/vcpkg`, `~/vcpkg`, GitHub Actions `VCPKG_INSTALLATION_ROOT`); if vcpkg cannot be located, the build fails with a clear error.
+Install (`[dependencies.vcpkg]`) and link (`[dependencies.find]`) are separate because vcpkg package names and CMake `find_package` names often differ (vcpkg `zlib` ↔ `find_package(ZLIB)`). Use inline table form (`{ version = "...", features = [...] }`) to enable optional vcpkg features. Exon requires `VCPKG_ROOT` or a standard install path (e.g. `/opt/vcpkg`, `~/vcpkg`, GitHub Actions `VCPKG_INSTALLATION_ROOT`); if vcpkg cannot be located, the build fails with a clear error.
 
 ## Features
 

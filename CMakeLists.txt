@@ -11,7 +11,7 @@ project(exon LANGUAGES CXX)
 include(FetchContent)
 FetchContent_Declare(tomlcpp
     GIT_REPOSITORY https://github.com/misut/tomlcpp.git
-    GIT_TAG v0.2.0
+    GIT_TAG v0.3.0
     GIT_SHALLOW ON
 )
 FetchContent_MakeAvailable(tomlcpp)
