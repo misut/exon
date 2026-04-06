@@ -5,6 +5,6 @@ intron = "https://github.com/misut/mise-intron.git"
 [tools]
 clang = "latest"
 cmake = "latest"
-exon = "0.15.1"
+exon = "0.16.0"
 intron = "0.13.2"
 ninja = "latest"
