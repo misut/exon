@@ -66,6 +66,11 @@ int run_for_workspace(manifest::Manifest const& m,
     return 0;
 }
 
+manifest::Manifest resolve_manifest(manifest::Manifest m) {
+    auto host = toolchain::detect_host_platform();
+    return manifest::resolve_for_platform(std::move(m), host);
+}
+
 bool check_platform(manifest::Manifest const& m) {
     auto host = toolchain::detect_host_platform();
     if (!manifest::supports_platform(m, host)) {
@@ -201,12 +206,14 @@ int cmd_build(int argc, char* argv[]) {
         auto m = load_manifest();
         if (!check_platform(m))
             return 1;
+        m = resolve_manifest(std::move(m));
         bool release = (argc >= 3 && std::string_view{argv[2]} == "--release");
         if (manifest::is_workspace(m)) {
             return run_for_workspace(m, [release](auto const&) {
                 auto member_m = manifest::load("exon.toml");
                 if (!check_platform(member_m))
                     return 1;
+                member_m = resolve_manifest(std::move(member_m));
                 return build::run(member_m, release);
             });
         }
@@ -226,12 +233,14 @@ int cmd_check(int argc, char* argv[]) {
         auto m = load_manifest();
         if (!check_platform(m))
             return 1;
+        m = resolve_manifest(std::move(m));
         bool release = (argc >= 3 && std::string_view{argv[2]} == "--release");
         if (manifest::is_workspace(m)) {
             return run_for_workspace(m, [release](auto const&) {
                 auto member_m = manifest::load("exon.toml");
                 if (!check_platform(member_m))
                     return 1;
+                member_m = resolve_manifest(std::move(member_m));
                 return build::run_check(member_m, release);
             });
         }
@@ -251,6 +260,7 @@ int cmd_run(int argc, char* argv[]) {
         auto m = load_manifest();
         if (!check_platform(m))
             return 1;
+        m = resolve_manifest(std::move(m));
         if (m.name.empty()) {
             std::println(std::cerr, "error: package name is required in exon.toml");
             return 1;
@@ -289,12 +299,14 @@ int cmd_test(int argc, char* argv[]) {
         auto m = load_manifest();
         if (!check_platform(m))
             return 1;
+        m = resolve_manifest(std::move(m));
         bool release = (argc >= 3 && std::string_view{argv[2]} == "--release");
         if (manifest::is_workspace(m)) {
             return run_for_workspace(m, [release](auto const&) {
                 auto member_m = manifest::load("exon.toml");
                 if (!check_platform(member_m))
                     return 1;
+                member_m = resolve_manifest(std::move(member_m));
                 return build::run_test(member_m, release);
             });
         }
@@ -735,9 +747,10 @@ int cmd_update() {
 int cmd_sync() {
     try {
         auto m = load_manifest();
+        m = resolve_manifest(std::move(m));
         if (manifest::is_workspace(m)) {
             return run_for_workspace(m, [](auto const&) {
-                auto member_m = manifest::load("exon.toml");
+                auto member_m = resolve_manifest(manifest::load("exon.toml"));
                 auto lock_path = (std::filesystem::current_path() / "exon.lock").string();
                 auto fetch_result = fetch::fetch_all(member_m, lock_path);
                 build::sync_root_cmake(member_m, fetch_result.deps);

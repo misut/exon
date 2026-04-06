@@ -1,5 +1,6 @@
 import std;
 import toml;
+import toolchain;
 import manifest;
 
 #if defined(_WIN32)
@@ -600,6 +601,110 @@ platforms = [{}]
 )"), "platforms error: empty entry throws");
 }
 
+void test_eval_predicate() {
+    toolchain::Platform linux_x64{.os = "linux", .arch = "x86_64"};
+    toolchain::Platform macos_arm{.os = "macos", .arch = "aarch64"};
+    toolchain::Platform win_x64{.os = "windows", .arch = "x86_64"};
+
+    // simple os match
+    check(manifest::eval_predicate(R"(cfg(os = "linux"))", linux_x64), "pred: linux matches linux");
+    check(!manifest::eval_predicate(R"(cfg(os = "linux"))", macos_arm), "pred: linux !matches macos");
+
+    // simple arch match
+    check(manifest::eval_predicate(R"(cfg(arch = "aarch64"))", macos_arm), "pred: aarch64 matches");
+    check(!manifest::eval_predicate(R"(cfg(arch = "aarch64"))", linux_x64), "pred: aarch64 !matches x86_64");
+
+    // AND: os + arch
+    check(manifest::eval_predicate(R"(cfg(os = "linux", arch = "x86_64"))", linux_x64),
+          "pred: AND matches");
+    check(!manifest::eval_predicate(R"(cfg(os = "linux", arch = "aarch64"))", linux_x64),
+          "pred: AND partial mismatch");
+
+    // NOT
+    check(manifest::eval_predicate(R"(cfg(not(os = "windows")))", linux_x64),
+          "pred: not(windows) matches linux");
+    check(!manifest::eval_predicate(R"(cfg(not(os = "windows")))", win_x64),
+          "pred: not(windows) !matches windows");
+
+    // spaces
+    check(manifest::eval_predicate(R"(cfg( os = "macos" ))", macos_arm),
+          "pred: spaces handled");
+}
+
+void test_target_section_resolve() {
+    auto input = R"(
+[package]
+name = "app"
+version = "1.0.0"
+
+[dependencies.find]
+Threads = "Threads::Threads"
+
+[target.'cfg(os = "linux")'.dependencies.find]
+LibUring = "LibUring::LibUring"
+
+[target.'cfg(os = "windows")'.dependencies.find]
+Mswsock = "Mswsock"
+
+[target.'cfg(os = "linux")'.defines]
+IO_BACKEND = "io_uring"
+
+[target.'cfg(os = "macos")'.defines]
+IO_BACKEND = "kqueue"
+)";
+
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    // unresolved: base has 1 find dep, target sections stored
+    check(m.find_deps.size() == 1, "target: base has 1 find dep");
+    check(m.target_sections.size() == 3, "target: 3 target sections parsed");
+
+    // resolve for Linux
+    auto linux_m = manifest::resolve_for_platform(m, {.os = "linux", .arch = "x86_64"});
+    check(linux_m.find_deps.size() == 2, "target: linux gets Threads + LibUring");
+    check(linux_m.find_deps.contains("LibUring"), "target: linux has LibUring");
+    check(!linux_m.find_deps.contains("Mswsock"), "target: linux no Mswsock");
+    check(linux_m.defines.at("IO_BACKEND") == "io_uring", "target: linux define io_uring");
+
+    // resolve for macOS
+    auto macos_m = manifest::resolve_for_platform(m, {.os = "macos", .arch = "aarch64"});
+    check(macos_m.find_deps.size() == 1, "target: macos only Threads");
+    check(macos_m.defines.at("IO_BACKEND") == "kqueue", "target: macos define kqueue");
+
+    // resolve for Windows
+    auto win_m = manifest::resolve_for_platform(m, {.os = "windows", .arch = "x86_64"});
+    check(win_m.find_deps.size() == 2, "target: windows gets Threads + Mswsock");
+    check(win_m.find_deps.contains("Mswsock"), "target: windows has Mswsock");
+    check(win_m.defines.empty(), "target: windows no platform defines");
+}
+
+void test_target_section_vcpkg() {
+    auto input = R"(
+[package]
+name = "app"
+version = "1.0.0"
+
+[dependencies.vcpkg]
+fmt = "11.0.0"
+
+[target.'cfg(os = "linux")'.dependencies.vcpkg]
+liburing = "*"
+
+[target.'cfg(not(os = "windows"))'.dependencies.vcpkg]
+libuv = "*"
+)";
+
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    auto linux_m = manifest::resolve_for_platform(m, {.os = "linux", .arch = "x86_64"});
+    check(linux_m.vcpkg_deps.size() == 3, "target vcpkg: linux gets fmt + liburing + libuv");
+
+    auto win_m = manifest::resolve_for_platform(m, {.os = "windows", .arch = "x86_64"});
+    check(win_m.vcpkg_deps.size() == 1, "target vcpkg: windows only fmt");
+}
+
 void test_no_dev_deps() {
     auto input = R"(
 [package]
@@ -647,6 +752,9 @@ int main() {
     test_platforms_wildcard_match();
     test_platforms_omitted();
     test_platforms_errors();
+    test_eval_predicate();
+    test_target_section_resolve();
+    test_target_section_vcpkg();
     test_defines();
     test_no_dev_deps();
 

@@ -16,6 +16,87 @@ struct GitSubdirDep {
     std::string subdir;   // "refl" (required, non-empty)
 };
 
+// evaluate a cfg() predicate string against a platform
+// supported forms:
+//   cfg(os = "linux")
+//   cfg(os = "linux", arch = "x86_64")   — AND
+//   cfg(not(os = "windows"))
+bool eval_predicate(std::string_view pred, toolchain::Platform const& target) {
+    auto trim = [](std::string_view s) {
+        while (!s.empty() && (s.front() == ' ' || s.front() == '\t'))
+            s.remove_prefix(1);
+        while (!s.empty() && (s.back() == ' ' || s.back() == '\t'))
+            s.remove_suffix(1);
+        return s;
+    };
+    pred = trim(pred);
+
+    if (!pred.starts_with("cfg(") || !pred.ends_with(")"))
+        throw std::runtime_error(std::format("invalid predicate: '{}'", pred));
+    auto inner = trim(pred.substr(4, pred.size() - 5));
+
+    // cfg(not(...))
+    if (inner.starts_with("not(") && inner.ends_with(")")) {
+        auto not_inner = inner.substr(4, inner.size() - 5);
+        auto synthetic = std::format("cfg({})", not_inner);
+        return !eval_predicate(synthetic, target);
+    }
+
+    // split inner by commas that are outside quotes, then check each key="value"
+    auto eval_pair = [&](std::string_view pair) {
+        pair = trim(pair);
+        auto eq = pair.find('=');
+        if (eq == std::string_view::npos)
+            throw std::runtime_error(std::format("invalid predicate: expected '=' in '{}'", pred));
+        auto key = trim(pair.substr(0, eq));
+        auto val_part = trim(pair.substr(eq + 1));
+        if (val_part.size() < 2 || val_part.front() != '"' || val_part.back() != '"')
+            throw std::runtime_error(
+                std::format("invalid predicate: expected quoted value in '{}'", pred));
+        auto value = val_part.substr(1, val_part.size() - 2);
+
+        if (key == "os")
+            return target.os == value;
+        if (key == "arch")
+            return target.arch == value;
+        throw std::runtime_error(
+            std::format("invalid predicate: unknown key '{}' in '{}'", key, pred));
+    };
+
+    // split by commas (outside quotes)
+    std::size_t start = 0;
+    bool in_quotes = false;
+    for (std::size_t i = 0; i <= inner.size(); ++i) {
+        if (i < inner.size() && inner[i] == '"')
+            in_quotes = !in_quotes;
+        if (i == inner.size() || (inner[i] == ',' && !in_quotes)) {
+            if (!eval_pair(inner.substr(start, i - start)))
+                return false;
+            start = i + 1;
+        }
+    }
+    return true;
+}
+
+struct TargetSection {
+    std::string predicate;
+    std::map<std::string, std::string> dependencies;
+    std::map<std::string, std::string> find_deps;
+    std::map<std::string, std::string> path_deps;
+    std::set<std::string> workspace_deps;
+    std::map<std::string, VcpkgDep> vcpkg_deps;
+    std::map<std::string, GitSubdirDep> subdir_deps;
+    std::map<std::string, std::string> dev_dependencies;
+    std::map<std::string, std::string> dev_find_deps;
+    std::map<std::string, std::string> dev_path_deps;
+    std::set<std::string> dev_workspace_deps;
+    std::map<std::string, VcpkgDep> dev_vcpkg_deps;
+    std::map<std::string, GitSubdirDep> dev_subdir_deps;
+    std::map<std::string, std::string> defines;
+    std::map<std::string, std::string> defines_debug;
+    std::map<std::string, std::string> defines_release;
+};
+
 struct Manifest {
     std::string name;
     std::string version;
@@ -37,6 +118,7 @@ struct Manifest {
     std::map<std::string, GitSubdirDep> subdir_deps;     // [dependencies] inline-table form
     std::map<std::string, GitSubdirDep> dev_subdir_deps; // [dev-dependencies] inline-table form
     std::vector<toolchain::Platform> platforms;          // [package].platforms (empty = all)
+    std::vector<TargetSection> target_sections;          // [target.'cfg(...)'.* ]
     std::map<std::string, std::string> defines;         // [defines]
     std::map<std::string, std::string> defines_debug;   // [defines.debug]
     std::map<std::string, std::string> defines_release;  // [defines.release]
@@ -221,6 +303,87 @@ Manifest from_toml(toml::Table const& table) {
         }
     }
 
+    // parse [target.'predicate'.dependencies/dev-dependencies/defines]
+    if (table.contains("target")) {
+        auto const& targets = table.at("target").as_table();
+        for (auto const& [pred_key, pred_val] : targets) {
+            if (!pred_val.is_table())
+                continue;
+            TargetSection ts;
+            ts.predicate = pred_key;
+            auto const& pred_table = pred_val.as_table();
+
+            if (pred_table.contains("dependencies")) {
+                parse_deps_section(pred_table.at("dependencies").as_table(),
+                                   ts.dependencies, ts.find_deps, ts.path_deps,
+                                   ts.workspace_deps, ts.vcpkg_deps, ts.subdir_deps);
+            }
+            if (pred_table.contains("dev-dependencies")) {
+                parse_deps_section(pred_table.at("dev-dependencies").as_table(),
+                                   ts.dev_dependencies, ts.dev_find_deps, ts.dev_path_deps,
+                                   ts.dev_workspace_deps, ts.dev_vcpkg_deps, ts.dev_subdir_deps);
+            }
+            if (pred_table.contains("defines")) {
+                auto const& defs = pred_table.at("defines").as_table();
+                for (auto const& [key, val] : defs) {
+                    if (val.is_string()) {
+                        ts.defines.emplace(key, val.as_string());
+                    } else if (val.is_table()) {
+                        auto const& sub = val.as_table();
+                        auto& tgt = (key == "debug") ? ts.defines_debug : ts.defines_release;
+                        for (auto const& [k, v] : sub)
+                            tgt.emplace(k, v.as_string());
+                    }
+                }
+            }
+            m.target_sections.push_back(std::move(ts));
+        }
+    }
+
+    return m;
+}
+
+// resolve platform-conditional sections: evaluate predicates and merge matching
+// sections into a copy of the manifest
+Manifest resolve_for_platform(Manifest m, toolchain::Platform const& target) {
+    for (auto const& ts : m.target_sections) {
+        if (!eval_predicate(ts.predicate, target))
+            continue;
+        // merge deps
+        for (auto const& [k, v] : ts.dependencies)
+            m.dependencies.emplace(k, v);
+        for (auto const& [k, v] : ts.find_deps)
+            m.find_deps.emplace(k, v);
+        for (auto const& [k, v] : ts.path_deps)
+            m.path_deps.emplace(k, v);
+        for (auto const& ws : ts.workspace_deps)
+            m.workspace_deps.insert(ws);
+        for (auto const& [k, v] : ts.vcpkg_deps)
+            m.vcpkg_deps.emplace(k, v);
+        for (auto const& [k, v] : ts.subdir_deps)
+            m.subdir_deps.emplace(k, v);
+        // merge dev-deps
+        for (auto const& [k, v] : ts.dev_dependencies)
+            m.dev_dependencies.emplace(k, v);
+        for (auto const& [k, v] : ts.dev_find_deps)
+            m.dev_find_deps.emplace(k, v);
+        for (auto const& [k, v] : ts.dev_path_deps)
+            m.dev_path_deps.emplace(k, v);
+        for (auto const& ws : ts.dev_workspace_deps)
+            m.dev_workspace_deps.insert(ws);
+        for (auto const& [k, v] : ts.dev_vcpkg_deps)
+            m.dev_vcpkg_deps.emplace(k, v);
+        for (auto const& [k, v] : ts.dev_subdir_deps)
+            m.dev_subdir_deps.emplace(k, v);
+        // merge defines
+        for (auto const& [k, v] : ts.defines)
+            m.defines.emplace(k, v);
+        for (auto const& [k, v] : ts.defines_debug)
+            m.defines_debug.emplace(k, v);
+        for (auto const& [k, v] : ts.defines_release)
+            m.defines_release.emplace(k, v);
+    }
+    m.target_sections.clear(); // already resolved
     return m;
 }
 
