@@ -101,7 +101,12 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
         // WASM cross-compilation: toolchain file handles compiler, sysroot, flags.
         // import std; is disabled (stdlib_modules_json cleared) because WASI lacks
         // csetjmp/csignal support that the standard module requires.
+        // User .cppm modules still work via host clang-scan-deps.
         cmd += std::format(" -DCMAKE_TOOLCHAIN_FILE={}", wasm_toolchain);
+        // wasi-sdk lacks clang-scan-deps; use the host LLVM's copy
+        if (!tc.cxx_compiler.empty())
+            cmd += std::format(" -DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS={}",
+                               toolchain::shell_quote(tc.cxx_compiler));
         // WASI: disable exceptions (libc++abi lacks exception support)
         cmd += " \"-DCMAKE_CXX_FLAGS=-fno-exceptions -D_LIBCPP_NO_EXCEPTIONS\"";
         return cmd;
@@ -206,7 +211,7 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         out << "set(CMAKE_CXX_MODULE_STD ON)\n";
         out << std::format("project({} LANGUAGES CXX)\n\n", m.name);
     } else {
-        out << "cmake_minimum_required(VERSION 3.20)\n";
+        out << "cmake_minimum_required(VERSION 3.28)\n";
         out << std::format("project({} LANGUAGES CXX)\n\n", m.name);
         out << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
         out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
@@ -506,7 +511,7 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         out << "set(CMAKE_CXX_MODULE_STD ON)\n";
         out << std::format("project({} LANGUAGES CXX)\n\n", m.name);
     } else {
-        out << "cmake_minimum_required(VERSION 3.20)\n";
+        out << "cmake_minimum_required(VERSION 3.28)\n";
         out << std::format("project({} LANGUAGES CXX)\n\n", m.name);
         out << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
         out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
@@ -833,7 +838,7 @@ int run(manifest::Manifest const& m, bool release = false, std::string_view targ
         // import std; is unsupported on WASM (csetjmp/csignal headers fail),
         // so clear modules json; users must use #include instead
         tc.stdlib_modules_json.clear();
-        tc.cxx_compiler.clear();
+        tc.cxx_compiler = wasm_tc.scan_deps; // repurpose for host clang-scan-deps
         tc.sysroot.clear();
         tc.lib_dir.clear();
         tc.has_clang_config = false;
@@ -899,7 +904,7 @@ int run_check(manifest::Manifest const& m, bool release = false, std::string_vie
         wasm_toolchain_file = wasm_tc.cmake_toolchain;
         if (!wasm_tc.modules_json.empty())
             tc.stdlib_modules_json = wasm_tc.modules_json;
-        tc.cxx_compiler.clear();
+        tc.cxx_compiler = wasm_tc.scan_deps; // repurpose for host clang-scan-deps
         tc.sysroot.clear();
         tc.lib_dir.clear();
         tc.has_clang_config = false;
@@ -984,7 +989,7 @@ int run_test(manifest::Manifest const& m, bool release = false, std::string_view
         wasm_toolchain_file = wasm_tc.cmake_toolchain;
         if (!wasm_tc.modules_json.empty())
             tc.stdlib_modules_json = wasm_tc.modules_json;
-        tc.cxx_compiler.clear();
+        tc.cxx_compiler = wasm_tc.scan_deps; // repurpose for host clang-scan-deps
         tc.sysroot.clear();
         tc.lib_dir.clear();
         tc.has_clang_config = false;
