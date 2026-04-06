@@ -18,13 +18,14 @@ constexpr auto version = EXON_PKG_VERSION;
 constexpr auto usage_text = R"(usage: exon <command> [args]
 
 commands:
-    init [--lib] [name]    create a new exon.toml
-    info                   show package information
-    build [--release]      build the project
-    check [--release]      check syntax without linking
-    run [--release] [args] build and run the project
-    test [--release]       build and run tests
-    clean                  remove build artifacts
+    init [--lib] [name]                create a new exon.toml
+    info                               show package information
+    build [--release] [--target <t>]   build the project
+    check [--release] [--target <t>]   check syntax without linking
+    run [--release] [--target <t>] [args]
+                                       build and run the project
+    test [--release] [--target <t>]    build and run tests
+    clean                              remove build artifacts
     add [--dev] <pkg> <ver>            add a git dependency
     add [--dev] --path <name> <path>   add a local path dependency
     add [--dev] --workspace <name>     add a workspace member dependency
@@ -37,6 +38,9 @@ commands:
     sync                   sync CMakeLists.txt with exon.toml
     fmt                    format source files with clang-format
     version                show exon version
+
+targets:
+    wasm32-wasi            WebAssembly (requires wasi-sdk via intron or WASI_SDK_PATH)
 )";
 
 manifest::Manifest load_manifest() {
@@ -66,17 +70,26 @@ int run_for_workspace(manifest::Manifest const& m,
     return 0;
 }
 
-manifest::Manifest resolve_manifest(manifest::Manifest m) {
-    auto host = toolchain::detect_host_platform();
-    return manifest::resolve_for_platform(std::move(m), host);
+toolchain::Platform effective_platform(std::string_view target) {
+    if (!target.empty()) {
+        auto p = toolchain::platform_from_target(target);
+        if (!p)
+            throw std::runtime_error(std::format("unknown target '{}'", target));
+        return *p;
+    }
+    return toolchain::detect_host_platform();
 }
 
-bool check_platform(manifest::Manifest const& m) {
-    auto host = toolchain::detect_host_platform();
-    if (!manifest::supports_platform(m, host)) {
+manifest::Manifest resolve_manifest(manifest::Manifest m, std::string_view target = {}) {
+    return manifest::resolve_for_platform(std::move(m), effective_platform(target));
+}
+
+bool check_platform(manifest::Manifest const& m, std::string_view target = {}) {
+    auto plat = effective_platform(target);
+    if (!manifest::supports_platform(m, plat)) {
         std::println(std::cerr,
-                     "error: host platform ({}) is not supported by this package",
-                     host.to_string());
+                     "error: platform ({}) is not supported by this package",
+                     plat.to_string());
         std::println(std::cerr, "  supported platforms:");
         for (auto const& p : m.platforms) {
             if (!p.os.empty() && !p.arch.empty())
@@ -89,6 +102,34 @@ bool check_platform(manifest::Manifest const& m) {
         return false;
     }
     return true;
+}
+
+// parse --release and --target flags from argv starting at position 2
+struct BuildArgs {
+    bool release = false;
+    std::string target;
+    int args_start = 2; // index of first non-flag argument
+};
+
+BuildArgs parse_build_args(int argc, char* argv[]) {
+    BuildArgs args;
+    int i = 2;
+    while (i < argc) {
+        auto a = std::string_view{argv[i]};
+        if (a == "--release") {
+            args.release = true;
+            ++i;
+        } else if (a == "--target") {
+            if (i + 1 >= argc)
+                throw std::runtime_error("--target requires a value");
+            args.target = argv[i + 1];
+            i += 2;
+        } else {
+            break;
+        }
+    }
+    args.args_start = i;
+    return args;
 }
 
 std::string read_file(std::string_view path) {
@@ -203,25 +244,25 @@ int cmd_info() {
 
 int cmd_build(int argc, char* argv[]) {
     try {
+        auto args = parse_build_args(argc, argv);
         auto m = load_manifest();
-        if (!check_platform(m))
+        if (!check_platform(m, args.target))
             return 1;
-        m = resolve_manifest(std::move(m));
-        bool release = (argc >= 3 && std::string_view{argv[2]} == "--release");
+        m = resolve_manifest(std::move(m), args.target);
         if (manifest::is_workspace(m)) {
-            return run_for_workspace(m, [release](auto const&) {
+            return run_for_workspace(m, [&args](auto const&) {
                 auto member_m = manifest::load("exon.toml");
-                if (!check_platform(member_m))
+                if (!check_platform(member_m, args.target))
                     return 1;
-                member_m = resolve_manifest(std::move(member_m));
-                return build::run(member_m, release);
+                member_m = resolve_manifest(std::move(member_m), args.target);
+                return build::run(member_m, args.release, args.target);
             });
         }
         if (m.name.empty()) {
             std::println(std::cerr, "error: package name is required in exon.toml");
             return 1;
         }
-        return build::run(m, release);
+        return build::run(m, args.release, args.target);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
@@ -230,25 +271,25 @@ int cmd_build(int argc, char* argv[]) {
 
 int cmd_check(int argc, char* argv[]) {
     try {
+        auto args = parse_build_args(argc, argv);
         auto m = load_manifest();
-        if (!check_platform(m))
+        if (!check_platform(m, args.target))
             return 1;
-        m = resolve_manifest(std::move(m));
-        bool release = (argc >= 3 && std::string_view{argv[2]} == "--release");
+        m = resolve_manifest(std::move(m), args.target);
         if (manifest::is_workspace(m)) {
-            return run_for_workspace(m, [release](auto const&) {
+            return run_for_workspace(m, [&args](auto const&) {
                 auto member_m = manifest::load("exon.toml");
-                if (!check_platform(member_m))
+                if (!check_platform(member_m, args.target))
                     return 1;
-                member_m = resolve_manifest(std::move(member_m));
-                return build::run_check(member_m, release);
+                member_m = resolve_manifest(std::move(member_m), args.target);
+                return build::run_check(member_m, args.release, args.target);
             });
         }
         if (m.name.empty()) {
             std::println(std::cerr, "error: package name is required in exon.toml");
             return 1;
         }
-        return build::run_check(m, release);
+        return build::run_check(m, args.release, args.target);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
@@ -257,10 +298,11 @@ int cmd_check(int argc, char* argv[]) {
 
 int cmd_run(int argc, char* argv[]) {
     try {
+        auto args = parse_build_args(argc, argv);
         auto m = load_manifest();
-        if (!check_platform(m))
+        if (!check_platform(m, args.target))
             return 1;
-        m = resolve_manifest(std::move(m));
+        m = resolve_manifest(std::move(m), args.target);
         if (m.name.empty()) {
             std::println(std::cerr, "error: package name is required in exon.toml");
             return 1;
@@ -269,21 +311,28 @@ int cmd_run(int argc, char* argv[]) {
             std::println(std::cerr, "error: cannot run a library package");
             return 1;
         }
-        bool release = false;
-        int args_start = 2;
-        if (argc >= 3 && std::string_view{argv[2]} == "--release") {
-            release = true;
-            args_start = 3;
-        }
-        int rc = build::run(m, release);
+        bool is_wasm = !args.target.empty();
+        int rc = build::run(m, args.release, args.target);
         if (rc != 0)
             return rc;
 
-        auto profile = release ? "release" : "debug";
-        auto exe = std::filesystem::current_path() / ".exon" / profile /
-                   (m.name + std::string{toolchain::exe_suffix});
-        auto run_cmd = toolchain::shell_quote(exe.string());
-        for (int i = args_start; i < argc; ++i) {
+        auto profile = args.release ? "release" : "debug";
+        std::string run_cmd;
+        if (is_wasm) {
+            auto wasm_runtime = toolchain::detect_wasm_runtime();
+            if (wasm_runtime.empty())
+                throw std::runtime_error(
+                    "wasmtime not found on PATH (install: https://wasmtime.dev)");
+            auto wasm_file = std::filesystem::current_path() / ".exon" / args.target / profile /
+                             m.name;
+            run_cmd = std::format("{} {}", toolchain::shell_quote(wasm_runtime),
+                                  toolchain::shell_quote(wasm_file.string()));
+        } else {
+            auto exe = std::filesystem::current_path() / ".exon" / profile /
+                       (m.name + std::string{toolchain::exe_suffix});
+            run_cmd = toolchain::shell_quote(exe.string());
+        }
+        for (int i = args.args_start; i < argc; ++i) {
             run_cmd += std::format(" {}", argv[i]);
         }
         std::println("running {}...\n", m.name);
@@ -296,25 +345,25 @@ int cmd_run(int argc, char* argv[]) {
 
 int cmd_test(int argc, char* argv[]) {
     try {
+        auto args = parse_build_args(argc, argv);
         auto m = load_manifest();
-        if (!check_platform(m))
+        if (!check_platform(m, args.target))
             return 1;
-        m = resolve_manifest(std::move(m));
-        bool release = (argc >= 3 && std::string_view{argv[2]} == "--release");
+        m = resolve_manifest(std::move(m), args.target);
         if (manifest::is_workspace(m)) {
-            return run_for_workspace(m, [release](auto const&) {
+            return run_for_workspace(m, [&args](auto const&) {
                 auto member_m = manifest::load("exon.toml");
-                if (!check_platform(member_m))
+                if (!check_platform(member_m, args.target))
                     return 1;
-                member_m = resolve_manifest(std::move(member_m));
-                return build::run_test(member_m, release);
+                member_m = resolve_manifest(std::move(member_m), args.target);
+                return build::run_test(member_m, args.release, args.target);
             });
         }
         if (m.name.empty()) {
             std::println(std::cerr, "error: package name is required in exon.toml");
             return 1;
         }
-        return build::run_test(m, release);
+        return build::run_test(m, args.release, args.target);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
