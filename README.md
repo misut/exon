@@ -270,6 +270,33 @@ Known values: `os` = `linux`, `macos`, `windows`; `arch` = `x86_64`, `aarch64`.
 
 If the host platform does not match any entry, `exon build`/`run`/`test`/`check` fail early with a clear error. Omitting `platforms` entirely means the package supports all platforms (backward compatible with existing manifests).
 
+### Platform-conditional dependencies and defines
+
+Use `[target.'cfg(...)']` sections to declare dependencies or defines that only apply on certain platforms. The predicate syntax supports `os`, `arch`, comma-separated AND, and `not()`.
+
+```toml
+# Linux-only: link io_uring
+[target.'cfg(os = "linux")'.dependencies.find]
+LibUring = "LibUring::LibUring"
+
+# Windows-only: vcpkg package
+[target.'cfg(os = "windows")'.dependencies.vcpkg]
+wil = "*"
+
+# All except Windows
+[target.'cfg(not(os = "windows"))'.dependencies.vcpkg]
+libuv = "*"
+
+# Platform-specific defines
+[target.'cfg(os = "linux")'.defines]
+IO_BACKEND = "io_uring"
+
+[target.'cfg(os = "macos")'.defines]
+IO_BACKEND = "kqueue"
+```
+
+All dependency subsections (`find`, `vcpkg`, `path`, `workspace`, inline-table git) and `defines` / `defines.debug` / `defines.release` are supported inside `[target.'cfg(...)']`. Non-matching sections are skipped entirely — their dependencies are not fetched.
+
 ## Features
 
 - **C++23 `import std;`** — automatically detected when `standard >= 23` and clang with libc++ modules is available
