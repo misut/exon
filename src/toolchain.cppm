@@ -288,6 +288,82 @@ void detect_clang(Toolchain& tc) {
 
 } // namespace detail
 
+struct WasmToolchain {
+    std::string triple;          // e.g. "wasm32-wasi"
+    std::string sdk_path;        // wasi-sdk root directory
+    std::string cmake_toolchain; // absolute path to wasi-sdk.cmake
+    std::string modules_json;    // absolute path to libc++.modules.json
+    std::string scan_deps;       // host clang-scan-deps (wasi-sdk lacks it)
+};
+
+WasmToolchain detect_wasm(std::string_view triple) {
+    if (triple != "wasm32-wasi")
+        throw std::runtime_error(
+            std::format("unsupported WASM target '{}' (supported: wasm32-wasi)", triple));
+
+    // find wasi-sdk: intron → WASI_SDK_PATH env
+    auto sdk = detail::find_intron_latest("wasi-sdk");
+    if (sdk.empty()) {
+        if (auto const* env = std::getenv("WASI_SDK_PATH"); env && *env)
+            sdk = env;
+    }
+    if (sdk.empty())
+        throw std::runtime_error(
+            "wasi-sdk not found (install: intron install wasi-sdk <version>, "
+            "or set WASI_SDK_PATH)");
+
+    auto sdk_path = std::filesystem::path{sdk};
+
+    // use wasip1 toolchain (wasm32-wasi is deprecated in clang 22+)
+    auto toolchain_file = sdk_path / "share" / "cmake" / "wasi-sdk-p1.cmake";
+    if (!std::filesystem::exists(toolchain_file)) {
+        // fallback to legacy wasi-sdk.cmake
+        toolchain_file = sdk_path / "share" / "cmake" / "wasi-sdk.cmake";
+    }
+    if (!std::filesystem::exists(toolchain_file))
+        throw std::runtime_error(
+            std::format("wasi-sdk toolchain file not found: {}", toolchain_file.string()));
+
+    auto modules_json = sdk_path / "share" / "wasi-sysroot" / "lib" / "wasm32-wasip1" /
+                         "libc++.modules.json";
+
+    // wasi-sdk lacks clang-scan-deps; use the host LLVM's copy for module scanning
+    std::string scan_deps;
+    auto intron_llvm = detail::find_intron_latest("llvm");
+    if (!intron_llvm.empty()) {
+        auto p = std::filesystem::path{intron_llvm} / "bin" / "clang-scan-deps";
+        if (detail::exists_bin(p))
+            scan_deps = detail::canonical_bin(p).string();
+    }
+    if (scan_deps.empty()) {
+        auto p = detail::find_in_path("clang-scan-deps");
+        if (p != "clang-scan-deps")
+            scan_deps = p;
+    }
+
+    WasmToolchain wt;
+    wt.triple = triple;
+    wt.sdk_path = sdk_path.string();
+    wt.cmake_toolchain = std::filesystem::canonical(toolchain_file).string();
+    if (std::filesystem::exists(modules_json))
+        wt.modules_json = std::filesystem::canonical(modules_json).string();
+    wt.scan_deps = std::move(scan_deps);
+    return wt;
+}
+
+std::string detect_wasm_runtime() {
+    auto rt = detail::find_in_path("wasmtime");
+    if (rt != "wasmtime")
+        return rt;
+    return {};
+}
+
+std::optional<Platform> platform_from_target(std::string_view triple) {
+    if (triple.starts_with("wasm32-wasi"))
+        return Platform{.os = "wasi", .arch = "wasm32"};
+    return std::nullopt;
+}
+
 Toolchain detect() {
     Toolchain tc;
 

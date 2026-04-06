@@ -175,19 +175,19 @@ Manifest from_toml(toml::Table const& table) {
                 if (t.contains("os")) {
                     p.os = t.at("os").as_string();
                     static constexpr auto known_os =
-                        std::array{"linux", "macos", "windows"};
+                        std::array{"linux", "macos", "windows", "wasi"};
                     if (std::ranges::find(known_os, p.os) == known_os.end())
                         throw std::runtime_error(std::format(
-                            "unknown os '{}' in [package].platforms; known: linux, macos, windows",
+                            "unknown os '{}' in [package].platforms; known: linux, macos, windows, wasi",
                             p.os));
                 }
                 if (t.contains("arch")) {
                     p.arch = t.at("arch").as_string();
                     static constexpr auto known_arch =
-                        std::array{"x86_64", "aarch64"};
+                        std::array{"x86_64", "aarch64", "wasm32"};
                     if (std::ranges::find(known_arch, p.arch) == known_arch.end())
                         throw std::runtime_error(std::format(
-                            "unknown arch '{}' in [package].platforms; known: x86_64, aarch64",
+                            "unknown arch '{}' in [package].platforms; known: x86_64, aarch64, wasm32",
                             p.arch));
                 }
                 if (p.os.empty() && p.arch.empty())
@@ -455,11 +455,15 @@ std::string predicate_to_cmake(std::string_view pred) {
                 return "CMAKE_SYSTEM_NAME STREQUAL \"Darwin\"";
             if (value == "windows")
                 return "WIN32";
+            if (value == "wasi")
+                return "CMAKE_SYSTEM_NAME STREQUAL \"WASI\"";
         } else if (key == "arch") {
             if (value == "x86_64")
                 return "CMAKE_SYSTEM_PROCESSOR MATCHES \"x86_64|AMD64\"";
             if (value == "aarch64")
                 return "CMAKE_SYSTEM_PROCESSOR MATCHES \"aarch64|ARM64\"";
+            if (value == "wasm32")
+                return "CMAKE_SYSTEM_PROCESSOR STREQUAL \"wasm32\"";
         }
         return "";
     };

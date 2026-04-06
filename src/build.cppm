@@ -89,12 +89,29 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
                           std::filesystem::path const& build_dir,
                           std::filesystem::path const& source_dir, bool release,
                           std::string_view vcpkg_toolchain = {},
-                          std::filesystem::path const& vcpkg_manifest_dir = {}) {
+                          std::filesystem::path const& vcpkg_manifest_dir = {},
+                          std::string_view wasm_toolchain = {}) {
     auto build_type = release ? "Release" : "Debug";
     auto cmd = std::format("{} -B {} -S {} -G Ninja -DCMAKE_BUILD_TYPE={}",
                            toolchain::shell_quote(tc.cmake),
                            toolchain::shell_quote(build_dir.string()),
                            toolchain::shell_quote(source_dir.string()), build_type);
+
+    if (!wasm_toolchain.empty()) {
+        // WASM cross-compilation: toolchain file handles compiler, sysroot, flags.
+        // import std; is disabled (stdlib_modules_json cleared) because WASI lacks
+        // csetjmp/csignal support that the standard module requires.
+        // User .cppm modules still work via host clang-scan-deps.
+        cmd += std::format(" -DCMAKE_TOOLCHAIN_FILE={}", wasm_toolchain);
+        // wasi-sdk lacks clang-scan-deps; use the host LLVM's copy
+        if (!tc.cxx_compiler.empty())
+            cmd += std::format(" -DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS={}",
+                               toolchain::shell_quote(tc.cxx_compiler));
+        // WASI: disable exceptions (libc++abi lacks exception support)
+        cmd += " \"-DCMAKE_CXX_FLAGS=-fno-exceptions -D_LIBCPP_NO_EXCEPTIONS\"";
+        return cmd;
+    }
+
     if (!tc.cxx_compiler.empty())
         cmd += std::format(" -DCMAKE_CXX_COMPILER={}", toolchain::shell_quote(tc.cxx_compiler));
     if (!tc.sysroot.empty())
@@ -194,7 +211,7 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         out << "set(CMAKE_CXX_MODULE_STD ON)\n";
         out << std::format("project({} LANGUAGES CXX)\n\n", m.name);
     } else {
-        out << "cmake_minimum_required(VERSION 3.20)\n";
+        out << "cmake_minimum_required(VERSION 3.28)\n";
         out << std::format("project({} LANGUAGES CXX)\n\n", m.name);
         out << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
         out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
@@ -494,7 +511,7 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         out << "set(CMAKE_CXX_MODULE_STD ON)\n";
         out << std::format("project({} LANGUAGES CXX)\n\n", m.name);
     } else {
-        out << "cmake_minimum_required(VERSION 3.20)\n";
+        out << "cmake_minimum_required(VERSION 3.28)\n";
         out << std::format("project({} LANGUAGES CXX)\n\n", m.name);
         out << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
         out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
@@ -792,19 +809,45 @@ bool sync_root_cmake(manifest::Manifest const& m, std::vector<fetch::FetchedDep>
     return true;
 }
 
-int run(manifest::Manifest const& m, bool release = false) {
+int run(manifest::Manifest const& m, bool release = false, std::string_view target = {}) {
     detail::ensure_intron_tools();
+
+    bool is_wasm = !target.empty();
+
+    // reject incompatible dependency types for WASM targets
+    if (is_wasm) {
+        if (!m.vcpkg_deps.empty() || !m.dev_vcpkg_deps.empty())
+            throw std::runtime_error("vcpkg dependencies are not supported for WASM targets");
+        if (!m.find_deps.empty() || !m.dev_find_deps.empty())
+            throw std::runtime_error(
+                "find_package dependencies are not supported for WASM targets; "
+                "use git or path dependencies instead");
+    }
 
     auto project_root = std::filesystem::current_path();
     auto exon_dir = project_root / ".exon";
     auto profile = release ? "release" : "debug";
-    auto build_dir = exon_dir / profile;
+    auto build_dir = is_wasm ? (exon_dir / target / profile) : (exon_dir / profile);
 
     auto tc = toolchain::detect();
 
+    std::string wasm_toolchain_file;
+    if (is_wasm) {
+        auto wasm_tc = toolchain::detect_wasm(target);
+        wasm_toolchain_file = wasm_tc.cmake_toolchain;
+        // import std; is unsupported on WASM (csetjmp/csignal headers fail),
+        // so clear modules json; users must use #include instead
+        tc.stdlib_modules_json.clear();
+        tc.cxx_compiler = wasm_tc.scan_deps; // repurpose for host clang-scan-deps
+        tc.sysroot.clear();
+        tc.lib_dir.clear();
+        tc.has_clang_config = false;
+        tc.needs_stdlib_flag = false;
+    }
+
     auto lock_path = (project_root / "exon.lock").string();
     auto fetch_result = fetch::fetch_all(m, lock_path);
-    auto vcpkg_toolchain = detail::setup_vcpkg(m, exon_dir);
+    auto vcpkg_toolchain = is_wasm ? std::filesystem::path{} : detail::setup_vcpkg(m, exon_dir);
 
     auto content = generate_cmake(m, project_root, fetch_result.deps, tc, false, release);
     bool changed = sync_cmake(content, exon_dir);
@@ -814,7 +857,8 @@ int run(manifest::Manifest const& m, bool release = false) {
     if (changed || !configured) {
         std::println("configuring...");
         int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release,
-                                                    vcpkg_toolchain.string(), exon_dir).c_str());
+                                                    vcpkg_toolchain.string(), exon_dir,
+                                                    wasm_toolchain_file).c_str());
         if (rc != 0)
             return rc;
     }
@@ -826,23 +870,50 @@ int run(manifest::Manifest const& m, bool release = false) {
     if (rc != 0)
         return rc;
 
-    std::println("build succeeded: .exon/{}/{}", profile, m.name);
+    if (is_wasm)
+        std::println("build succeeded: .exon/{}/{}/{}", target, profile, m.name);
+    else
+        std::println("build succeeded: .exon/{}/{}", profile, m.name);
     return 0;
 }
 
-int run_check(manifest::Manifest const& m, bool release = false) {
+int run_check(manifest::Manifest const& m, bool release = false, std::string_view target = {}) {
     detail::ensure_intron_tools();
+
+    bool is_wasm = !target.empty();
+
+    if (is_wasm) {
+        if (!m.vcpkg_deps.empty() || !m.dev_vcpkg_deps.empty())
+            throw std::runtime_error("vcpkg dependencies are not supported for WASM targets");
+        if (!m.find_deps.empty() || !m.dev_find_deps.empty())
+            throw std::runtime_error(
+                "find_package dependencies are not supported for WASM targets; "
+                "use git or path dependencies instead");
+    }
 
     auto project_root = std::filesystem::current_path();
     auto exon_dir = project_root / ".exon";
     auto profile = release ? "release" : "debug";
-    auto build_dir = exon_dir / profile;
+    auto build_dir = is_wasm ? (exon_dir / target / profile) : (exon_dir / profile);
 
     auto tc = toolchain::detect();
 
+    std::string wasm_toolchain_file;
+    if (is_wasm) {
+        auto wasm_tc = toolchain::detect_wasm(target);
+        wasm_toolchain_file = wasm_tc.cmake_toolchain;
+        if (!wasm_tc.modules_json.empty())
+            tc.stdlib_modules_json = wasm_tc.modules_json;
+        tc.cxx_compiler = wasm_tc.scan_deps; // repurpose for host clang-scan-deps
+        tc.sysroot.clear();
+        tc.lib_dir.clear();
+        tc.has_clang_config = false;
+        tc.needs_stdlib_flag = false;
+    }
+
     auto lock_path = (project_root / "exon.lock").string();
     auto fetch_result = fetch::fetch_all(m, lock_path);
-    auto vcpkg_toolchain = detail::setup_vcpkg(m, exon_dir);
+    auto vcpkg_toolchain = is_wasm ? std::filesystem::path{} : detail::setup_vcpkg(m, exon_dir);
 
     auto content = generate_cmake(m, project_root, fetch_result.deps, tc, false, release);
     bool changed = sync_cmake(content, exon_dir);
@@ -852,7 +923,8 @@ int run_check(manifest::Manifest const& m, bool release = false) {
     if (changed || !configured) {
         std::println("configuring...");
         int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release,
-                                                    vcpkg_toolchain.string(), exon_dir).c_str());
+                                                    vcpkg_toolchain.string(), exon_dir,
+                                                    wasm_toolchain_file).c_str());
         if (rc != 0)
             return rc;
     }
@@ -862,11 +934,11 @@ int run_check(manifest::Manifest const& m, bool release = false) {
     // fall back to building the main target.
     auto src_dir = project_root / "src";
     auto src_sf = detail::collect_sources(src_dir);
-    auto target = src_sf.cppm.empty()
+    auto check_target = src_sf.cppm.empty()
         ? std::string{m.name}
         : std::format("{}-modules", m.name);
     auto build_cmd = std::format("{} --build {} --target {}", toolchain::shell_quote(tc.cmake),
-                                 toolchain::shell_quote(build_dir.string()), target);
+                                 toolchain::shell_quote(build_dir.string()), check_target);
     std::println("checking...");
     int rc = std::system(build_cmd.c_str());
     if (rc != 0)
@@ -876,8 +948,19 @@ int run_check(manifest::Manifest const& m, bool release = false) {
     return 0;
 }
 
-int run_test(manifest::Manifest const& m, bool release = false) {
+int run_test(manifest::Manifest const& m, bool release = false, std::string_view target = {}) {
     detail::ensure_intron_tools();
+
+    bool is_wasm = !target.empty();
+
+    if (is_wasm) {
+        if (!m.vcpkg_deps.empty() || !m.dev_vcpkg_deps.empty())
+            throw std::runtime_error("vcpkg dependencies are not supported for WASM targets");
+        if (!m.find_deps.empty() || !m.dev_find_deps.empty())
+            throw std::runtime_error(
+                "find_package dependencies are not supported for WASM targets; "
+                "use git or path dependencies instead");
+    }
 
     auto project_root = std::filesystem::current_path();
     auto tests_dir = project_root / "tests";
@@ -895,13 +978,32 @@ int run_test(manifest::Manifest const& m, bool release = false) {
 
     auto exon_dir = project_root / ".exon";
     auto profile = release ? "release" : "debug";
-    auto build_dir = exon_dir / profile;
+    auto build_dir = is_wasm ? (exon_dir / target / profile) : (exon_dir / profile);
 
     auto tc = toolchain::detect();
 
+    std::string wasm_toolchain_file;
+    std::string wasm_runtime;
+    if (is_wasm) {
+        auto wasm_tc = toolchain::detect_wasm(target);
+        wasm_toolchain_file = wasm_tc.cmake_toolchain;
+        if (!wasm_tc.modules_json.empty())
+            tc.stdlib_modules_json = wasm_tc.modules_json;
+        tc.cxx_compiler = wasm_tc.scan_deps; // repurpose for host clang-scan-deps
+        tc.sysroot.clear();
+        tc.lib_dir.clear();
+        tc.has_clang_config = false;
+        tc.needs_stdlib_flag = false;
+
+        wasm_runtime = toolchain::detect_wasm_runtime();
+        if (wasm_runtime.empty())
+            throw std::runtime_error(
+                "wasmtime not found on PATH (install: https://wasmtime.dev)");
+    }
+
     auto lock_path = (project_root / "exon.lock").string();
     auto fetch_result = fetch::fetch_all(m, lock_path, true);
-    auto vcpkg_toolchain = detail::setup_vcpkg(m, exon_dir);
+    auto vcpkg_toolchain = is_wasm ? std::filesystem::path{} : detail::setup_vcpkg(m, exon_dir);
 
     auto content = generate_cmake(m, project_root, fetch_result.deps, tc, true, release);
     bool changed = sync_cmake(content, exon_dir);
@@ -911,7 +1013,8 @@ int run_test(manifest::Manifest const& m, bool release = false) {
     if (changed || !configured) {
         std::println("configuring...");
         int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release,
-                                                    vcpkg_toolchain.string(), exon_dir).c_str());
+                                                    vcpkg_toolchain.string(), exon_dir,
+                                                    wasm_toolchain_file).c_str());
         if (rc != 0)
             return rc;
     }
@@ -935,11 +1038,18 @@ int run_test(manifest::Manifest const& m, bool release = false) {
 
     // run
     std::println("running tests...\n");
+    auto exe_suffix = std::string{is_wasm ? "" : toolchain::exe_suffix};
     int passed = 0;
     int failed = 0;
     for (auto const& name : test_names) {
-        auto exe = build_dir / (name + std::string{toolchain::exe_suffix});
-        int rc = std::system(toolchain::shell_quote(exe.string()).c_str());
+        auto exe = build_dir / (name + exe_suffix);
+        std::string run_cmd;
+        if (is_wasm)
+            run_cmd = std::format("{} {}", toolchain::shell_quote(wasm_runtime),
+                                  toolchain::shell_quote(exe.string()));
+        else
+            run_cmd = toolchain::shell_quote(exe.string());
+        int rc = std::system(run_cmd.c_str());
         if (rc == 0) {
             std::println("  {} ... ok", name);
             ++passed;
