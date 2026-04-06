@@ -1,6 +1,10 @@
 export module toolchain;
 import std;
 
+#if defined(_WIN32)
+extern "C" int __cdecl _putenv_s(char const*, char const*);
+#endif
+
 export namespace toolchain {
 
 // platform-specific executable suffix (".exe" on Windows, empty otherwise)
@@ -197,19 +201,76 @@ std::filesystem::path canonical_bin(std::filesystem::path const& p) {
     return p;
 }
 
-// detect MSVC cl.exe (Windows). Requires a Visual Studio developer environment
-// (vcvars64.bat) so that cl.exe is on PATH and INCLUDE/LIB env vars are set.
+// detect MSVC cl.exe (Windows). If the developer environment is already
+// loaded (vcvars64.bat), use it directly.  Otherwise, locate Visual Studio
+// via vswhere.exe, run vcvars64.bat, capture the resulting environment
+// variables, and apply them to the current process so that CMake and Ninja
+// can find cl.exe, INCLUDE, LIB, etc.
 void detect_msvc(Toolchain& tc) {
 #if defined(_WIN32)
+    // fast path: developer environment already loaded
     auto cl = find_in_path("cl.exe");
-    if (cl == "cl.exe")
-        return; // not found
-    auto include = std::getenv("INCLUDE");
-    if (!include || !*include)
-        return; // no developer env loaded
+    if (cl != "cl.exe") {
+        auto include = std::getenv("INCLUDE");
+        if (include && *include) {
+            tc.is_msvc = true;
+            tc.native_import_std = true;
+            return;
+        }
+    }
+
+    // locate Visual Studio via vswhere.exe
+    auto vswhere = std::filesystem::path{
+        "C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"};
+    if (!std::filesystem::exists(vswhere))
+        return;
+
+    auto tmp_vs = std::filesystem::temp_directory_path() / "exon_vswhere.txt";
+    auto vs_cmd = std::format("cmd /c \"\"{}\" -latest -property installationPath > \"{}\"\"",
+                              vswhere.string(), tmp_vs.string());
+    std::system(vs_cmd.c_str());
+
+    auto vs_file = std::ifstream{tmp_vs};
+    std::string vs_path;
+    std::getline(vs_file, vs_path);
+    vs_file.close();
+    std::filesystem::remove(tmp_vs);
+
+    while (!vs_path.empty() && (vs_path.back() == '\r' || vs_path.back() == '\n'))
+        vs_path.pop_back();
+    if (vs_path.empty())
+        return;
+
+    auto vcvars = std::filesystem::path{vs_path} / "VC" / "Auxiliary" / "Build" / "vcvars64.bat";
+    if (!std::filesystem::exists(vcvars))
+        return;
+
+    // run vcvars64.bat and capture resulting environment
+    auto tmp_env = std::filesystem::temp_directory_path() / "exon_msvc_env.txt";
+    auto env_cmd = std::format("cmd /c \"\"{}\" && set > \"{}\"\"",
+                               vcvars.string(), tmp_env.string());
+    if (std::system(env_cmd.c_str()) != 0) {
+        std::filesystem::remove(tmp_env);
+        return;
+    }
+
+    auto env_file = std::ifstream{tmp_env};
+    std::string line;
+    while (std::getline(env_file, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+            line.pop_back();
+        auto eq = line.find('=');
+        if (eq == std::string::npos || eq == 0)
+            continue;
+        auto key = line.substr(0, eq);
+        auto value = line.substr(eq + 1);
+        _putenv_s(key.c_str(), value.c_str());
+    }
+    env_file.close();
+    std::filesystem::remove(tmp_env);
+
     tc.is_msvc = true;
     tc.native_import_std = true;
-    // leave cxx_compiler empty: CMake auto-detects MSVC from the environment.
 #else
     (void)tc;
 #endif
