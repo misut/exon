@@ -22,9 +22,8 @@ curl -fsSL https://raw.githubusercontent.com/misut/exon/main/install.sh | sh
 ### mise
 
 ```sh
-mise plugin add exon https://github.com/misut/mise-exon.git
-mise install exon@0.15.0
-mise use exon@0.15.0
+mise install "vfox:misut/mise-exon@latest"
+mise use "vfox:misut/mise-exon@latest"
 ```
 
 <details>
