@@ -29,6 +29,48 @@ std::filesystem::path home_dir() {
     return {};
 }
 
+struct Platform {
+    std::string os;   // "linux", "macos", "windows"
+    std::string arch; // "x86_64", "aarch64"
+
+    // match: empty field = wildcard (matches any value)
+    bool matches(Platform const& target) const {
+        if (!os.empty() && !target.os.empty() && os != target.os)
+            return false;
+        if (!arch.empty() && !target.arch.empty() && arch != target.arch)
+            return false;
+        return true;
+    }
+
+    std::string to_string() const {
+        if (!os.empty() && !arch.empty())
+            return std::format("{}-{}", os, arch);
+        if (!os.empty())
+            return os;
+        if (!arch.empty())
+            return arch;
+        return "any";
+    }
+};
+
+Platform detect_host_platform() {
+    Platform p;
+#if defined(__APPLE__)
+    p.os = "macos";
+#elif defined(__linux__)
+    p.os = "linux";
+#elif defined(_WIN32)
+    p.os = "windows";
+#endif
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+    p.arch = "aarch64";
+#elif defined(__x86_64__) || defined(_M_X64)
+    p.arch = "x86_64";
+#endif
+    return p;
+}
+
 struct Toolchain {
     std::string cmake;
     std::string ninja;

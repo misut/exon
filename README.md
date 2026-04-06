@@ -94,6 +94,11 @@ authors = ["misut"]
 license = "MIT"
 type = "bin"                              # "bin" or "lib"
 standard = 23
+platforms = [                             # supported platforms (optional)
+    { os = "linux" },
+    { os = "macos", arch = "aarch64" },
+    { os = "windows", arch = "x86_64" },
+]
 
 [dependencies]
 "github.com/user/repo" = "0.1.0"          # git
@@ -246,6 +251,25 @@ exon add --dev --vcpkg gtest '*'
 
 Install (`[dependencies.vcpkg]`) and link (`[dependencies.find]`) are separate because vcpkg package names and CMake `find_package` names often differ (vcpkg `zlib` ↔ `find_package(ZLIB)`). Use inline table form (`{ version = "...", features = [...] }`) to enable optional vcpkg features. Exon requires `VCPKG_ROOT` or a standard install path (e.g. `/opt/vcpkg`, `~/vcpkg`, GitHub Actions `VCPKG_INSTALLATION_ROOT`); if vcpkg cannot be located, the build fails with a clear error.
 
+## Platform targeting
+
+Declare which platforms your package supports with `platforms` in `[package]`. Each entry is an inline table with `os` and/or `arch` fields; omitting a field acts as a wildcard.
+
+```toml
+[package]
+name = "mylib"
+version = "1.0.0"
+platforms = [
+    { os = "linux" },                        # all Linux architectures
+    { os = "macos", arch = "aarch64" },       # macOS ARM64 only
+    { os = "windows", arch = "x86_64" },      # Windows x64 only
+]
+```
+
+Known values: `os` = `linux`, `macos`, `windows`; `arch` = `x86_64`, `aarch64`.
+
+If the host platform does not match any entry, `exon build`/`run`/`test`/`check` fail early with a clear error. Omitting `platforms` entirely means the package supports all platforms (backward compatible with existing manifests).
+
 ## Features
 
 - **C++23 `import std;`** — automatically detected when `standard >= 23` and clang with libc++ modules is available
@@ -262,6 +286,7 @@ Install (`[dependencies.vcpkg]`) and link (`[dependencies.find]`) are separate b
 - **Syntax check** — `exon check` compiles modules without linking for fast feedback
 - **Self-hosting** — exon builds itself with `exon build`
 - **Cross-platform** — macOS (ARM64), Linux (x86_64, aarch64), and Windows (x86_64, MSVC)
+- **Platform targeting** — `platforms = [{ os = "linux" }, ...]` declares supported platforms; build fails early on unsupported hosts
 
 ## License
 

@@ -489,6 +489,117 @@ refl = { git = "github.com/misut/txn", version = "0.1.0", subdir = "" }
 )"), "subdir: empty subdir throws");
 }
 
+void test_platforms_specific() {
+    auto input = R"(
+[package]
+name = "app"
+version = "1.0.0"
+platforms = [
+    { os = "linux", arch = "x86_64" },
+    { os = "macos", arch = "aarch64" },
+    { os = "windows" },
+]
+)";
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    check(m.platforms.size() == 3, "platforms: 3 entries");
+    check(m.platforms[0].os == "linux", "platforms[0]: linux");
+    check(m.platforms[0].arch == "x86_64", "platforms[0]: x86_64");
+    check(m.platforms[1].os == "macos", "platforms[1]: macos");
+    check(m.platforms[1].arch == "aarch64", "platforms[1]: aarch64");
+    check(m.platforms[2].os == "windows", "platforms[2]: windows");
+    check(m.platforms[2].arch.empty(), "platforms[2]: arch wildcard");
+}
+
+void test_platforms_wildcard_match() {
+    auto input = R"(
+[package]
+name = "lib"
+version = "0.1.0"
+platforms = [
+    { os = "linux" },
+    { arch = "aarch64" },
+]
+)";
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    // { os = "linux" } matches any Linux
+    check(manifest::supports_platform(m, {.os = "linux", .arch = "x86_64"}),
+          "wildcard: linux-x86_64 matches { os = linux }");
+    check(manifest::supports_platform(m, {.os = "linux", .arch = "aarch64"}),
+          "wildcard: linux-aarch64 matches { os = linux }");
+    // { arch = "aarch64" } matches any aarch64
+    check(manifest::supports_platform(m, {.os = "macos", .arch = "aarch64"}),
+          "wildcard: macos-aarch64 matches { arch = aarch64 }");
+    check(manifest::supports_platform(m, {.os = "windows", .arch = "aarch64"}),
+          "wildcard: windows-aarch64 matches { arch = aarch64 }");
+    // windows-x86_64 doesn't match either entry
+    check(!manifest::supports_platform(m, {.os = "windows", .arch = "x86_64"}),
+          "wildcard: windows-x86_64 doesn't match");
+}
+
+void test_platforms_omitted() {
+    auto input = R"(
+[package]
+name = "lib"
+version = "0.1.0"
+)";
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    check(m.platforms.empty(), "omitted: no platforms");
+    check(manifest::supports_platform(m, {.os = "linux", .arch = "x86_64"}),
+          "omitted: supports anything");
+    check(manifest::supports_platform(m, {.os = "windows", .arch = "aarch64"}),
+          "omitted: supports anything 2");
+}
+
+void test_platforms_errors() {
+    auto parse_throws = [](char const* input) {
+        try {
+            auto table = toml::parse(input);
+            (void)manifest::from_toml(table);
+            return false;
+        } catch (std::runtime_error const&) {
+            return true;
+        }
+    };
+
+    // empty array
+    check(parse_throws(R"(
+[package]
+name = "x"
+version = "0.1.0"
+platforms = []
+)"), "platforms error: empty array throws");
+
+    // unknown os
+    check(parse_throws(R"(
+[package]
+name = "x"
+version = "0.1.0"
+platforms = [{ os = "freebsd" }]
+)"), "platforms error: unknown os throws");
+
+    // unknown arch
+    check(parse_throws(R"(
+[package]
+name = "x"
+version = "0.1.0"
+platforms = [{ arch = "riscv64" }]
+)"), "platforms error: unknown arch throws");
+
+    // entry with neither os nor arch
+    check(parse_throws(R"(
+[package]
+name = "x"
+version = "0.1.0"
+platforms = [{}]
+)"), "platforms error: empty entry throws");
+}
+
 void test_no_dev_deps() {
     auto input = R"(
 [package]
@@ -532,6 +643,10 @@ int main() {
     test_vcpkg_deps_with_features();
     test_subdir_deps();
     test_subdir_deps_missing_fields();
+    test_platforms_specific();
+    test_platforms_wildcard_match();
+    test_platforms_omitted();
+    test_platforms_errors();
     test_defines();
     test_no_dev_deps();
 
