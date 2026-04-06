@@ -703,6 +703,45 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         }
     }
 
+    // platform-conditional sections (target.'cfg(...)' blocks)
+    auto link_target = has_modules ? modules_lib : std::string{m.name};
+    for (auto const& ts : m.target_sections) {
+        auto cmake_cond = manifest::predicate_to_cmake(ts.predicate);
+        if (cmake_cond.empty())
+            continue;
+        bool has_content = !ts.find_deps.empty() || !ts.dev_find_deps.empty() ||
+                           !ts.defines.empty() || !ts.defines_debug.empty() ||
+                           !ts.defines_release.empty();
+        if (!has_content)
+            continue;
+
+        out << std::format("\nif({})\n", cmake_cond);
+        for (auto const& [pkg, _] : ts.find_deps)
+            out << std::format("    find_package({} REQUIRED)\n", pkg);
+        for (auto const& [pkg, _] : ts.dev_find_deps)
+            out << std::format("    find_package({} REQUIRED)\n", pkg);
+
+        // collect conditional link targets
+        std::vector<std::string> cond_find;
+        for (auto const& [_, tgts] : ts.find_deps)
+            for (auto& t : split_targets(tgts))
+                cond_find.push_back(std::move(t));
+        if (!cond_find.empty()) {
+            out << std::format("    target_link_libraries({} PUBLIC", link_target);
+            for (auto const& t : cond_find)
+                out << std::format("\n        {}", t);
+            out << "\n    )\n";
+        }
+
+        if (!ts.defines.empty()) {
+            out << std::format("    target_compile_definitions({} PUBLIC", link_target);
+            for (auto const& [key, val] : ts.defines)
+                out << std::format("\n        {}=\"{}\"", key, val);
+            out << "\n    )\n";
+        }
+        out << "endif()\n";
+    }
+
     // test targets
     auto tests_dir = root / "tests";
     if (std::filesystem::exists(tests_dir)) {

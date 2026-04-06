@@ -746,20 +746,22 @@ int cmd_update() {
 
 int cmd_sync() {
     try {
-        auto m = load_manifest();
-        m = resolve_manifest(std::move(m));
-        if (manifest::is_workspace(m)) {
-            return run_for_workspace(m, [](auto const&) {
-                auto member_m = resolve_manifest(manifest::load("exon.toml"));
+        auto raw_m = load_manifest();
+        // for sync: merge ALL target sections for fetching, but keep raw for CMake generation
+        auto fetch_m = manifest::resolve_all_targets(raw_m);
+        if (manifest::is_workspace(raw_m)) {
+            return run_for_workspace(raw_m, [](auto const&) {
+                auto raw_member = manifest::load("exon.toml");
+                auto fetch_member = manifest::resolve_all_targets(raw_member);
                 auto lock_path = (std::filesystem::current_path() / "exon.lock").string();
-                auto fetch_result = fetch::fetch_all(member_m, lock_path);
-                build::sync_root_cmake(member_m, fetch_result.deps);
+                auto fetch_result = fetch::fetch_all(fetch_member, lock_path);
+                build::sync_root_cmake(raw_member, fetch_result.deps);
                 return 0;
             });
         }
         auto lock_path = (std::filesystem::current_path() / "exon.lock").string();
-        auto fetch_result = fetch::fetch_all(m, lock_path);
-        build::sync_root_cmake(m, fetch_result.deps);
+        auto fetch_result = fetch::fetch_all(fetch_m, lock_path);
+        build::sync_root_cmake(raw_m, fetch_result.deps);
         return 0;
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
