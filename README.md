@@ -68,10 +68,10 @@ hello, world!
 |---------|-------------|
 | `exon init [--lib] [name]` | Create a new project (in `name/` if given, else in current dir) |
 | `exon info` | Show package information |
-| `exon build [--release]` | Build the project |
-| `exon check [--release]` | Check syntax without linking |
-| `exon run [--release]` | Build and run |
-| `exon test [--release]` | Build and run tests |
+| `exon build [--release] [--target <t>]` | Build the project |
+| `exon check [--release] [--target <t>]` | Check syntax without linking |
+| `exon run [--release] [--target <t>]` | Build and run |
+| `exon test [--release] [--target <t>]` | Build and run tests |
 | `exon clean` | Remove build artifacts |
 | `exon add [--dev] <pkg> <ver>` | Add a git dependency |
 | `exon add [--dev] --path <name> <path>` | Add a local path dependency |
@@ -297,6 +297,40 @@ IO_BACKEND = "kqueue"
 
 All dependency subsections (`find`, `vcpkg`, `path`, `workspace`, inline-table git) and `defines` / `defines.debug` / `defines.release` are supported inside `[target.'cfg(...)']`. Non-matching sections are skipped entirely — their dependencies are not fetched.
 
+## WebAssembly (WASM)
+
+Build for WebAssembly using `--target wasm32-wasi`. Requires [wasi-sdk](https://github.com/WebAssembly/wasi-sdk) via intron or `WASI_SDK_PATH`.
+
+```sh
+# install wasi-sdk
+intron install wasi-sdk 32
+intron default wasi-sdk 32
+
+# build
+exon build --target wasm32-wasi
+
+# run (requires wasmtime on PATH)
+exon run --target wasm32-wasi
+```
+
+Output is placed in `.exon/wasm32-wasi/{debug,release}/`.
+
+**Limitations:**
+
+- `import std;` is not available (`#include` individual headers instead). User-defined `.cppm` modules work normally.
+- C++ exceptions are disabled (`-fno-exceptions`).
+- `vcpkg` and `find_package` dependencies are not supported for WASM targets.
+
+```cpp
+// WASM-compatible source (use #include, not import std)
+#include <print>
+
+int main() {
+    std::println("hello, wasm!");
+    return 0;
+}
+```
+
 ## Features
 
 - **C++23 `import std;`** — automatically detected when `standard >= 23` and clang with libc++ modules is available
@@ -313,6 +347,7 @@ All dependency subsections (`find`, `vcpkg`, `path`, `workspace`, inline-table g
 - **Syntax check** — `exon check` compiles modules without linking for fast feedback
 - **Self-hosting** — exon builds itself with `exon build`
 - **Cross-platform** — macOS (ARM64), Linux (x86_64, aarch64), and Windows (x86_64, MSVC)
+- **WebAssembly** — `--target wasm32-wasi` cross-compiles to WASM via wasi-sdk
 - **Platform targeting** — `platforms = [{ os = "linux" }, ...]` declares supported platforms; build fails early on unsupported hosts
 
 ## License
