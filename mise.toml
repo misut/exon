@@ -1,10 +1,6 @@
-[plugins]
-exon = "https://github.com/misut/mise-exon.git"
-intron = "https://github.com/misut/mise-intron.git"
-
 [tools]
 clang = "latest"
 cmake = "latest"
-exon = "0.16.0"
-intron = "0.13.2"
+"vfox:misut/mise-exon" = "0.16.0"
+"vfox:misut/mise-intron" = "0.13.2"
 ninja = "latest"
