@@ -438,12 +438,20 @@ Toolchain detect() {
     if (tc.cmake.empty())
         tc.cmake = detail::find_in_path("cmake");
 
-    // ninja: intron → PATH
+    // ninja: intron → PATH (verify the binary actually runs to catch arch mismatches)
     auto intron_ninja = detail::find_intron_latest("ninja");
     if (!intron_ninja.empty()) {
         auto bin = std::filesystem::path{intron_ninja} / "ninja";
-        if (detail::exists_bin(bin))
-            tc.ninja = detail::canonical_bin(bin).string();
+        if (detail::exists_bin(bin)) {
+            auto candidate = detail::canonical_bin(bin).string();
+            auto verify = std::format("{} --version", shell_quote(candidate));
+#if defined(_WIN32)
+            if (std::system((verify + " > NUL 2>&1").c_str()) == 0)
+#else
+            if (std::system((verify + " > /dev/null 2>&1").c_str()) == 0)
+#endif
+                tc.ninja = std::move(candidate);
+        }
     }
     if (tc.ninja.empty())
         tc.ninja = detail::find_in_path("ninja");

@@ -96,6 +96,8 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
                            toolchain::shell_quote(tc.cmake),
                            toolchain::shell_quote(build_dir.string()),
                            toolchain::shell_quote(source_dir.string()), build_type);
+    if (!tc.ninja.empty())
+        cmd += std::format(" -DCMAKE_MAKE_PROGRAM={}", toolchain::shell_quote(tc.ninja));
 
     if (!wasm_toolchain.empty()) {
         // WASM cross-compilation: toolchain file handles compiler, sysroot, flags.
