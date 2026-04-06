@@ -94,6 +94,11 @@ authors = ["misut"]
 license = "MIT"
 type = "bin"                              # "bin" or "lib"
 standard = 23
+platforms = [                             # supported platforms (optional)
+    { os = "linux" },
+    { os = "macos", arch = "aarch64" },
+    { os = "windows", arch = "x86_64" },
+]
 
 [dependencies]
 "github.com/user/repo" = "0.1.0"          # git
@@ -262,6 +267,7 @@ Install (`[dependencies.vcpkg]`) and link (`[dependencies.find]`) are separate b
 - **Syntax check** — `exon check` compiles modules without linking for fast feedback
 - **Self-hosting** — exon builds itself with `exon build`
 - **Cross-platform** — macOS (ARM64), Linux (x86_64, aarch64), and Windows (x86_64, MSVC)
+- **Platform targeting** — `platforms = [{ os = "linux" }, ...]` declares supported platforms; build fails early on unsupported hosts
 
 ## License
 

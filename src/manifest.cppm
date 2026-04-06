@@ -36,6 +36,7 @@ struct Manifest {
     std::map<std::string, VcpkgDep> dev_vcpkg_deps;      // [dev-dependencies.vcpkg]
     std::map<std::string, GitSubdirDep> subdir_deps;     // [dependencies] inline-table form
     std::map<std::string, GitSubdirDep> dev_subdir_deps; // [dev-dependencies] inline-table form
+    std::vector<toolchain::Platform> platforms;          // [package].platforms (empty = all)
     std::map<std::string, std::string> defines;         // [defines]
     std::map<std::string, std::string> defines_debug;   // [defines.debug]
     std::map<std::string, std::string> defines_release;  // [defines.release]
@@ -43,6 +44,17 @@ struct Manifest {
 };
 
 bool is_workspace(Manifest const& m) { return !m.workspace_members.empty(); }
+
+// check if the given target platform is allowed by the manifest's platforms list
+bool supports_platform(Manifest const& m, toolchain::Platform const& target) {
+    if (m.platforms.empty())
+        return true; // no platforms field → supports all
+    for (auto const& p : m.platforms) {
+        if (p.matches(target))
+            return true;
+    }
+    return false;
+}
 
 Manifest from_toml(toml::Table const& table) {
     Manifest m;
@@ -65,6 +77,41 @@ Manifest from_toml(toml::Table const& table) {
         if (pkg.contains("authors")) {
             for (auto const& a : pkg.at("authors").as_array()) {
                 m.authors.push_back(a.as_string());
+            }
+        }
+        if (pkg.contains("platforms")) {
+            auto const& arr = pkg.at("platforms").as_array();
+            if (arr.empty())
+                throw std::runtime_error(
+                    "[package].platforms cannot be empty; remove the field to support all platforms");
+            for (auto const& entry : arr) {
+                if (!entry.is_table())
+                    throw std::runtime_error(
+                        "[package].platforms entries must be inline tables like { os = \"linux\" }");
+                toolchain::Platform p;
+                auto const& t = entry.as_table();
+                if (t.contains("os")) {
+                    p.os = t.at("os").as_string();
+                    static constexpr auto known_os =
+                        std::array{"linux", "macos", "windows"};
+                    if (std::ranges::find(known_os, p.os) == known_os.end())
+                        throw std::runtime_error(std::format(
+                            "unknown os '{}' in [package].platforms; known: linux, macos, windows",
+                            p.os));
+                }
+                if (t.contains("arch")) {
+                    p.arch = t.at("arch").as_string();
+                    static constexpr auto known_arch =
+                        std::array{"x86_64", "aarch64"};
+                    if (std::ranges::find(known_arch, p.arch) == known_arch.end())
+                        throw std::runtime_error(std::format(
+                            "unknown arch '{}' in [package].platforms; known: x86_64, aarch64",
+                            p.arch));
+                }
+                if (p.os.empty() && p.arch.empty())
+                    throw std::runtime_error(
+                        "[package].platforms entry must have at least 'os' or 'arch'");
+                m.platforms.push_back(std::move(p));
             }
         }
     }

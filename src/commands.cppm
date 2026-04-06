@@ -66,6 +66,26 @@ int run_for_workspace(manifest::Manifest const& m,
     return 0;
 }
 
+bool check_platform(manifest::Manifest const& m) {
+    auto host = toolchain::detect_host_platform();
+    if (!manifest::supports_platform(m, host)) {
+        std::println(std::cerr,
+                     "error: host platform ({}) is not supported by this package",
+                     host.to_string());
+        std::println(std::cerr, "  supported platforms:");
+        for (auto const& p : m.platforms) {
+            if (!p.os.empty() && !p.arch.empty())
+                std::println(std::cerr, "    {{ os = \"{}\", arch = \"{}\" }}", p.os, p.arch);
+            else if (!p.os.empty())
+                std::println(std::cerr, "    {{ os = \"{}\" }}", p.os);
+            else
+                std::println(std::cerr, "    {{ arch = \"{}\" }}", p.arch);
+        }
+        return false;
+    }
+    return true;
+}
+
 std::string read_file(std::string_view path) {
     auto file = std::ifstream(std::string{path});
     return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
@@ -150,6 +170,19 @@ int cmd_info() {
             std::println("license: {}", m.license);
         std::println("type: {}", m.type);
         std::println("standard: C++{}", m.standard);
+        auto host = toolchain::detect_host_platform();
+        std::println("host: {}", host.to_string());
+        if (!m.platforms.empty()) {
+            std::println("platforms:");
+            for (auto const& p : m.platforms) {
+                if (!p.os.empty() && !p.arch.empty())
+                    std::println("  {{ os = \"{}\", arch = \"{}\" }}", p.os, p.arch);
+                else if (!p.os.empty())
+                    std::println("  {{ os = \"{}\" }}", p.os);
+                else
+                    std::println("  {{ arch = \"{}\" }}", p.arch);
+            }
+        }
         if (!m.dependencies.empty()) {
             std::println("dependencies:");
             for (auto const& [name, ver] : m.dependencies) {
@@ -166,10 +199,14 @@ int cmd_info() {
 int cmd_build(int argc, char* argv[]) {
     try {
         auto m = load_manifest();
+        if (!check_platform(m))
+            return 1;
         bool release = (argc >= 3 && std::string_view{argv[2]} == "--release");
         if (manifest::is_workspace(m)) {
             return run_for_workspace(m, [release](auto const&) {
                 auto member_m = manifest::load("exon.toml");
+                if (!check_platform(member_m))
+                    return 1;
                 return build::run(member_m, release);
             });
         }
@@ -187,10 +224,14 @@ int cmd_build(int argc, char* argv[]) {
 int cmd_check(int argc, char* argv[]) {
     try {
         auto m = load_manifest();
+        if (!check_platform(m))
+            return 1;
         bool release = (argc >= 3 && std::string_view{argv[2]} == "--release");
         if (manifest::is_workspace(m)) {
             return run_for_workspace(m, [release](auto const&) {
                 auto member_m = manifest::load("exon.toml");
+                if (!check_platform(member_m))
+                    return 1;
                 return build::run_check(member_m, release);
             });
         }
@@ -208,6 +249,8 @@ int cmd_check(int argc, char* argv[]) {
 int cmd_run(int argc, char* argv[]) {
     try {
         auto m = load_manifest();
+        if (!check_platform(m))
+            return 1;
         if (m.name.empty()) {
             std::println(std::cerr, "error: package name is required in exon.toml");
             return 1;
@@ -244,10 +287,14 @@ int cmd_run(int argc, char* argv[]) {
 int cmd_test(int argc, char* argv[]) {
     try {
         auto m = load_manifest();
+        if (!check_platform(m))
+            return 1;
         bool release = (argc >= 3 && std::string_view{argv[2]} == "--release");
         if (manifest::is_workspace(m)) {
             return run_for_workspace(m, [release](auto const&) {
                 auto member_m = manifest::load("exon.toml");
+                if (!check_platform(member_m))
+                    return 1;
                 return build::run_test(member_m, release);
             });
         }
