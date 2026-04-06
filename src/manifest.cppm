@@ -387,6 +387,119 @@ Manifest resolve_for_platform(Manifest m, toolchain::Platform const& target) {
     return m;
 }
 
+// merge ALL target sections unconditionally (for exon sync: fetch everything)
+Manifest resolve_all_targets(Manifest m) {
+    for (auto const& ts : m.target_sections) {
+        for (auto const& [k, v] : ts.dependencies)
+            m.dependencies.emplace(k, v);
+        for (auto const& [k, v] : ts.find_deps)
+            m.find_deps.emplace(k, v);
+        for (auto const& [k, v] : ts.path_deps)
+            m.path_deps.emplace(k, v);
+        for (auto const& ws : ts.workspace_deps)
+            m.workspace_deps.insert(ws);
+        for (auto const& [k, v] : ts.vcpkg_deps)
+            m.vcpkg_deps.emplace(k, v);
+        for (auto const& [k, v] : ts.subdir_deps)
+            m.subdir_deps.emplace(k, v);
+        for (auto const& [k, v] : ts.dev_dependencies)
+            m.dev_dependencies.emplace(k, v);
+        for (auto const& [k, v] : ts.dev_find_deps)
+            m.dev_find_deps.emplace(k, v);
+        for (auto const& [k, v] : ts.dev_path_deps)
+            m.dev_path_deps.emplace(k, v);
+        for (auto const& ws : ts.dev_workspace_deps)
+            m.dev_workspace_deps.insert(ws);
+        for (auto const& [k, v] : ts.dev_vcpkg_deps)
+            m.dev_vcpkg_deps.emplace(k, v);
+        for (auto const& [k, v] : ts.dev_subdir_deps)
+            m.dev_subdir_deps.emplace(k, v);
+        for (auto const& [k, v] : ts.defines)
+            m.defines.emplace(k, v);
+        for (auto const& [k, v] : ts.defines_debug)
+            m.defines_debug.emplace(k, v);
+        for (auto const& [k, v] : ts.defines_release)
+            m.defines_release.emplace(k, v);
+    }
+    // keep target_sections intact for generate_portable_cmake
+    return m;
+}
+
+// convert a cfg() predicate to a CMake if() condition string
+std::string predicate_to_cmake(std::string_view pred) {
+    auto trim = [](std::string_view s) {
+        while (!s.empty() && (s.front() == ' ' || s.front() == '\t'))
+            s.remove_prefix(1);
+        while (!s.empty() && (s.back() == ' ' || s.back() == '\t'))
+            s.remove_suffix(1);
+        return s;
+    };
+    pred = trim(pred);
+    if (!pred.starts_with("cfg(") || !pred.ends_with(")"))
+        return "";
+    auto inner = trim(pred.substr(4, pred.size() - 5));
+
+    if (inner.starts_with("not(") && inner.ends_with(")")) {
+        auto not_inner = inner.substr(4, inner.size() - 5);
+        auto inner_cmake = predicate_to_cmake(std::format("cfg({})", not_inner));
+        if (inner_cmake.empty())
+            return "";
+        return std::format("NOT ({})", inner_cmake);
+    }
+
+    auto field_to_cmake = [](std::string_view key, std::string_view value) -> std::string {
+        if (key == "os") {
+            if (value == "linux")
+                return "CMAKE_SYSTEM_NAME STREQUAL \"Linux\"";
+            if (value == "macos")
+                return "CMAKE_SYSTEM_NAME STREQUAL \"Darwin\"";
+            if (value == "windows")
+                return "WIN32";
+        } else if (key == "arch") {
+            if (value == "x86_64")
+                return "CMAKE_SYSTEM_PROCESSOR MATCHES \"x86_64|AMD64\"";
+            if (value == "aarch64")
+                return "CMAKE_SYSTEM_PROCESSOR MATCHES \"aarch64|ARM64\"";
+        }
+        return "";
+    };
+
+    std::vector<std::string> conditions;
+    std::size_t start = 0;
+    bool in_quotes = false;
+    for (std::size_t i = 0; i <= inner.size(); ++i) {
+        if (i < inner.size() && inner[i] == '"')
+            in_quotes = !in_quotes;
+        if (i == inner.size() || (inner[i] == ',' && !in_quotes)) {
+            auto pair = trim(inner.substr(start, i - start));
+            auto eq = pair.find('=');
+            if (eq == std::string_view::npos)
+                return "";
+            auto key = trim(pair.substr(0, eq));
+            auto val_part = trim(pair.substr(eq + 1));
+            if (val_part.size() >= 2 && val_part.front() == '"' && val_part.back() == '"') {
+                auto value = val_part.substr(1, val_part.size() - 2);
+                auto cmake = field_to_cmake(key, value);
+                if (!cmake.empty())
+                    conditions.push_back(std::move(cmake));
+            }
+            start = i + 1;
+        }
+    }
+
+    if (conditions.empty())
+        return "";
+    if (conditions.size() == 1)
+        return conditions[0];
+    std::string result;
+    for (std::size_t i = 0; i < conditions.size(); ++i) {
+        if (i > 0)
+            result += " AND ";
+        result += conditions[i];
+    }
+    return result;
+}
+
 Manifest load(std::string_view path) {
     auto table = toml::parse_file(path);
     return from_toml(table);
