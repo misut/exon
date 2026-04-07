@@ -90,7 +90,8 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
                           std::filesystem::path const& source_dir, bool release,
                           std::string_view vcpkg_toolchain = {},
                           std::filesystem::path const& vcpkg_manifest_dir = {},
-                          std::string_view wasm_toolchain = {}) {
+                          std::string_view wasm_toolchain = {},
+                          std::string_view target = {}) {
     auto build_type = release ? "Release" : "Debug";
     auto cmd = std::format("{} -B {} -S {} -G Ninja -DCMAKE_BUILD_TYPE={}",
                            toolchain::shell_quote(tc.cmake),
@@ -101,16 +102,16 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
 
     if (!wasm_toolchain.empty()) {
         // WASM cross-compilation: toolchain file handles compiler, sysroot, flags.
-        // import std; is disabled (stdlib_modules_json cleared) because WASI lacks
-        // csetjmp/csignal support that the standard module requires.
+        // import std; is disabled because WASM targets lack full standard library support.
         // User .cppm modules still work via host clang-scan-deps.
         cmd += std::format(" -DCMAKE_TOOLCHAIN_FILE={}", wasm_toolchain);
-        // wasi-sdk lacks clang-scan-deps; use the host LLVM's copy
         if (!tc.cxx_compiler.empty())
             cmd += std::format(" -DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS={}",
                                toolchain::shell_quote(tc.cxx_compiler));
         // WASI: disable exceptions (libc++abi lacks exception support)
-        cmd += " \"-DCMAKE_CXX_FLAGS=-fno-exceptions -D_LIBCPP_NO_EXCEPTIONS\"";
+        // Emscripten handles exceptions natively, no extra flags needed
+        if (target.starts_with("wasm32-wasi"))
+            cmd += " \"-DCMAKE_CXX_FLAGS=-fno-exceptions -D_LIBCPP_NO_EXCEPTIONS\"";
         return cmd;
     }
 
@@ -835,12 +836,19 @@ int run(manifest::Manifest const& m, bool release = false, std::string_view targ
 
     std::string wasm_toolchain_file;
     if (is_wasm) {
-        auto wasm_tc = toolchain::detect_wasm(target);
-        wasm_toolchain_file = wasm_tc.cmake_toolchain;
-        // import std; is unsupported on WASM (csetjmp/csignal headers fail),
-        // so clear modules json; users must use #include instead
+        std::string scan_deps;
+        if (target == "wasm32-emscripten") {
+            auto em_tc = toolchain::detect_emscripten();
+            wasm_toolchain_file = em_tc.cmake_toolchain;
+            scan_deps = em_tc.scan_deps;
+        } else {
+            auto wasm_tc = toolchain::detect_wasm(target);
+            wasm_toolchain_file = wasm_tc.cmake_toolchain;
+            scan_deps = wasm_tc.scan_deps;
+        }
+        // import std; is unsupported on WASM targets, so clear modules json
         tc.stdlib_modules_json.clear();
-        tc.cxx_compiler = wasm_tc.scan_deps; // repurpose for host clang-scan-deps
+        tc.cxx_compiler = std::move(scan_deps); // repurpose for host clang-scan-deps
         tc.sysroot.clear();
         tc.lib_dir.clear();
         tc.has_clang_config = false;
@@ -860,7 +868,7 @@ int run(manifest::Manifest const& m, bool release = false, std::string_view targ
         std::println("configuring...");
         int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release,
                                                     vcpkg_toolchain.string(), exon_dir,
-                                                    wasm_toolchain_file).c_str());
+                                                    wasm_toolchain_file, target).c_str());
         if (rc != 0)
             return rc;
     }
@@ -872,7 +880,9 @@ int run(manifest::Manifest const& m, bool release = false, std::string_view targ
     if (rc != 0)
         return rc;
 
-    if (is_wasm)
+    if (target == "wasm32-emscripten")
+        std::println("build succeeded: .exon/{}/{}/{}.js", target, profile, m.name);
+    else if (is_wasm)
         std::println("build succeeded: .exon/{}/{}/{}", target, profile, m.name);
     else
         std::println("build succeeded: .exon/{}/{}", profile, m.name);
@@ -902,11 +912,20 @@ int run_check(manifest::Manifest const& m, bool release = false, std::string_vie
 
     std::string wasm_toolchain_file;
     if (is_wasm) {
-        auto wasm_tc = toolchain::detect_wasm(target);
-        wasm_toolchain_file = wasm_tc.cmake_toolchain;
-        if (!wasm_tc.modules_json.empty())
-            tc.stdlib_modules_json = wasm_tc.modules_json;
-        tc.cxx_compiler = wasm_tc.scan_deps; // repurpose for host clang-scan-deps
+        std::string scan_deps;
+        if (target == "wasm32-emscripten") {
+            auto em_tc = toolchain::detect_emscripten();
+            wasm_toolchain_file = em_tc.cmake_toolchain;
+            scan_deps = em_tc.scan_deps;
+            tc.stdlib_modules_json.clear();
+        } else {
+            auto wasm_tc = toolchain::detect_wasm(target);
+            wasm_toolchain_file = wasm_tc.cmake_toolchain;
+            if (!wasm_tc.modules_json.empty())
+                tc.stdlib_modules_json = wasm_tc.modules_json;
+            scan_deps = wasm_tc.scan_deps;
+        }
+        tc.cxx_compiler = std::move(scan_deps); // repurpose for host clang-scan-deps
         tc.sysroot.clear();
         tc.lib_dir.clear();
         tc.has_clang_config = false;
@@ -926,7 +945,7 @@ int run_check(manifest::Manifest const& m, bool release = false, std::string_vie
         std::println("configuring...");
         int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release,
                                                     vcpkg_toolchain.string(), exon_dir,
-                                                    wasm_toolchain_file).c_str());
+                                                    wasm_toolchain_file, target).c_str());
         if (rc != 0)
             return rc;
     }
@@ -984,23 +1003,35 @@ int run_test(manifest::Manifest const& m, bool release = false, std::string_view
 
     auto tc = toolchain::detect();
 
+    bool is_emscripten = target == "wasm32-emscripten";
     std::string wasm_toolchain_file;
     std::string wasm_runtime;
     if (is_wasm) {
-        auto wasm_tc = toolchain::detect_wasm(target);
-        wasm_toolchain_file = wasm_tc.cmake_toolchain;
-        if (!wasm_tc.modules_json.empty())
-            tc.stdlib_modules_json = wasm_tc.modules_json;
-        tc.cxx_compiler = wasm_tc.scan_deps; // repurpose for host clang-scan-deps
+        std::string scan_deps;
+        if (is_emscripten) {
+            auto em_tc = toolchain::detect_emscripten();
+            wasm_toolchain_file = em_tc.cmake_toolchain;
+            scan_deps = em_tc.scan_deps;
+            tc.stdlib_modules_json.clear();
+        } else {
+            auto wasm_tc = toolchain::detect_wasm(target);
+            wasm_toolchain_file = wasm_tc.cmake_toolchain;
+            if (!wasm_tc.modules_json.empty())
+                tc.stdlib_modules_json = wasm_tc.modules_json;
+            scan_deps = wasm_tc.scan_deps;
+        }
+        tc.cxx_compiler = std::move(scan_deps); // repurpose for host clang-scan-deps
         tc.sysroot.clear();
         tc.lib_dir.clear();
         tc.has_clang_config = false;
         tc.needs_stdlib_flag = false;
 
-        wasm_runtime = toolchain::detect_wasm_runtime();
-        if (wasm_runtime.empty())
-            throw std::runtime_error(
-                "wasmtime not found on PATH (install: https://wasmtime.dev)");
+        if (!is_emscripten) {
+            wasm_runtime = toolchain::detect_wasm_runtime();
+            if (wasm_runtime.empty())
+                throw std::runtime_error(
+                    "wasmtime not found on PATH (install: https://wasmtime.dev)");
+        }
     }
 
     auto lock_path = (project_root / "exon.lock").string();
@@ -1016,7 +1047,7 @@ int run_test(manifest::Manifest const& m, bool release = false, std::string_view
         std::println("configuring...");
         int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release,
                                                     vcpkg_toolchain.string(), exon_dir,
-                                                    wasm_toolchain_file).c_str());
+                                                    wasm_toolchain_file, target).c_str());
         if (rc != 0)
             return rc;
     }
@@ -1040,13 +1071,16 @@ int run_test(manifest::Manifest const& m, bool release = false, std::string_view
 
     // run
     std::println("running tests...\n");
-    auto exe_suffix = std::string{is_wasm ? "" : toolchain::exe_suffix};
+    auto exe_suffix = is_emscripten ? std::string{".js"}
+                    : (is_wasm ? std::string{} : std::string{toolchain::exe_suffix});
     int passed = 0;
     int failed = 0;
     for (auto const& name : test_names) {
         auto exe = build_dir / (name + exe_suffix);
         std::string run_cmd;
-        if (is_wasm)
+        if (is_emscripten)
+            run_cmd = std::format("node {}", toolchain::shell_quote(exe.string()));
+        else if (is_wasm)
             run_cmd = std::format("{} {}", toolchain::shell_quote(wasm_runtime),
                                   toolchain::shell_quote(exe.string()));
         else

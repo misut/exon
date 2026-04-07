@@ -175,10 +175,10 @@ Manifest from_toml(toml::Table const& table) {
                 if (t.contains("os")) {
                     p.os = t.at("os").as_string();
                     static constexpr auto known_os =
-                        std::array{"linux", "macos", "windows", "wasi"};
+                        std::array{"linux", "macos", "windows", "wasi", "emscripten"};
                     if (std::ranges::find(known_os, p.os) == known_os.end())
                         throw std::runtime_error(std::format(
-                            "unknown os '{}' in [package].platforms; known: linux, macos, windows, wasi",
+                            "unknown os '{}' in [package].platforms; known: linux, macos, windows, wasi, emscripten",
                             p.os));
                 }
                 if (t.contains("arch")) {
@@ -457,6 +457,8 @@ std::string predicate_to_cmake(std::string_view pred) {
                 return "WIN32";
             if (value == "wasi")
                 return "CMAKE_SYSTEM_NAME STREQUAL \"WASI\"";
+            if (value == "emscripten")
+                return "CMAKE_SYSTEM_NAME STREQUAL \"Emscripten\"";
         } else if (key == "arch") {
             if (value == "x86_64")
                 return "CMAKE_SYSTEM_PROCESSOR MATCHES \"x86_64|AMD64\"";
