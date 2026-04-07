@@ -25,6 +25,7 @@ add_library(exon-modules)
 target_sources(exon-modules
     PUBLIC FILE_SET CXX_MODULES BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR} FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/build.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/cli.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/commands.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/fetch.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/lock.cppm
@@ -46,6 +47,7 @@ target_link_libraries(exon PRIVATE exon-modules)
 
 set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/build.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/cli.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/commands.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/fetch.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/lock.cppm
@@ -56,7 +58,7 @@ set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vcpkg.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
     PROPERTIES COMPILE_DEFINITIONS
-    "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.16.1\""
+    "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.16.2\""
 )
 
 add_executable(test-test_build)
@@ -64,6 +66,14 @@ target_sources(test-test_build PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_build.cpp
 )
 target_link_libraries(test-test_build PRIVATE
+    exon-modules
+)
+
+add_executable(test-test_cli)
+target_sources(test-test_cli PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.cpp
+)
+target_link_libraries(test-test_cli PRIVATE
     exon-modules
 )
 
