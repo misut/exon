@@ -40,8 +40,7 @@ std::string usage_text() {
             {"version",                            "show exon version"},
         }},
         cli::Section{"targets", {
-            {"wasm32-wasi",        "WebAssembly CLI/server (requires wasi-sdk via intron or WASI_SDK_PATH)"},
-            {"wasm32-emscripten",  "WebAssembly browser (requires Emscripten via EMSDK or em++ on PATH)"},
+            {"wasm32-wasi", "WebAssembly (requires wasi-sdk via intron or WASI_SDK_PATH)"},
         }},
     });
 }
@@ -279,18 +278,13 @@ int cmd_run(int argc, char* argv[]) {
         if (m.type == "lib")
             return cli::error("cannot run a library package");
         bool is_wasm = !target.empty();
-        bool is_emscripten = target == "wasm32-emscripten";
         int rc = build::run(m, release, target);
         if (rc != 0)
             return rc;
 
         auto profile = release ? "release" : "debug";
         std::string run_cmd;
-        if (is_emscripten) {
-            auto js_file = std::filesystem::current_path() / ".exon" / target / profile /
-                           (m.name + ".js");
-            run_cmd = std::format("node {}", toolchain::shell_quote(js_file.string()));
-        } else if (is_wasm) {
+        if (is_wasm) {
             auto wasm_runtime = toolchain::detect_wasm_runtime();
             if (wasm_runtime.empty())
                 throw std::runtime_error(
