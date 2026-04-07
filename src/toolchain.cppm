@@ -357,6 +357,12 @@ struct WasmToolchain {
     std::string scan_deps;       // host clang-scan-deps (wasi-sdk lacks it)
 };
 
+struct EmscriptenToolchain {
+    std::string sdk_path;        // EMSDK root directory
+    std::string cmake_toolchain; // absolute path to Emscripten.cmake
+    std::string scan_deps;       // clang-scan-deps (from EMSDK LLVM or host)
+};
+
 WasmToolchain detect_wasm(std::string_view triple) {
     if (triple != "wasm32-wasi")
         throw std::runtime_error(
@@ -412,6 +418,67 @@ WasmToolchain detect_wasm(std::string_view triple) {
     return wt;
 }
 
+EmscriptenToolchain detect_emscripten() {
+    std::string sdk;
+
+    // 1. EMSDK environment variable
+    if (auto const* env = std::getenv("EMSDK"); env && *env)
+        sdk = env;
+
+    // 2. fallback: find em++ on PATH, trace back to EMSDK root
+    //    em++ lives at {EMSDK}/upstream/emscripten/em++
+    if (sdk.empty()) {
+        auto empp = detail::find_in_path("em++");
+        if (empp != "em++") {
+            auto emscripten_dir = std::filesystem::path{empp}.parent_path();
+            if (emscripten_dir.filename() == "emscripten") {
+                auto upstream = emscripten_dir.parent_path();
+                if (upstream.filename() == "upstream")
+                    sdk = upstream.parent_path().string();
+            }
+        }
+    }
+
+    if (sdk.empty())
+        throw std::runtime_error(
+            "emscripten not found (set EMSDK environment variable, or ensure em++ is on PATH)\n"
+            "install: https://emscripten.org/docs/getting_started/downloads.html");
+
+    auto sdk_path = std::filesystem::path{sdk};
+
+    auto toolchain_file = sdk_path / "upstream" / "emscripten" / "cmake" / "Modules" /
+                          "Platform" / "Emscripten.cmake";
+    if (!std::filesystem::exists(toolchain_file))
+        throw std::runtime_error(
+            std::format("Emscripten.cmake not found at {}", toolchain_file.string()));
+
+    // clang-scan-deps for C++ module scanning: EMSDK LLVM → intron LLVM → PATH
+    std::string scan_deps;
+    auto emsdk_scan = sdk_path / "upstream" / "bin" / "clang-scan-deps";
+    if (detail::exists_bin(emsdk_scan))
+        scan_deps = detail::canonical_bin(emsdk_scan).string();
+
+    if (scan_deps.empty()) {
+        auto intron_llvm = detail::find_intron_latest("llvm");
+        if (!intron_llvm.empty()) {
+            auto p = std::filesystem::path{intron_llvm} / "bin" / "clang-scan-deps";
+            if (detail::exists_bin(p))
+                scan_deps = detail::canonical_bin(p).string();
+        }
+    }
+    if (scan_deps.empty()) {
+        auto p = detail::find_in_path("clang-scan-deps");
+        if (p != "clang-scan-deps")
+            scan_deps = p;
+    }
+
+    EmscriptenToolchain et;
+    et.sdk_path = sdk_path.string();
+    et.cmake_toolchain = std::filesystem::canonical(toolchain_file).string();
+    et.scan_deps = std::move(scan_deps);
+    return et;
+}
+
 std::string detect_wasm_runtime() {
     auto rt = detail::find_in_path("wasmtime");
     if (rt != "wasmtime")
@@ -422,6 +489,8 @@ std::string detect_wasm_runtime() {
 std::optional<Platform> platform_from_target(std::string_view triple) {
     if (triple.starts_with("wasm32-wasi"))
         return Platform{.os = "wasi", .arch = "wasm32"};
+    if (triple == "wasm32-emscripten")
+        return Platform{.os = "emscripten", .arch = "wasm32"};
     return std::nullopt;
 }
 
