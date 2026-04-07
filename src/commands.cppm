@@ -1,5 +1,6 @@
 export module commands;
 import std;
+import cli;
 import toml;
 import manifest;
 import build;
@@ -15,33 +16,34 @@ export namespace commands {
 #endif
 constexpr auto version = EXON_PKG_VERSION;
 
-constexpr auto usage_text = R"(usage: exon <command> [args]
-
-commands:
-    init [--lib] [name]                create a new exon.toml
-    info                               show package information
-    build [--release] [--target <t>]   build the project
-    check [--release] [--target <t>]   check syntax without linking
-    run [--release] [--target <t>] [args]
-                                       build and run the project
-    test [--release] [--target <t>]    build and run tests
-    clean                              remove build artifacts
-    add [--dev] <pkg> <ver>            add a git dependency
-    add [--dev] --path <name> <path>   add a local path dependency
-    add [--dev] --workspace <name>     add a workspace member dependency
-    add [--dev] --vcpkg <name> <ver> [--features a,b,c]
-                                       add a vcpkg dependency
-    add [--dev] --git <repo> --version <ver> --subdir <dir> [--name <n>]
-                                       add a git dep pointing to a subdirectory
-    remove <pkg>                       remove a dependency
-    update                 update dependencies to latest compatible versions
-    sync                   sync CMakeLists.txt with exon.toml
-    fmt                    format source files with clang-format
-    version                show exon version
-
-targets:
-    wasm32-wasi            WebAssembly (requires wasi-sdk via intron or WASI_SDK_PATH)
-)";
+std::string usage_text() {
+    return cli::usage("exon", {
+        cli::Section{"commands", {
+            {"init [--lib] [name]",                "create a new exon.toml"},
+            {"info",                               "show package information"},
+            {"build [--release] [--target <t>]",   "build the project"},
+            {"check [--release] [--target <t>]",   "check syntax without linking"},
+            {"run [--release] [--target <t>] [args]", "build and run the project"},
+            {"test [--release] [--target <t>]",    "build and run tests"},
+            {"clean",                              "remove build artifacts"},
+            {"add [--dev] <pkg> <ver>",            "add a git dependency"},
+            {"add [--dev] --path <name> <path>",   "add a local path dependency"},
+            {"add [--dev] --workspace <name>",     "add a workspace member dependency"},
+            {"add [--dev] --vcpkg <name> <ver> [--features a,b,c]",
+                                                   "add a vcpkg dependency"},
+            {"add [--dev] --git <repo> --version <ver> --subdir <dir> [--name <n>]",
+                                                   "add a git dep pointing to a subdirectory"},
+            {"remove <pkg>",                       "remove a dependency"},
+            {"update",                             "update dependencies to latest compatible versions"},
+            {"sync",                               "sync CMakeLists.txt with exon.toml"},
+            {"fmt",                                "format source files with clang-format"},
+            {"version",                            "show exon version"},
+        }},
+        cli::Section{"targets", {
+            {"wasm32-wasi", "WebAssembly (requires wasi-sdk via intron or WASI_SDK_PATH)"},
+        }},
+    });
+}
 
 manifest::Manifest load_manifest() {
     if (!std::filesystem::exists("exon.toml")) {
@@ -104,33 +106,10 @@ bool check_platform(manifest::Manifest const& m, std::string_view target = {}) {
     return true;
 }
 
-// parse --release and --target flags from argv starting at position 2
-struct BuildArgs {
-    bool release = false;
-    std::string target;
-    int args_start = 2; // index of first non-flag argument
+std::vector<cli::ArgDef> const build_defs = {
+    cli::Flag{"--release"},
+    cli::Option{"--target"},
 };
-
-BuildArgs parse_build_args(int argc, char* argv[]) {
-    BuildArgs args;
-    int i = 2;
-    while (i < argc) {
-        auto a = std::string_view{argv[i]};
-        if (a == "--release") {
-            args.release = true;
-            ++i;
-        } else if (a == "--target") {
-            if (i + 1 >= argc)
-                throw std::runtime_error("--target requires a value");
-            args.target = argv[i + 1];
-            i += 2;
-        } else {
-            break;
-        }
-    }
-    args.args_start = i;
-    return args;
-}
 
 std::string read_file(std::string_view path) {
     auto file = std::ifstream(std::string{path});
@@ -143,23 +122,12 @@ int cmd_version() {
 }
 
 int cmd_init(int argc, char* argv[]) {
-    // Parse args: [--lib] [name] in any order.
-    bool is_lib = false;
-    std::string name;
-    for (int i = 2; i < argc; ++i) {
-        auto arg = std::string_view{argv[i]};
-        if (arg == "--lib") {
-            is_lib = true;
-        } else if (arg.starts_with("--")) {
-            std::println(std::cerr, "error: unknown flag '{}'", arg);
-            return 1;
-        } else if (name.empty()) {
-            name = arg;
-        } else {
-            std::println(std::cerr, "error: unexpected argument '{}'", arg);
-            return 1;
-        }
-    }
+    auto args = cli::parse(argc, argv, 2, {cli::Flag{"--lib"}});
+    bool is_lib = args.has("--lib");
+    auto& pos = args.positional();
+    if (pos.size() > 1)
+        return cli::error(std::format("unexpected argument '{}'", pos[1]));
+    auto name = pos.empty() ? std::string{} : pos[0];
 
     auto target_dir = std::filesystem::current_path();
     if (!name.empty()) {
@@ -188,9 +156,9 @@ int cmd_init(int argc, char* argv[]) {
     }
     auto tmpl = std::string{is_lib ? templates::exon_toml_lib : templates::exon_toml_bin};
     // Fill in the package name (template has `name = ""`).
-    auto pos = tmpl.find("name = \"\"");
-    if (pos != std::string::npos)
-        tmpl.replace(pos, 9, std::format("name = \"{}\"", name));
+    auto name_pos = tmpl.find("name = \"\"");
+    if (name_pos != std::string::npos)
+        tmpl.replace(name_pos, 9, std::format("name = \"{}\"", name));
     file << tmpl;
     std::println("created {} ({})", manifest_path.string(), is_lib ? "lib" : "bin");
     return 0;
@@ -244,25 +212,25 @@ int cmd_info() {
 
 int cmd_build(int argc, char* argv[]) {
     try {
-        auto args = parse_build_args(argc, argv);
+        auto args = cli::parse(argc, argv, 2, build_defs);
+        auto release = args.has("--release");
+        auto target = std::string{args.get("--target")};
         auto m = load_manifest();
-        if (!check_platform(m, args.target))
+        if (!check_platform(m, target))
             return 1;
-        m = resolve_manifest(std::move(m), args.target);
+        m = resolve_manifest(std::move(m), target);
         if (manifest::is_workspace(m)) {
-            return run_for_workspace(m, [&args](auto const&) {
+            return run_for_workspace(m, [release, &target](auto const&) {
                 auto member_m = manifest::load("exon.toml");
-                if (!check_platform(member_m, args.target))
+                if (!check_platform(member_m, target))
                     return 1;
-                member_m = resolve_manifest(std::move(member_m), args.target);
-                return build::run(member_m, args.release, args.target);
+                member_m = resolve_manifest(std::move(member_m), target);
+                return build::run(member_m, release, target);
             });
         }
-        if (m.name.empty()) {
-            std::println(std::cerr, "error: package name is required in exon.toml");
-            return 1;
-        }
-        return build::run(m, args.release, args.target);
+        if (m.name.empty())
+            return cli::error("package name is required in exon.toml");
+        return build::run(m, release, target);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
@@ -271,25 +239,25 @@ int cmd_build(int argc, char* argv[]) {
 
 int cmd_check(int argc, char* argv[]) {
     try {
-        auto args = parse_build_args(argc, argv);
+        auto args = cli::parse(argc, argv, 2, build_defs);
+        auto release = args.has("--release");
+        auto target = std::string{args.get("--target")};
         auto m = load_manifest();
-        if (!check_platform(m, args.target))
+        if (!check_platform(m, target))
             return 1;
-        m = resolve_manifest(std::move(m), args.target);
+        m = resolve_manifest(std::move(m), target);
         if (manifest::is_workspace(m)) {
-            return run_for_workspace(m, [&args](auto const&) {
+            return run_for_workspace(m, [release, &target](auto const&) {
                 auto member_m = manifest::load("exon.toml");
-                if (!check_platform(member_m, args.target))
+                if (!check_platform(member_m, target))
                     return 1;
-                member_m = resolve_manifest(std::move(member_m), args.target);
-                return build::run_check(member_m, args.release, args.target);
+                member_m = resolve_manifest(std::move(member_m), target);
+                return build::run_check(member_m, release, target);
             });
         }
-        if (m.name.empty()) {
-            std::println(std::cerr, "error: package name is required in exon.toml");
-            return 1;
-        }
-        return build::run_check(m, args.release, args.target);
+        if (m.name.empty())
+            return cli::error("package name is required in exon.toml");
+        return build::run_check(m, release, target);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
@@ -298,32 +266,30 @@ int cmd_check(int argc, char* argv[]) {
 
 int cmd_run(int argc, char* argv[]) {
     try {
-        auto args = parse_build_args(argc, argv);
+        auto args = cli::parse(argc, argv, 2, build_defs);
+        auto release = args.has("--release");
+        auto target = std::string{args.get("--target")};
         auto m = load_manifest();
-        if (!check_platform(m, args.target))
+        if (!check_platform(m, target))
             return 1;
-        m = resolve_manifest(std::move(m), args.target);
-        if (m.name.empty()) {
-            std::println(std::cerr, "error: package name is required in exon.toml");
-            return 1;
-        }
-        if (m.type == "lib") {
-            std::println(std::cerr, "error: cannot run a library package");
-            return 1;
-        }
-        bool is_wasm = !args.target.empty();
-        int rc = build::run(m, args.release, args.target);
+        m = resolve_manifest(std::move(m), target);
+        if (m.name.empty())
+            return cli::error("package name is required in exon.toml");
+        if (m.type == "lib")
+            return cli::error("cannot run a library package");
+        bool is_wasm = !target.empty();
+        int rc = build::run(m, release, target);
         if (rc != 0)
             return rc;
 
-        auto profile = args.release ? "release" : "debug";
+        auto profile = release ? "release" : "debug";
         std::string run_cmd;
         if (is_wasm) {
             auto wasm_runtime = toolchain::detect_wasm_runtime();
             if (wasm_runtime.empty())
                 throw std::runtime_error(
                     "wasmtime not found on PATH (install: https://wasmtime.dev)");
-            auto wasm_file = std::filesystem::current_path() / ".exon" / args.target / profile /
+            auto wasm_file = std::filesystem::current_path() / ".exon" / target / profile /
                              m.name;
             run_cmd = std::format("{} {}", toolchain::shell_quote(wasm_runtime),
                                   toolchain::shell_quote(wasm_file.string()));
@@ -332,8 +298,8 @@ int cmd_run(int argc, char* argv[]) {
                        (m.name + std::string{toolchain::exe_suffix});
             run_cmd = toolchain::shell_quote(exe.string());
         }
-        for (int i = args.args_start; i < argc; ++i) {
-            run_cmd += std::format(" {}", argv[i]);
+        for (auto const& a : args.positional()) {
+            run_cmd += std::format(" {}", a);
         }
         std::println("running {}...\n", m.name);
         return std::system(run_cmd.c_str());
@@ -345,25 +311,25 @@ int cmd_run(int argc, char* argv[]) {
 
 int cmd_test(int argc, char* argv[]) {
     try {
-        auto args = parse_build_args(argc, argv);
+        auto args = cli::parse(argc, argv, 2, build_defs);
+        auto release = args.has("--release");
+        auto target = std::string{args.get("--target")};
         auto m = load_manifest();
-        if (!check_platform(m, args.target))
+        if (!check_platform(m, target))
             return 1;
-        m = resolve_manifest(std::move(m), args.target);
+        m = resolve_manifest(std::move(m), target);
         if (manifest::is_workspace(m)) {
-            return run_for_workspace(m, [&args](auto const&) {
+            return run_for_workspace(m, [release, &target](auto const&) {
                 auto member_m = manifest::load("exon.toml");
-                if (!check_platform(member_m, args.target))
+                if (!check_platform(member_m, target))
                     return 1;
-                member_m = resolve_manifest(std::move(member_m), args.target);
-                return build::run_test(member_m, args.release, args.target);
+                member_m = resolve_manifest(std::move(member_m), target);
+                return build::run_test(member_m, release, target);
             });
         }
-        if (m.name.empty()) {
-            std::println(std::cerr, "error: package name is required in exon.toml");
-            return 1;
-        }
-        return build::run_test(m, args.release, args.target);
+        if (m.name.empty())
+            return cli::error("package name is required in exon.toml");
+        return build::run_test(m, release, target);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
@@ -434,94 +400,29 @@ bool dep_exists(manifest::Manifest const& m, std::string const& name) {
 }
 
 int cmd_add(int argc, char* argv[]) {
-    bool dev = false;
-    bool is_path = false;
-    bool is_workspace_dep = false;
-    bool is_vcpkg = false;
-    bool is_git_subdir = false;
-    std::vector<std::string> features;
-    std::string git_repo;
-    std::string git_version;
-    std::string git_subdir;
-    std::string git_name;
-    std::vector<std::string> positional;
-    for (int i = 2; i < argc; ++i) {
-        std::string_view a{argv[i]};
-        if (a == "--dev")
-            dev = true;
-        else if (a == "--path")
-            is_path = true;
-        else if (a == "--workspace")
-            is_workspace_dep = true;
-        else if (a == "--vcpkg")
-            is_vcpkg = true;
-        else if (a == "--git") {
-            if (i + 1 >= argc) {
-                std::println(std::cerr, "error: --git requires a repo URL");
-                return 1;
-            }
-            is_git_subdir = true;
-            git_repo = argv[i + 1];
-            ++i;
-        } else if (a == "--subdir") {
-            if (i + 1 >= argc) {
-                std::println(std::cerr, "error: --subdir requires a directory name");
-                return 1;
-            }
-            git_subdir = argv[i + 1];
-            ++i;
-        } else if (a == "--version") {
-            if (i + 1 >= argc) {
-                std::println(std::cerr, "error: --version requires a value");
-                return 1;
-            }
-            git_version = argv[i + 1];
-            ++i;
-        } else if (a == "--name") {
-            if (i + 1 >= argc) {
-                std::println(std::cerr, "error: --name requires a value");
-                return 1;
-            }
-            git_name = argv[i + 1];
-            ++i;
-        } else if (a == "--features") {
-            if (i + 1 >= argc) {
-                std::println(std::cerr, "error: --features requires a comma-separated list");
-                return 1;
-            }
-            std::string_view list{argv[i + 1]};
-            std::size_t start = 0;
-            while (start < list.size()) {
-                auto comma = list.find(',', start);
-                auto end = (comma == std::string_view::npos) ? list.size() : comma;
-                auto tok = list.substr(start, end - start);
-                while (!tok.empty() && std::isspace(static_cast<unsigned char>(tok.front())))
-                    tok.remove_prefix(1);
-                while (!tok.empty() && std::isspace(static_cast<unsigned char>(tok.back())))
-                    tok.remove_suffix(1);
-                if (!tok.empty())
-                    features.emplace_back(tok);
-                start = end + 1;
-            }
-            ++i;
-        } else if (a.starts_with("--")) {
-            std::println(std::cerr, "error: unknown flag '{}'", a);
-            return 1;
-        } else {
-            positional.emplace_back(a);
-        }
-    }
-    if (!features.empty() && !is_vcpkg) {
-        std::println(std::cerr, "error: --features is only valid with --vcpkg");
-        return 1;
-    }
+    auto args = cli::parse(argc, argv, 2, {
+        cli::Flag{"--dev"}, cli::Flag{"--path"}, cli::Flag{"--workspace"}, cli::Flag{"--vcpkg"},
+        cli::Option{"--git"}, cli::Option{"--subdir"}, cli::Option{"--version"},
+        cli::Option{"--name"}, cli::ListOption{"--features"},
+    });
+    bool dev = args.has("--dev");
+    bool is_path = args.has("--path");
+    bool is_workspace_dep = args.has("--workspace");
+    bool is_vcpkg = args.has("--vcpkg");
+    bool is_git_subdir = !args.get("--git").empty();
+    auto features = args.get_list("--features");
+    auto git_repo = std::string{args.get("--git")};
+    auto git_version = std::string{args.get("--version")};
+    auto git_subdir = std::string{args.get("--subdir")};
+    auto git_name = std::string{args.get("--name")};
+    auto& positional = args.positional();
+
+    if (!features.empty() && !is_vcpkg)
+        return cli::error("--features is only valid with --vcpkg");
 
     int exclusive_count = int(is_path) + int(is_workspace_dep) + int(is_vcpkg) + int(is_git_subdir);
-    if (exclusive_count > 1) {
-        std::println(std::cerr,
-                     "error: --path, --workspace, --vcpkg, --git are mutually exclusive");
-        return 1;
-    }
+    if (exclusive_count > 1)
+        return cli::error("--path, --workspace, --vcpkg, --git are mutually exclusive");
 
     if (!std::filesystem::exists("exon.toml")) {
         std::println(std::cerr, "error: exon.toml not found. run 'exon init' first");

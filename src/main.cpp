@@ -12,7 +12,7 @@ int main(int argc, char* argv[]) {
     std::setvbuf(stderr, nullptr, _IONBF, 0);
 
     if (argc < 2) {
-        std::print("{}", commands::usage_text);
+        std::print("{}", commands::usage_text());
         return 1;
     }
 
@@ -46,6 +46,6 @@ int main(int argc, char* argv[]) {
         return commands::cmd_fmt();
 
     std::println(std::cerr, "unknown command: {}", command);
-    std::print(std::cerr, "{}", commands::usage_text);
+    std::print(std::cerr, "{}", commands::usage_text());
     return 1;
 }
