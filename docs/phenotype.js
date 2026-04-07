@@ -14,6 +14,8 @@ const CMD_SET_STYLE = 5;
 const CMD_SET_INNER_HTML = 6;
 const CMD_ADD_CLASS = 7;
 const CMD_REMOVE_CHILD = 8;
+const CMD_CLEAR_CHILDREN = 9;
+const CMD_REGISTER_CLICK = 10;
 
 // --- DOM command buffer executor ---
 
@@ -118,6 +120,23 @@ function createExecutor(instance, rootElement) {
           const parentEl = handles.get(parent);
           const childEl = handles.get(child);
           if (parentEl && childEl) parentEl.removeChild(childEl);
+          break;
+        }
+        case CMD_CLEAR_CHILDREN: {
+          const handle = view.getUint32(pos, true); pos += 4;
+          const el = handles.get(handle);
+          if (el) el.innerHTML = '';
+          break;
+        }
+        case CMD_REGISTER_CLICK: {
+          const handle = view.getUint32(pos, true); pos += 4;
+          const callbackId = view.getUint32(pos, true); pos += 4;
+          const el = handles.get(handle);
+          if (el) {
+            el.addEventListener('click', () => {
+              instance.exports.phenotype_handle_event(callbackId);
+            });
+          }
           break;
         }
         default:
