@@ -48,5 +48,9 @@ build/
 .exon/
 exon.lock
 
+# Generated
+CMakeLists.txt
+
 # Claude Code
+.claude/
 CLAUDE.md
