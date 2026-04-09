@@ -744,7 +744,6 @@ export async function mount(wasmUrl, rootElement = document.body) {
     scrollY = Math.max(0, Math.min(scrollY + e.deltaY, maxScroll));
     if (inst.exports.phenotype_repaint) {
       inst.exports.phenotype_repaint(scrollY);
-      doFlush();
     }
   }, { passive: false });
 
@@ -755,7 +754,6 @@ export async function mount(wasmUrl, rootElement = document.body) {
     resizeRAF = requestAnimationFrame(() => {
       if (inst.exports.phenotype_repaint) {
         inst.exports.phenotype_repaint(scrollY);
-        doFlush();
         if (inst.exports.phenotype_get_total_height) {
           totalHeight = inst.exports.phenotype_get_total_height();
         }
