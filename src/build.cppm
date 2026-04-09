@@ -194,17 +194,23 @@ std::filesystem::path setup_vcpkg(manifest::Manifest const& m,
     return root / "scripts" / "buildsystems" / "vcpkg.cmake";
 }
 
-} // namespace detail
+std::vector<std::string> split_targets(std::string_view s) {
+    std::vector<std::string> result;
+    std::size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i])))
+            ++i;
+        std::size_t start = i;
+        while (i < s.size() && !std::isspace(static_cast<unsigned char>(s[i])))
+            ++i;
+        if (start < i)
+            result.emplace_back(s.substr(start, i - start));
+    }
+    return result;
+}
 
-std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path const& project_root,
-                           std::vector<fetch::FetchedDep> const& deps,
-                           toolchain::Toolchain const& tc, bool with_tests = false,
-                           bool release = false) {
-    std::ostringstream out;
-
-    bool import_std = (m.standard >= 23 &&
-                       (!tc.stdlib_modules_json.empty() || tc.native_import_std));
-
+void emit_cmake_preamble(std::ostringstream& out, manifest::Manifest const& m,
+                          bool import_std) {
     if (import_std) {
         out << "cmake_minimum_required(VERSION 3.30)\n\n";
         out << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
@@ -218,14 +224,59 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         out << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
         out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
     }
+}
 
-    // MSVC-specific compile options (keep warnings informative but non-fatal)
-    if (tc.is_msvc) {
-        out << "if(MSVC)\n";
-        out << "    add_compile_options(/W4 /wd4996 /utf-8)\n";
-        out << "    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)\n";
-        out << "endif()\n\n";
+void emit_msvc_options(std::ostringstream& out) {
+    out << "if(MSVC)\n";
+    out << "    add_compile_options(/W4 /wd4996 /utf-8)\n";
+    out << "    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)\n";
+    out << "endif()\n\n";
+}
+
+void emit_find_packages(std::ostringstream& out, manifest::Manifest const& m, bool with_dev) {
+    for (auto const& [pkg, _] : m.find_deps)
+        out << std::format("find_package({} REQUIRED)\n", pkg);
+    if (with_dev) {
+        for (auto const& [pkg, _] : m.dev_find_deps)
+            out << std::format("find_package({} REQUIRED)\n", pkg);
     }
+    if (!m.find_deps.empty() || (with_dev && !m.dev_find_deps.empty()))
+        out << "\n";
+}
+
+std::string collect_find_targets(manifest::Manifest const& m, bool dev) {
+    std::string targets;
+    for (auto const& [_, tgt] : m.find_deps) {
+        for (auto const& t : detail::split_targets(tgt)) {
+            if (!targets.empty()) targets += "\n    ";
+            targets += t;
+        }
+    }
+    if (dev) {
+        for (auto const& [_, tgt] : m.dev_find_deps) {
+            for (auto const& t : detail::split_targets(tgt)) {
+                if (!targets.empty()) targets += "\n    ";
+                targets += t;
+            }
+        }
+    }
+    return targets;
+}
+
+} // namespace detail
+
+std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path const& project_root,
+                           std::vector<fetch::FetchedDep> const& deps,
+                           toolchain::Toolchain const& tc, bool with_tests = false,
+                           bool release = false) {
+    std::ostringstream out;
+
+    bool import_std = (m.standard >= 23 &&
+                       (!tc.stdlib_modules_json.empty() || tc.native_import_std));
+
+    detail::emit_cmake_preamble(out, m, import_std);
+    if (tc.is_msvc)
+        detail::emit_msvc_options(out);
 
     // separate deps into regular and dev
     std::vector<fetch::FetchedDep const*> regular_deps, dev_deps;
@@ -236,25 +287,7 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             regular_deps.push_back(&dep);
     }
 
-    // split a space-separated target list
-    auto split_targets = [](std::string_view s) {
-        std::vector<std::string> result;
-        std::size_t i = 0;
-        while (i < s.size()) {
-            while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i])))
-                ++i;
-            std::size_t start = i;
-            while (i < s.size() && !std::isspace(static_cast<unsigned char>(s[i])))
-                ++i;
-            if (start < i)
-                result.emplace_back(s.substr(start, i - start));
-        }
-        return result;
-    };
-
-    // emit find_package() calls
-    for (auto const& [pkg, _] : m.find_deps)
-        out << std::format("find_package({} REQUIRED)\n", pkg);
+    detail::emit_find_packages(out, m, with_tests);
     if (with_tests) {
         for (auto const& [pkg, _] : m.dev_find_deps)
             out << std::format("find_package({} REQUIRED)\n", pkg);
@@ -265,10 +298,10 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
     // collect find_package imported targets for linkage
     std::vector<std::string> find_targets, dev_find_targets;
     for (auto const& [_, tgts] : m.find_deps)
-        for (auto& t : split_targets(tgts))
+        for (auto& t : detail::split_targets(tgts))
             find_targets.push_back(std::move(t));
     for (auto const& [_, tgts] : m.dev_find_deps)
-        for (auto& t : split_targets(tgts))
+        for (auto& t : detail::split_targets(tgts))
             dev_find_targets.push_back(std::move(t));
 
     // emit dependency as static library
@@ -505,25 +538,8 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
     out << "# Generated by exon. Do not edit manually.\n\n";
 
     bool import_std = (m.standard >= 23);
-    if (import_std) {
-        out << "cmake_minimum_required(VERSION 3.30)\n\n";
-        out << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
-        out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n";
-        out << "set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD \"451f2fe2-a8a2-47c3-bc32-94786d8fc91b\")\n";
-        out << "set(CMAKE_CXX_MODULE_STD ON)\n";
-        out << std::format("project({} LANGUAGES CXX)\n\n", m.name);
-    } else {
-        out << "cmake_minimum_required(VERSION 3.28)\n";
-        out << std::format("project({} LANGUAGES CXX)\n\n", m.name);
-        out << std::format("set(CMAKE_CXX_STANDARD {})\n", m.standard);
-        out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
-    }
-
-    // MSVC-specific compile options (no-op on clang/gcc)
-    out << "if(MSVC)\n";
-    out << "    add_compile_options(/W4 /wd4996 /utf-8)\n";
-    out << "    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)\n";
-    out << "endif()\n\n";
+    detail::emit_cmake_preamble(out, m, import_std);
+    detail::emit_msvc_options(out);
 
     auto root = std::filesystem::current_path();
 
@@ -537,22 +553,6 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         bucket.push_back(&dep);
     }
 
-    // split a space-separated target list
-    auto split_targets = [](std::string_view s) {
-        std::vector<std::string> result;
-        std::size_t i = 0;
-        while (i < s.size()) {
-            while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i])))
-                ++i;
-            std::size_t start = i;
-            while (i < s.size() && !std::isspace(static_cast<unsigned char>(s[i])))
-                ++i;
-            if (start < i)
-                result.emplace_back(s.substr(start, i - start));
-        }
-        return result;
-    };
-
     // emit find_package() calls
     for (auto const& [pkg, _] : m.find_deps)
         out << std::format("find_package({} REQUIRED)\n", pkg);
@@ -564,10 +564,10 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
     // collect imported targets
     std::vector<std::string> p_find, p_dev_find;
     for (auto const& [_, tgts] : m.find_deps)
-        for (auto& t : split_targets(tgts))
+        for (auto& t : detail::split_targets(tgts))
             p_find.push_back(std::move(t));
     for (auto const& [_, tgts] : m.dev_find_deps)
-        for (auto& t : split_targets(tgts))
+        for (auto& t : detail::split_targets(tgts))
             p_dev_find.push_back(std::move(t));
 
     // git deps via FetchContent
@@ -743,7 +743,7 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         // collect conditional link targets
         std::vector<std::string> cond_find;
         for (auto const& [_, tgts] : ts.find_deps)
-            for (auto& t : split_targets(tgts))
+            for (auto& t : detail::split_targets(tgts))
                 cond_find.push_back(std::move(t));
         if (!cond_find.empty()) {
             out << std::format("    target_link_libraries({} PUBLIC", link_target);
