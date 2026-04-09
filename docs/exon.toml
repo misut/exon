@@ -7,4 +7,4 @@ standard = 23
 platforms = [{ os = "wasi" }]
 
 [dependencies]
-"github.com/misut/phenotype" = "0.3.0"
+"github.com/misut/phenotype" = "0.4.0"
