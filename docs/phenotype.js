@@ -1,163 +1,622 @@
-// phenotype.js — WASI polyfill + DOM command buffer executor
+// phenotype.js — WASI polyfill + WebGPU 2D renderer
 //
 // Usage:
 //   import { mount } from './phenotype.js';
-//   mount('hello.wasm', document.body);
+//   mount('hello.wasm');
 
-// --- DOM command opcodes (must match phenotype.cppm Cmd enum) ---
+// --- Draw command opcodes (must match phenotype.cppm Cmd enum) ---
 
-const CMD_CREATE_ELEMENT = 1;
-const CMD_SET_TEXT = 2;
-const CMD_APPEND_CHILD = 3;
-const CMD_SET_ATTRIBUTE = 4;
-const CMD_SET_STYLE = 5;
-const CMD_SET_INNER_HTML = 6;
-const CMD_ADD_CLASS = 7;
-const CMD_REMOVE_CHILD = 8;
-const CMD_CLEAR_CHILDREN = 9;
-const CMD_REGISTER_CLICK = 10;
+const CMD_CLEAR      = 1;
+const CMD_FILL_RECT  = 2;
+const CMD_STROKE_RECT = 3;
+const CMD_ROUND_RECT = 4;
+const CMD_DRAW_TEXT  = 5;
+const CMD_DRAW_LINE  = 6;
+const CMD_HIT_REGION = 7;
 
-// --- DOM command buffer executor ---
+// --- Color helpers ---
 
-function createExecutor(instance, rootElement) {
-  const handles = new Map();
-  handles.set(0, rootElement); // handle 0 = root element
+function unpackColor(rgba) {
+  return {
+    r: ((rgba >>> 24) & 0xFF) / 255,
+    g: ((rgba >>> 16) & 0xFF) / 255,
+    b: ((rgba >>>  8) & 0xFF) / 255,
+    a: ((rgba >>>  0) & 0xFF) / 255,
+  };
+}
 
+// --- Text measurement (offscreen canvas) ---
+
+const measureCanvas = new OffscreenCanvas(1, 1);
+const measureCtx = measureCanvas.getContext('2d');
+
+const FONT_SANS = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+const FONT_MONO = '"SF Mono", "Fira Code", "Cascadia Code", monospace';
+
+function fontString(size, mono) {
+  return `${size}px ${mono ? FONT_MONO : FONT_SANS}`;
+}
+
+// --- WGSL Shaders ---
+
+const SHADER_CODE = /* wgsl */`
+struct Uniforms {
+  viewport: vec2f,
+  _pad: vec2f,
+};
+
+@group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
+// --- Color pipeline ---
+
+struct ColorInstance {
+  @location(0) rect: vec4f,    // x, y, w, h
+  @location(1) color: vec4f,   // r, g, b, a
+  @location(2) params: vec4f,  // corner_radius, border_width, type(0=fill,1=stroke,2=round,3=line), 0
+};
+
+struct ColorVsOut {
+  @builtin(position) pos: vec4f,
+  @location(0) color: vec4f,
+  @location(1) local_pos: vec2f,
+  @location(2) rect_size: vec2f,
+  @location(3) params: vec4f,
+};
+
+@vertex fn vs_color(
+  @builtin(vertex_index) vi: u32,
+  @builtin(instance_index) ii: u32,
+  inst: ColorInstance,
+) -> ColorVsOut {
+  // 6 vertices for a quad (two triangles)
+  var corners = array<vec2f, 6>(
+    vec2f(0, 0), vec2f(1, 0), vec2f(0, 1),
+    vec2f(1, 0), vec2f(1, 1), vec2f(0, 1),
+  );
+  let c = corners[vi];
+  let px = inst.rect.x + c.x * inst.rect.z;
+  let py = inst.rect.y + c.y * inst.rect.w;
+  // Convert pixel coords to clip space: [0, width] -> [-1, 1]
+  let cx = (px / uniforms.viewport.x) * 2.0 - 1.0;
+  let cy = 1.0 - (py / uniforms.viewport.y) * 2.0;
+
+  var out: ColorVsOut;
+  out.pos = vec4f(cx, cy, 0, 1);
+  out.color = inst.color;
+  out.local_pos = c * inst.rect.zw; // local pixel coords within rect
+  out.rect_size = inst.rect.zw;
+  out.params = inst.params;
+  return out;
+}
+
+@fragment fn fs_color(in: ColorVsOut) -> @location(0) vec4f {
+  let draw_type = u32(in.params.z);
+  let radius = in.params.x;
+  let border_w = in.params.y;
+
+  // Rounded rect SDF
+  if (draw_type == 2u && radius > 0.0) {
+    let half_size = in.rect_size * 0.5;
+    let p = abs(in.local_pos - half_size) - half_size + vec2f(radius);
+    let d = length(max(p, vec2f(0.0))) - radius;
+    if (d > 0.5) { discard; }
+    let alpha = in.color.a * clamp(0.5 - d, 0.0, 1.0);
+    return vec4f(in.color.rgb * alpha, alpha);
+  }
+
+  // Stroke rect
+  if (draw_type == 1u) {
+    let lp = in.local_pos;
+    let sz = in.rect_size;
+    let bw = border_w;
+    if (lp.x > bw && lp.x < sz.x - bw && lp.y > bw && lp.y < sz.y - bw) {
+      discard;
+    }
+    return in.color;
+  }
+
+  // Line (rendered as thin rect, just fill)
+  if (draw_type == 3u) {
+    return in.color;
+  }
+
+  // Default fill
+  return in.color;
+}
+
+// --- Texture pipeline (text) ---
+
+struct TextInstance {
+  @location(0) rect: vec4f,     // x, y, w, h in screen pixels
+  @location(1) uv_rect: vec4f,  // u, v, uw, vh in [0,1]
+};
+
+struct TextVsOut {
+  @builtin(position) pos: vec4f,
+  @location(0) uv: vec2f,
+};
+
+@vertex fn vs_text(
+  @builtin(vertex_index) vi: u32,
+  inst: TextInstance,
+) -> TextVsOut {
+  var corners = array<vec2f, 6>(
+    vec2f(0, 0), vec2f(1, 0), vec2f(0, 1),
+    vec2f(1, 0), vec2f(1, 1), vec2f(0, 1),
+  );
+  let c = corners[vi];
+  let px = inst.rect.x + c.x * inst.rect.z;
+  let py = inst.rect.y + c.y * inst.rect.w;
+  let cx = (px / uniforms.viewport.x) * 2.0 - 1.0;
+  let cy = 1.0 - (py / uniforms.viewport.y) * 2.0;
+
+  var out: TextVsOut;
+  out.pos = vec4f(cx, cy, 0, 1);
+  out.uv = inst.uv_rect.xy + c * inst.uv_rect.zw;
+  return out;
+}
+
+@group(0) @binding(1) var textAtlas: texture_2d<f32>;
+@group(0) @binding(2) var textSampler: sampler;
+
+@fragment fn fs_text(in: TextVsOut) -> @location(0) vec4f {
+  let sample = textureSample(textAtlas, textSampler, in.uv);
+  if (sample.a < 0.01) { discard; }
+  return sample;
+}
+`;
+
+// --- WebGPU Renderer ---
+
+function createRenderer(device, context, canvas, format) {
+  const shaderModule = device.createShaderModule({ code: SHADER_CODE });
+
+  // Uniform buffer
+  const uniformBuffer = device.createBuffer({
+    size: 16, // vec2f viewport + vec2f pad
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+
+  // Bind group layout
+  const bindGroupLayout = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: 'uniform' } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: 'float' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT,
+        sampler: { type: 'filtering' } },
+    ],
+  });
+
+  const pipelineLayout = device.createPipelineLayout({
+    bindGroupLayouts: [bindGroupLayout],
+  });
+
+  // Color pipeline
+  const colorPipeline = device.createRenderPipeline({
+    layout: pipelineLayout,
+    vertex: {
+      module: shaderModule,
+      entryPoint: 'vs_color',
+      buffers: [{
+        arrayStride: 48, // 4+4+4 vec4f = 12 floats = 48 bytes
+        stepMode: 'instance',
+        attributes: [
+          { shaderLocation: 0, offset: 0, format: 'float32x4' },  // rect
+          { shaderLocation: 1, offset: 16, format: 'float32x4' }, // color
+          { shaderLocation: 2, offset: 32, format: 'float32x4' }, // params
+        ],
+      }],
+    },
+    fragment: {
+      module: shaderModule,
+      entryPoint: 'fs_color',
+      targets: [{ format, blend: {
+        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
+        alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
+      }}],
+    },
+    primitive: { topology: 'triangle-list' },
+  });
+
+  // Text pipeline
+  const textPipeline = device.createRenderPipeline({
+    layout: pipelineLayout,
+    vertex: {
+      module: shaderModule,
+      entryPoint: 'vs_text',
+      buffers: [{
+        arrayStride: 32, // 2 vec4f = 8 floats = 32 bytes
+        stepMode: 'instance',
+        attributes: [
+          { shaderLocation: 0, offset: 0, format: 'float32x4' },  // rect
+          { shaderLocation: 1, offset: 16, format: 'float32x4' }, // uv_rect
+        ],
+      }],
+    },
+    fragment: {
+      module: shaderModule,
+      entryPoint: 'fs_text',
+      targets: [{ format, blend: {
+        color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' },
+        alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' },
+      }}],
+    },
+    primitive: { topology: 'triangle-list' },
+  });
+
+  // Text sampler
+  const textSampler = device.createSampler({
+    magFilter: 'linear',
+    minFilter: 'linear',
+  });
+
+  // Placeholder 1x1 white texture (used when no text)
+  let textAtlasTexture = device.createTexture({
+    size: [1, 1],
+    format: 'rgba8unorm',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST |
+           GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+  device.queue.writeTexture(
+    { texture: textAtlasTexture },
+    new Uint8Array([255, 255, 255, 255]),
+    { bytesPerRow: 4 },
+    [1, 1],
+  );
+
+  let bindGroup = createBindGroup(uniformBuffer, textAtlasTexture, textSampler);
+
+  function createBindGroup(ub, tex, samp) {
+    return device.createBindGroup({
+      layout: bindGroupLayout,
+      entries: [
+        { binding: 0, resource: { buffer: ub } },
+        { binding: 1, resource: tex.createView() },
+        { binding: 2, resource: samp },
+      ],
+    });
+  }
+
+  // Text atlas offscreen canvas
+  const ATLAS_SIZE = 4096;
+  const atlasCanvas = new OffscreenCanvas(ATLAS_SIZE, ATLAS_SIZE);
+  const atlasCtx = atlasCanvas.getContext('2d');
+
+  return {
+    render(colorQuads, textEntries, clearColor) {
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+
+      // Update uniforms (logical pixels)
+      device.queue.writeBuffer(uniformBuffer, 0,
+        new Float32Array([w, h, 0, 0]));
+
+      // --- Build text atlas ---
+      let textInstanceData = null;
+      let textInstanceCount = 0;
+
+      if (textEntries.length > 0) {
+        atlasCtx.clearRect(0, 0, ATLAS_SIZE, ATLAS_SIZE);
+
+        let ax = 0, ay = 0;
+        let rowHeight = 0;
+        const textQuads = [];
+        const padding = 2;
+
+        for (const t of textEntries) {
+          const font = fontString(t.fontSize * dpr, t.mono);
+          atlasCtx.font = font;
+          const metrics = atlasCtx.measureText(t.text);
+          const tw = Math.ceil(metrics.width) + padding * 2;
+          const th = Math.ceil(t.fontSize * dpr * 1.4) + padding * 2;
+
+          // Wrap to next row
+          if (ax + tw > ATLAS_SIZE) {
+            ax = 0;
+            ay += rowHeight;
+            rowHeight = 0;
+          }
+
+          if (ay + th > ATLAS_SIZE) break; // atlas full
+
+          // Draw text
+          atlasCtx.font = font; // re-set after potential clear
+          const { r, g, b, a } = t.color;
+          atlasCtx.fillStyle = `rgba(${Math.round(r*255)},${Math.round(g*255)},${Math.round(b*255)},${a})`;
+          atlasCtx.textBaseline = 'top';
+          atlasCtx.fillText(t.text, ax + padding, ay + padding);
+
+          textQuads.push({
+            // Screen rect (logical pixels)
+            x: t.x, y: t.y,
+            w: (tw - padding * 2) / dpr,
+            h: (th - padding * 2) / dpr,
+            // UV rect
+            u: ax / ATLAS_SIZE,
+            v: ay / ATLAS_SIZE,
+            uw: tw / ATLAS_SIZE,
+            vh: th / ATLAS_SIZE,
+          });
+
+          ax += tw;
+          if (th > rowHeight) rowHeight = th;
+        }
+
+        // Upload atlas to GPU
+        if (textAtlasTexture.width !== ATLAS_SIZE || textAtlasTexture.height !== ATLAS_SIZE) {
+          textAtlasTexture.destroy();
+          textAtlasTexture = device.createTexture({
+            size: [ATLAS_SIZE, ATLAS_SIZE],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST |
+                   GPUTextureUsage.RENDER_ATTACHMENT,
+          });
+        }
+
+        device.queue.copyExternalImageToTexture(
+          { source: atlasCanvas },
+          { texture: textAtlasTexture },
+          [ATLAS_SIZE, ATLAS_SIZE],
+        );
+
+        bindGroup = createBindGroup(uniformBuffer, textAtlasTexture, textSampler);
+
+        // Build text instance buffer
+        textInstanceCount = textQuads.length;
+        const textData = new Float32Array(textInstanceCount * 8);
+        for (let i = 0; i < textInstanceCount; i++) {
+          const q = textQuads[i];
+          textData[i * 8 + 0] = q.x;
+          textData[i * 8 + 1] = q.y;
+          textData[i * 8 + 2] = q.w;
+          textData[i * 8 + 3] = q.h;
+          textData[i * 8 + 4] = q.u;
+          textData[i * 8 + 5] = q.v;
+          textData[i * 8 + 6] = q.uw;
+          textData[i * 8 + 7] = q.vh;
+        }
+        textInstanceData = textData;
+      }
+
+      // --- Build color instance buffer ---
+      const colorCount = colorQuads.length;
+      const colorData = new Float32Array(colorCount * 12);
+      for (let i = 0; i < colorCount; i++) {
+        const q = colorQuads[i];
+        // rect
+        colorData[i * 12 + 0] = q.x;
+        colorData[i * 12 + 1] = q.y;
+        colorData[i * 12 + 2] = q.w;
+        colorData[i * 12 + 3] = q.h;
+        // color
+        colorData[i * 12 + 4] = q.r;
+        colorData[i * 12 + 5] = q.g;
+        colorData[i * 12 + 6] = q.b;
+        colorData[i * 12 + 7] = q.a;
+        // params: radius, border_width, type, 0
+        colorData[i * 12 + 8] = q.radius || 0;
+        colorData[i * 12 + 9] = q.borderWidth || 0;
+        colorData[i * 12 + 10] = q.type || 0;
+        colorData[i * 12 + 11] = 0;
+      }
+
+      // --- GPU render ---
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: context.getCurrentTexture().createView(),
+          clearValue: clearColor,
+          loadOp: 'clear',
+          storeOp: 'store',
+        }],
+      });
+
+      pass.setBindGroup(0, bindGroup);
+
+      // Color quads
+      if (colorCount > 0) {
+        const colorBuf = device.createBuffer({
+          size: colorData.byteLength,
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+          mappedAtCreation: true,
+        });
+        new Float32Array(colorBuf.getMappedRange()).set(colorData);
+        colorBuf.unmap();
+        pass.setPipeline(colorPipeline);
+        pass.setVertexBuffer(0, colorBuf);
+        pass.draw(6, colorCount);
+      }
+
+      // Text quads
+      if (textInstanceCount > 0 && textInstanceData) {
+        const textBuf = device.createBuffer({
+          size: textInstanceData.byteLength,
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+          mappedAtCreation: true,
+        });
+        new Float32Array(textBuf.getMappedRange()).set(textInstanceData);
+        textBuf.unmap();
+        pass.setPipeline(textPipeline);
+        pass.setVertexBuffer(0, textBuf);
+        pass.draw(6, textInstanceCount);
+      }
+
+      pass.end();
+      device.queue.submit([encoder.finish()]);
+    },
+  };
+}
+
+// --- Command buffer parser ---
+
+function parseCommands(instance) {
+  const mem = instance.exports.memory.buffer;
+  const bufOffset = instance.exports.phenotype_get_cmd_buf();
+  const bufLen = instance.exports.phenotype_get_cmd_len();
+  if (bufLen === 0) return { quads: [], texts: [], hitRegions: [], clearColor: { r: 0.98, g: 0.98, b: 0.98, a: 1 } };
+
+  const bytes = new Uint8Array(mem);
+  const view = new DataView(mem);
+  let pos = bufOffset;
+  const end = bufOffset + bufLen;
   const decoder = new TextDecoder();
-  function readString(bytes, offset, len) {
+
+  function readStr(offset, len) {
     return decoder.decode(bytes.slice(offset, offset + len));
   }
-
-  function align4(pos) {
-    return (pos + 3) & ~3;
+  function align4(p) {
+    return (p + 3) & ~3;
   }
 
-  return function flush() {
-    const mem = instance.exports.memory.buffer;
-    const bufOffset = instance.exports.phenotype_get_cmd_buf();
-    const bufLen = instance.exports.phenotype_get_cmd_len();
-    if (bufLen === 0) return;
+  const quads = [];
+  const texts = [];
+  const hitRegions = [];
+  let clearColor = { r: 0.98, g: 0.98, b: 0.98, a: 1 };
 
-    const bytes = new Uint8Array(mem);
-    const view = new DataView(mem);
-    let pos = bufOffset;
-    const end = bufOffset + bufLen;
+  while (pos < end) {
+    const cmd = view.getUint32(pos, true); pos += 4;
 
-    while (pos < end) {
-      const cmd = view.getUint32(pos, true); pos += 4;
-
-      switch (cmd) {
-        case CMD_CREATE_ELEMENT: {
-          const handle = view.getUint32(pos, true); pos += 4;
-          const tagLen = view.getUint32(pos, true); pos += 4;
-          const tag = readString(bytes, pos, tagLen);
-          pos = align4(pos + tagLen);
-          handles.set(handle, document.createElement(tag));
-          break;
-        }
-        case CMD_SET_TEXT: {
-          const handle = view.getUint32(pos, true); pos += 4;
-          const textLen = view.getUint32(pos, true); pos += 4;
-          const text = readString(bytes, pos, textLen);
-          pos = align4(pos + textLen);
-          const el = handles.get(handle);
-          if (el) el.textContent = text;
-          break;
-        }
-        case CMD_APPEND_CHILD: {
-          const parent = view.getUint32(pos, true); pos += 4;
-          const child = view.getUint32(pos, true); pos += 4;
-          const parentEl = handles.get(parent);
-          const childEl = handles.get(child);
-          if (parentEl && childEl) parentEl.appendChild(childEl);
-          break;
-        }
-        case CMD_SET_ATTRIBUTE: {
-          const handle = view.getUint32(pos, true); pos += 4;
-          const keyLen = view.getUint32(pos, true); pos += 4;
-          const key = readString(bytes, pos, keyLen);
-          pos = align4(pos + keyLen);
-          const valLen = view.getUint32(pos, true); pos += 4;
-          const val = readString(bytes, pos, valLen);
-          pos = align4(pos + valLen);
-          const el = handles.get(handle);
-          if (el) el.setAttribute(key, val);
-          break;
-        }
-        case CMD_SET_STYLE: {
-          const handle = view.getUint32(pos, true); pos += 4;
-          const propLen = view.getUint32(pos, true); pos += 4;
-          const prop = readString(bytes, pos, propLen);
-          pos = align4(pos + propLen);
-          const valLen = view.getUint32(pos, true); pos += 4;
-          const val = readString(bytes, pos, valLen);
-          pos = align4(pos + valLen);
-          const el = handles.get(handle);
-          if (el) el.style[prop] = val;
-          break;
-        }
-        case CMD_SET_INNER_HTML: {
-          const handle = view.getUint32(pos, true); pos += 4;
-          const htmlLen = view.getUint32(pos, true); pos += 4;
-          const html = readString(bytes, pos, htmlLen);
-          pos = align4(pos + htmlLen);
-          const el = handles.get(handle);
-          if (el) el.innerHTML = html;
-          break;
-        }
-        case CMD_ADD_CLASS: {
-          const handle = view.getUint32(pos, true); pos += 4;
-          const clsLen = view.getUint32(pos, true); pos += 4;
-          const cls = readString(bytes, pos, clsLen);
-          pos = align4(pos + clsLen);
-          const el = handles.get(handle);
-          if (el) el.classList.add(cls);
-          break;
-        }
-        case CMD_REMOVE_CHILD: {
-          const parent = view.getUint32(pos, true); pos += 4;
-          const child = view.getUint32(pos, true); pos += 4;
-          const parentEl = handles.get(parent);
-          const childEl = handles.get(child);
-          if (parentEl && childEl) parentEl.removeChild(childEl);
-          break;
-        }
-        case CMD_CLEAR_CHILDREN: {
-          const handle = view.getUint32(pos, true); pos += 4;
-          const el = handles.get(handle);
-          if (el) el.innerHTML = '';
-          break;
-        }
-        case CMD_REGISTER_CLICK: {
-          const handle = view.getUint32(pos, true); pos += 4;
-          const callbackId = view.getUint32(pos, true); pos += 4;
-          const el = handles.get(handle);
-          if (el) {
-            el.addEventListener('click', () => {
-              instance.exports.phenotype_handle_event(callbackId);
-            });
-          }
-          break;
-        }
-        default:
-          console.error(`phenotype: unknown command ${cmd} at offset ${pos - 4}`);
-          return;
+    switch (cmd) {
+      case CMD_CLEAR: {
+        const rgba = view.getUint32(pos, true); pos += 4;
+        clearColor = unpackColor(rgba);
+        break;
       }
+      case CMD_FILL_RECT: {
+        const x = view.getFloat32(pos, true); pos += 4;
+        const y = view.getFloat32(pos, true); pos += 4;
+        const w = view.getFloat32(pos, true); pos += 4;
+        const h = view.getFloat32(pos, true); pos += 4;
+        const rgba = view.getUint32(pos, true); pos += 4;
+        const c = unpackColor(rgba);
+        quads.push({ x, y, w, h, r: c.r, g: c.g, b: c.b, a: c.a, type: 0 });
+        break;
+      }
+      case CMD_STROKE_RECT: {
+        const x = view.getFloat32(pos, true); pos += 4;
+        const y = view.getFloat32(pos, true); pos += 4;
+        const w = view.getFloat32(pos, true); pos += 4;
+        const h = view.getFloat32(pos, true); pos += 4;
+        const lw = view.getFloat32(pos, true); pos += 4;
+        const rgba = view.getUint32(pos, true); pos += 4;
+        const c = unpackColor(rgba);
+        quads.push({ x, y, w, h, r: c.r, g: c.g, b: c.b, a: c.a, type: 1, borderWidth: lw });
+        break;
+      }
+      case CMD_ROUND_RECT: {
+        const x = view.getFloat32(pos, true); pos += 4;
+        const y = view.getFloat32(pos, true); pos += 4;
+        const w = view.getFloat32(pos, true); pos += 4;
+        const h = view.getFloat32(pos, true); pos += 4;
+        const radius = view.getFloat32(pos, true); pos += 4;
+        const rgba = view.getUint32(pos, true); pos += 4;
+        const c = unpackColor(rgba);
+        quads.push({ x, y, w, h, r: c.r, g: c.g, b: c.b, a: c.a, type: 2, radius });
+        break;
+      }
+      case CMD_DRAW_TEXT: {
+        const x = view.getFloat32(pos, true); pos += 4;
+        const y = view.getFloat32(pos, true); pos += 4;
+        const fontSize = view.getFloat32(pos, true); pos += 4;
+        const mono = view.getUint32(pos, true); pos += 4;
+        const rgba = view.getUint32(pos, true); pos += 4;
+        const len = view.getUint32(pos, true); pos += 4;
+        const text = readStr(pos, len);
+        pos = align4(pos + len);
+        const c = unpackColor(rgba);
+        texts.push({ x, y, fontSize, mono: !!mono, text, color: c });
+        break;
+      }
+      case CMD_DRAW_LINE: {
+        const x1 = view.getFloat32(pos, true); pos += 4;
+        const y1 = view.getFloat32(pos, true); pos += 4;
+        const x2 = view.getFloat32(pos, true); pos += 4;
+        const y2 = view.getFloat32(pos, true); pos += 4;
+        const thickness = view.getFloat32(pos, true); pos += 4;
+        const rgba = view.getUint32(pos, true); pos += 4;
+        const c = unpackColor(rgba);
+        // Represent line as a thin rect
+        const dx = x2 - x1, dy = y2 - y1;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (Math.abs(dy) < 0.01) {
+          // Horizontal line
+          quads.push({ x: Math.min(x1, x2), y: y1 - thickness / 2, w: Math.abs(dx), h: thickness,
+            r: c.r, g: c.g, b: c.b, a: c.a, type: 3 });
+        } else if (Math.abs(dx) < 0.01) {
+          // Vertical line
+          quads.push({ x: x1 - thickness / 2, y: Math.min(y1, y2), w: thickness, h: Math.abs(dy),
+            r: c.r, g: c.g, b: c.b, a: c.a, type: 3 });
+        }
+        // Diagonal lines not needed for UI
+        break;
+      }
+      case CMD_HIT_REGION: {
+        const x = view.getFloat32(pos, true); pos += 4;
+        const y = view.getFloat32(pos, true); pos += 4;
+        const w = view.getFloat32(pos, true); pos += 4;
+        const h = view.getFloat32(pos, true); pos += 4;
+        const callbackId = view.getUint32(pos, true); pos += 4;
+        const cursorType = view.getUint32(pos, true); pos += 4;
+        hitRegions.push({ x, y, w, h, callbackId, cursorType });
+        break;
+      }
+      default:
+        console.error(`phenotype: unknown command ${cmd} at offset ${pos - 4}`);
+        return { quads, texts, hitRegions, clearColor };
     }
-  };
+  }
+
+  return { quads, texts, hitRegions, clearColor };
 }
 
 // --- Loader ---
 
 export async function mount(wasmUrl, rootElement = document.body) {
-  let inst = null;
-
-  function getMemory() {
-    return inst.exports.memory;
+  // --- WebGPU init ---
+  if (!navigator.gpu) {
+    rootElement.textContent = 'WebGPU is not supported in this browser.';
+    return;
   }
 
-  let executor = null;
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) {
+    rootElement.textContent = 'Failed to get WebGPU adapter.';
+    return;
+  }
 
+  const device = await adapter.requestDevice();
+  const canvas = document.createElement('canvas');
+  canvas.style.width = '100%';
+  canvas.style.height = '100vh';
+  canvas.style.display = 'block';
+  rootElement.appendChild(canvas);
+
+  const gpuContext = canvas.getContext('webgpu');
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  gpuContext.configure({ device, format, alphaMode: 'premultiplied' });
+
+  const renderer = createRenderer(device, gpuContext, canvas, format);
+
+  // --- WASM state ---
+  let inst = null;
+  let hitRegions = [];
+  let scrollY = 0;
+  let totalHeight = 0;
+
+  function getMemory() { return inst.exports.memory; }
+
+  function doFlush() {
+    const parsed = parseCommands(inst);
+    hitRegions = parsed.hitRegions;
+    renderer.render(parsed.quads, parsed.texts, parsed.clearColor);
+  }
+
+  // --- WASI polyfill ---
   const wasiImports = {
     fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) {
       const mem = new DataView(getMemory().buffer);
@@ -204,12 +663,33 @@ export async function mount(wasmUrl, rootElement = document.body) {
     },
   };
 
+  // --- Phenotype WASM imports ---
   const phenotypeImports = {
-    flush() {
-      if (executor) executor();
+    flush() { doFlush(); },
+
+    measure_text(fontSize, mono, textPtr, textLen) {
+      const bytes = new Uint8Array(getMemory().buffer);
+      const text = new TextDecoder().decode(bytes.slice(textPtr, textPtr + textLen));
+      measureCtx.font = fontString(fontSize, mono);
+      return measureCtx.measureText(text).width;
+    },
+
+    get_canvas_width() {
+      return canvas.clientWidth;
+    },
+
+    get_canvas_height() {
+      return canvas.clientHeight;
+    },
+
+    open_url(urlPtr, urlLen) {
+      const bytes = new Uint8Array(getMemory().buffer);
+      const url = new TextDecoder().decode(bytes.slice(urlPtr, urlPtr + urlLen));
+      window.open(url, '_blank');
     },
   };
 
+  // --- Instantiate WASM ---
   const result = await WebAssembly.instantiateStreaming(
     fetch(wasmUrl),
     {
@@ -218,9 +698,68 @@ export async function mount(wasmUrl, rootElement = document.body) {
     }
   );
   inst = result.instance;
-  executor = createExecutor(inst, rootElement);
 
   if (inst.exports._start) {
     inst.exports._start();
   }
+
+  if (inst.exports.phenotype_get_total_height) {
+    totalHeight = inst.exports.phenotype_get_total_height();
+  }
+
+  // --- Events ---
+
+  function hitTest(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const x = clientX - rect.left;
+    const y = clientY - rect.top + scrollY;
+    for (let i = hitRegions.length - 1; i >= 0; i--) {
+      const hr = hitRegions[i];
+      if (x >= hr.x && x <= hr.x + hr.w && y >= hr.y && y <= hr.y + hr.h) {
+        return hr;
+      }
+    }
+    return null;
+  }
+
+  canvas.addEventListener('click', (e) => {
+    const hr = hitTest(e.clientX, e.clientY);
+    if (hr && inst.exports.phenotype_handle_event) {
+      inst.exports.phenotype_handle_event(hr.callbackId);
+      if (inst.exports.phenotype_get_total_height) {
+        totalHeight = inst.exports.phenotype_get_total_height();
+      }
+    }
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    const hr = hitTest(e.clientX, e.clientY);
+    canvas.style.cursor = (hr && hr.cursorType === 1) ? 'pointer' : 'default';
+  });
+
+  // Scroll
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const maxScroll = Math.max(0, totalHeight - canvas.clientHeight);
+    scrollY = Math.max(0, Math.min(scrollY + e.deltaY, maxScroll));
+    if (inst.exports.phenotype_repaint) {
+      inst.exports.phenotype_repaint(scrollY);
+      doFlush();
+    }
+  }, { passive: false });
+
+  // Resize
+  let resizeRAF = 0;
+  window.addEventListener('resize', () => {
+    cancelAnimationFrame(resizeRAF);
+    resizeRAF = requestAnimationFrame(() => {
+      if (inst.exports.phenotype_repaint) {
+        inst.exports.phenotype_repaint(scrollY);
+        doFlush();
+        if (inst.exports.phenotype_get_total_height) {
+          totalHeight = inst.exports.phenotype_get_total_height();
+        }
+      }
+    });
+  });
 }
