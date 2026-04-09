@@ -210,7 +210,9 @@ int cmd_info() {
     return 0;
 }
 
-int cmd_build(int argc, char* argv[]) {
+using BuildFn = int(*)(manifest::Manifest const&, bool, std::string_view);
+
+int run_build_command(int argc, char* argv[], BuildFn fn) {
     try {
         auto args = cli::parse(argc, argv, 2, build_defs);
         auto release = args.has("--release");
@@ -220,48 +222,29 @@ int cmd_build(int argc, char* argv[]) {
             return 1;
         m = resolve_manifest(std::move(m), target);
         if (manifest::is_workspace(m)) {
-            return run_for_workspace(m, [release, &target](auto const&) {
+            return run_for_workspace(m, [&](auto const&) {
                 auto member_m = manifest::load("exon.toml");
                 if (!check_platform(member_m, target))
                     return 1;
                 member_m = resolve_manifest(std::move(member_m), target);
-                return build::run(member_m, release, target);
+                return fn(member_m, release, target);
             });
         }
         if (m.name.empty())
             return cli::error("package name is required in exon.toml");
-        return build::run(m, release, target);
+        return fn(m, release, target);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
     }
 }
 
+int cmd_build(int argc, char* argv[]) {
+    return run_build_command(argc, argv, build::run);
+}
+
 int cmd_check(int argc, char* argv[]) {
-    try {
-        auto args = cli::parse(argc, argv, 2, build_defs);
-        auto release = args.has("--release");
-        auto target = std::string{args.get("--target")};
-        auto m = load_manifest();
-        if (!check_platform(m, target))
-            return 1;
-        m = resolve_manifest(std::move(m), target);
-        if (manifest::is_workspace(m)) {
-            return run_for_workspace(m, [release, &target](auto const&) {
-                auto member_m = manifest::load("exon.toml");
-                if (!check_platform(member_m, target))
-                    return 1;
-                member_m = resolve_manifest(std::move(member_m), target);
-                return build::run_check(member_m, release, target);
-            });
-        }
-        if (m.name.empty())
-            return cli::error("package name is required in exon.toml");
-        return build::run_check(m, release, target);
-    } catch (std::exception const& e) {
-        std::println(std::cerr, "error: {}", e.what());
-        return 1;
-    }
+    return run_build_command(argc, argv, build::run_check);
 }
 
 int cmd_run(int argc, char* argv[]) {
@@ -310,30 +293,7 @@ int cmd_run(int argc, char* argv[]) {
 }
 
 int cmd_test(int argc, char* argv[]) {
-    try {
-        auto args = cli::parse(argc, argv, 2, build_defs);
-        auto release = args.has("--release");
-        auto target = std::string{args.get("--target")};
-        auto m = load_manifest();
-        if (!check_platform(m, target))
-            return 1;
-        m = resolve_manifest(std::move(m), target);
-        if (manifest::is_workspace(m)) {
-            return run_for_workspace(m, [release, &target](auto const&) {
-                auto member_m = manifest::load("exon.toml");
-                if (!check_platform(member_m, target))
-                    return 1;
-                member_m = resolve_manifest(std::move(member_m), target);
-                return build::run_test(member_m, release, target);
-            });
-        }
-        if (m.name.empty())
-            return cli::error("package name is required in exon.toml");
-        return build::run_test(m, release, target);
-    } catch (std::exception const& e) {
-        std::println(std::cerr, "error: {}", e.what());
-        return 1;
-    }
+    return run_build_command(argc, argv, build::run_test);
 }
 
 int cmd_clean() {
