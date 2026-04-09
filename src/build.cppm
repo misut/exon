@@ -111,8 +111,9 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
                                toolchain::shell_quote(tc.cxx_compiler));
         // WASI: disable exceptions (libc++abi lacks exception support)
         cmd += " \"-DCMAKE_CXX_FLAGS=-fno-exceptions -D_LIBCPP_NO_EXCEPTIONS\"";
-        // WASI: ensure enough heap for C++ stdlib allocations (16MB)
-        cmd += " \"-DCMAKE_EXE_LINKER_FLAGS=-Wl,--initial-heap=16777216\"";
+        // WASI: let dlmalloc/sbrk manage heap growth via memory.grow.
+        // Do NOT use --initial-heap or --initial-memory; these corrupt the
+        // allocator's heap metadata and cause abort on the first allocation.
         return cmd;
     }
 
