@@ -112,7 +112,8 @@ std::vector<cli::ArgDef> const build_defs = {
 };
 
 std::string read_file(std::string_view path) {
-    auto file = std::ifstream(std::string{path});
+    auto file = std::ifstream(std::string{path}, std::ios::binary);
+    if (!file) return {};
     return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
 }
 
