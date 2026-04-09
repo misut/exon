@@ -111,6 +111,8 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
                                toolchain::shell_quote(tc.cxx_compiler));
         // WASI: disable exceptions (libc++abi lacks exception support)
         cmd += " \"-DCMAKE_CXX_FLAGS=-fno-exceptions -D_LIBCPP_NO_EXCEPTIONS\"";
+        // WASI: increase default memory (16MB initial, growable to 256MB)
+        cmd += " \"-DCMAKE_EXE_LINKER_FLAGS=-Wl,--initial-memory=16777216,--max-memory=268435456\"";
         return cmd;
     }
 
