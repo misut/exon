@@ -123,7 +123,25 @@ MY_FLAG = "value"
 
 [defines.debug]
 DEBUG_MODE = "1"
+
+[build]                                    # raw compile/link flags
+cxxflags = ["-Wall", "-Wextra"]
+
+[build.debug]
+cxxflags = ["-g", "-fsanitize=address"]
+ldflags  = ["-fsanitize=address"]
 ```
+
+### Build flags
+
+The `[build]` section forwards raw flags to the compiler and linker. Profile-specific subsections (`[build.debug]`, `[build.release]`) merge on top of the base. Two environment variables append at the end so CI can inject flags without editing `exon.toml`:
+
+```sh
+EXON_CXXFLAGS="-fsanitize=address,undefined" exon test
+EXON_LDFLAGS="-fsanitize=address,undefined" exon test
+```
+
+Common uses: sanitizers (`-fsanitize=address`), coverage (`--coverage`), warnings, profile-guided optimization. For `[defines]`-style preprocessor macros, prefer `[defines]` instead — exon escapes them per-target.
 
 ## Dependencies
 

@@ -4,6 +4,11 @@ import manifest;
 import fetch;
 import toolchain;
 
+#if !defined(_WIN32)
+extern "C" int setenv(char const* name, char const* value, int overwrite);
+extern "C" int unsetenv(char const* name);
+#endif
+
 #if defined(_WIN32)
 // Disable Windows crash dialogs so failures surface as exit codes instead of blocking UI.
 extern "C" unsigned int __stdcall SetErrorMode(unsigned int);
@@ -363,6 +368,72 @@ void test_no_import_std_below_23() {
     check(cmake.contains("CMAKE_CXX_STANDARD 20"), "standard 20");
 }
 
+void test_user_cxxflags_basic() {
+    manifest::Manifest m;
+    m.build.cxxflags = {"-Wall", "-Wextra"};
+    m.build_debug.cxxflags = {"-g", "-fsanitize=address"};
+    m.build_release.cxxflags = {"-O3"};
+
+    auto debug = build::user_cxxflags(m, false);
+    check(debug == "-Wall -Wextra -g -fsanitize=address",
+          "user_cxxflags: debug joins base + debug profile");
+
+    auto release = build::user_cxxflags(m, true);
+    check(release == "-Wall -Wextra -O3",
+          "user_cxxflags: release joins base + release profile");
+}
+
+void test_user_ldflags_basic() {
+    manifest::Manifest m;
+    m.build.ldflags = {"-Wl,--gc-sections"};
+    m.build_debug.ldflags = {"-fsanitize=address"};
+
+    auto debug = build::user_ldflags(m, false);
+    check(debug == "-Wl,--gc-sections -fsanitize=address",
+          "user_ldflags: debug joins base + debug profile");
+
+    auto release = build::user_ldflags(m, true);
+    check(release == "-Wl,--gc-sections",
+          "user_ldflags: release with no release profile");
+}
+
+void test_user_flags_empty() {
+    manifest::Manifest m;
+    check(build::user_cxxflags(m, false).empty(), "user_cxxflags: empty when nothing set");
+    check(build::user_ldflags(m, true).empty(), "user_ldflags: empty when nothing set");
+}
+
+void test_user_cxxflags_env_override() {
+    // Use a unique env var name to avoid contaminating other tests
+    manifest::Manifest m;
+    m.build.cxxflags = {"-Wall"};
+
+    // Default state (no env var)
+#if defined(_WIN32)
+    _putenv("EXON_CXXFLAGS=");
+#else
+    unsetenv("EXON_CXXFLAGS");
+#endif
+    check(build::user_cxxflags(m, false) == "-Wall", "user_cxxflags: no env var");
+
+    // Set env var
+#if defined(_WIN32)
+    _putenv("EXON_CXXFLAGS=-fsanitize=address -g");
+#else
+    setenv("EXON_CXXFLAGS", "-fsanitize=address -g", 1);
+#endif
+    auto with_env = build::user_cxxflags(m, false);
+    check(with_env == "-Wall -fsanitize=address -g",
+          "user_cxxflags: env var appended after manifest flags");
+
+    // Cleanup
+#if defined(_WIN32)
+    _putenv("EXON_CXXFLAGS=");
+#else
+    unsetenv("EXON_CXXFLAGS");
+#endif
+}
+
 int main() {
     test_basic_bin();
     test_lib_with_modules();
@@ -376,6 +447,10 @@ int main() {
     test_dev_find_deps();
     test_path_dep_in_generate_cmake();
     test_no_import_std_below_23();
+    test_user_cxxflags_basic();
+    test_user_ldflags_basic();
+    test_user_flags_empty();
+    test_user_cxxflags_env_override();
 
     if (failures > 0) {
         std::println("{} test(s) failed", failures);

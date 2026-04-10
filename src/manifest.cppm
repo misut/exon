@@ -83,6 +83,11 @@ bool eval_predicate(std::string_view pred, toolchain::Platform const& target) {
     return parsed.negated ? !match : match;
 }
 
+struct Build {
+    std::vector<std::string> cxxflags;
+    std::vector<std::string> ldflags;
+};
+
 struct TargetSection {
     std::string predicate;
     std::map<std::string, std::string> dependencies;
@@ -127,6 +132,9 @@ struct Manifest {
     std::map<std::string, std::string> defines;         // [defines]
     std::map<std::string, std::string> defines_debug;   // [defines.debug]
     std::map<std::string, std::string> defines_release;  // [defines.release]
+    Build build;                                         // [build]
+    Build build_debug;                                   // [build.debug]
+    Build build_release;                                 // [build.release]
     std::vector<std::string> workspace_members; // workspace member paths
 };
 
@@ -306,6 +314,28 @@ Manifest from_toml(toml::Table const& table) {
                 }
             }
         }
+    }
+
+    auto parse_build_table = [](toml::Table const& bt, Build& out) {
+        if (bt.contains("cxxflags")) {
+            auto const& arr = bt.at("cxxflags").as_array();
+            for (auto const& v : arr)
+                out.cxxflags.push_back(v.as_string());
+        }
+        if (bt.contains("ldflags")) {
+            auto const& arr = bt.at("ldflags").as_array();
+            for (auto const& v : arr)
+                out.ldflags.push_back(v.as_string());
+        }
+    };
+
+    if (table.contains("build")) {
+        auto const& bt = table.at("build").as_table();
+        parse_build_table(bt, m.build);
+        if (bt.contains("debug") && bt.at("debug").is_table())
+            parse_build_table(bt.at("debug").as_table(), m.build_debug);
+        if (bt.contains("release") && bt.at("release").is_table())
+            parse_build_table(bt.at("release").as_table(), m.build_release);
     }
 
     // parse [target.'predicate'.dependencies/dev-dependencies/defines]

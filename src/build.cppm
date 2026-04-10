@@ -8,6 +8,35 @@ import vcpkg;
 
 export namespace build {
 
+// Join user-supplied compile/link flags from [build] sections + env var.
+// Order: manifest [build] (always) → manifest [build.debug|release] (profile) → env var.
+// Env var goes last so it overrides (CMake processes flags left-to-right).
+std::string join_user_flags(std::vector<std::string> const& base,
+                            std::vector<std::string> const& profile,
+                            char const* env_name) {
+    std::string out;
+    auto append = [&](std::string_view flag) {
+        if (flag.empty()) return;
+        if (!out.empty()) out += ' ';
+        out += flag;
+    };
+    for (auto const& f : base) append(f);
+    for (auto const& f : profile) append(f);
+    if (auto const* env = std::getenv(env_name); env && *env)
+        append(env);
+    return out;
+}
+
+std::string user_cxxflags(manifest::Manifest const& m, bool release) {
+    auto const& profile = release ? m.build_release.cxxflags : m.build_debug.cxxflags;
+    return join_user_flags(m.build.cxxflags, profile, "EXON_CXXFLAGS");
+}
+
+std::string user_ldflags(manifest::Manifest const& m, bool release) {
+    auto const& profile = release ? m.build_release.ldflags : m.build_debug.ldflags;
+    return join_user_flags(m.build.ldflags, profile, "EXON_LDFLAGS");
+}
+
 namespace detail {
 
 struct SourceFiles {
@@ -110,7 +139,16 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
             cmd += std::format(" -DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS={}",
                                toolchain::shell_quote(tc.cxx_compiler));
         // WASI: disable exceptions (libc++abi lacks exception support)
-        cmd += " \"-DCMAKE_CXX_FLAGS=-fno-exceptions -D_LIBCPP_NO_EXCEPTIONS\"";
+        std::string wasm_cxx = "-fno-exceptions -D_LIBCPP_NO_EXCEPTIONS";
+        auto wasm_extra_cxx = user_cxxflags(m, release);
+        if (!wasm_extra_cxx.empty()) {
+            wasm_cxx += ' ';
+            wasm_cxx += wasm_extra_cxx;
+        }
+        cmd += std::format(" \"-DCMAKE_CXX_FLAGS={}\"", wasm_cxx);
+        auto wasm_extra_ld = user_ldflags(m, release);
+        if (!wasm_extra_ld.empty())
+            cmd += std::format(" \"-DCMAKE_EXE_LINKER_FLAGS={}\"", wasm_extra_ld);
         // WASI: let dlmalloc/sbrk manage heap growth via memory.grow.
         // Do NOT use --initial-heap or --initial-memory; these corrupt the
         // allocator's heap metadata and cause abort on the first allocation.
@@ -129,10 +167,22 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
     }
 
     auto flags = resolve_flags(tc, m, release);
-    if (!flags.cxx_flags.empty())
-        cmd += std::format(" -DCMAKE_CXX_FLAGS=\"{}\"", flags.cxx_flags);
-    if (!flags.linker_flags.empty())
-        cmd += std::format(" -DCMAKE_EXE_LINKER_FLAGS=\"{}\"", flags.linker_flags);
+    auto extra_cxx = user_cxxflags(m, release);
+    auto extra_ld = user_ldflags(m, release);
+
+    auto combine = [](std::string_view a, std::string_view b) {
+        if (a.empty()) return std::string{b};
+        if (b.empty()) return std::string{a};
+        return std::format("{} {}", a, b);
+    };
+
+    auto cxx = combine(flags.cxx_flags, extra_cxx);
+    auto ld = combine(flags.linker_flags, extra_ld);
+
+    if (!cxx.empty())
+        cmd += std::format(" -DCMAKE_CXX_FLAGS=\"{}\"", cxx);
+    if (!ld.empty())
+        cmd += std::format(" -DCMAKE_EXE_LINKER_FLAGS=\"{}\"", ld);
     if (!flags.standard_libraries.empty())
         cmd += std::format(" -DCMAKE_CXX_STANDARD_LIBRARIES=\"{}\"", flags.standard_libraries);
 
