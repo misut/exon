@@ -9,6 +9,9 @@ on:
       - "LICENSE"
       - ".editorconfig"
       - ".gitignore"
+      - "mise.toml"
+      - ".intron.toml"
+      - ".claude/**"
   pull_request:
     branches: [main]
     paths-ignore:
@@ -17,6 +20,9 @@ on:
       - "LICENSE"
       - ".editorconfig"
       - ".gitignore"
+      - "mise.toml"
+      - ".intron.toml"
+      - ".claude/**"
 
 jobs:
   build:
@@ -36,7 +42,7 @@ jobs:
 
       - name: Install intron
         run: |
-          gh release download v0.7.0 -R misut/intron -p "intron-*-${{ matrix.platform }}.tar.gz"
+          gh release download v0.14.0 -R misut/intron -p "intron-*-${{ matrix.platform }}.tar.gz"
           tar xzf intron-*.tar.gz && rm intron-*.tar.gz
           mkdir -p "$HOME/.intron/bin" && mv intron "$HOME/.intron/bin/"
           echo "$HOME/.intron/bin" >> $GITHUB_PATH
