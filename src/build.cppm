@@ -907,8 +907,8 @@ int run_check(manifest::Manifest const& m, bool release = false, std::string_vie
     if (is_wasm) {
         auto wasm_tc = toolchain::detect_wasm(target);
         wasm_toolchain_file = wasm_tc.cmake_toolchain;
-        if (!wasm_tc.modules_json.empty())
-            tc.stdlib_modules_json = wasm_tc.modules_json;
+        // import std; is unsupported on WASM (csetjmp/csignal headers fail)
+        tc.stdlib_modules_json.clear();
         tc.cxx_compiler = wasm_tc.scan_deps; // repurpose for host clang-scan-deps
         tc.sysroot.clear();
         tc.lib_dir.clear();
@@ -992,8 +992,8 @@ int run_test(manifest::Manifest const& m, bool release = false, std::string_view
     if (is_wasm) {
         auto wasm_tc = toolchain::detect_wasm(target);
         wasm_toolchain_file = wasm_tc.cmake_toolchain;
-        if (!wasm_tc.modules_json.empty())
-            tc.stdlib_modules_json = wasm_tc.modules_json;
+        // import std; is unsupported on WASM (csetjmp/csignal headers fail)
+        tc.stdlib_modules_json.clear();
         tc.cxx_compiler = wasm_tc.scan_deps; // repurpose for host clang-scan-deps
         tc.sysroot.clear();
         tc.lib_dir.clear();
