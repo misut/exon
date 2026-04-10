@@ -139,6 +139,61 @@ version = "1.0.0"
     check(m.dev_dependencies.at("github.com/user/testlib") == "0.2.0", "dev-deps: version");
 }
 
+void test_build_section() {
+    auto input = R"(
+[package]
+name = "app"
+version = "1.0.0"
+
+[build]
+cxxflags = ["-Wall", "-Wextra"]
+ldflags = ["-Wl,--gc-sections"]
+
+[build.debug]
+cxxflags = ["-g", "-fsanitize=address"]
+ldflags = ["-fsanitize=address"]
+
+[build.release]
+cxxflags = ["-O3", "-DNDEBUG"]
+)";
+
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    check(m.build.cxxflags.size() == 2, "build: 2 cxxflags");
+    check(m.build.cxxflags[0] == "-Wall", "build: cxxflags[0]");
+    check(m.build.cxxflags[1] == "-Wextra", "build: cxxflags[1]");
+    check(m.build.ldflags.size() == 1, "build: 1 ldflag");
+    check(m.build.ldflags[0] == "-Wl,--gc-sections", "build: ldflags[0]");
+
+    check(m.build_debug.cxxflags.size() == 2, "build.debug: 2 cxxflags");
+    check(m.build_debug.cxxflags[0] == "-g", "build.debug: cxxflags[0]");
+    check(m.build_debug.cxxflags[1] == "-fsanitize=address", "build.debug: cxxflags[1]");
+    check(m.build_debug.ldflags.size() == 1, "build.debug: 1 ldflag");
+    check(m.build_debug.ldflags[0] == "-fsanitize=address", "build.debug: ldflags[0]");
+
+    check(m.build_release.cxxflags.size() == 2, "build.release: 2 cxxflags");
+    check(m.build_release.cxxflags[0] == "-O3", "build.release: cxxflags[0]");
+    check(m.build_release.cxxflags[1] == "-DNDEBUG", "build.release: cxxflags[1]");
+    check(m.build_release.ldflags.empty(), "build.release: no ldflags");
+}
+
+void test_build_section_omitted() {
+    auto input = R"(
+[package]
+name = "app"
+version = "1.0.0"
+)";
+
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    check(m.build.cxxflags.empty(), "build: no cxxflags by default");
+    check(m.build.ldflags.empty(), "build: no ldflags by default");
+    check(m.build_debug.cxxflags.empty(), "build.debug: no cxxflags by default");
+    check(m.build_release.cxxflags.empty(), "build.release: no cxxflags by default");
+}
+
 void test_defines() {
     auto input = R"(
 [package]
@@ -756,6 +811,8 @@ int main() {
     test_target_section_resolve();
     test_target_section_vcpkg();
     test_defines();
+    test_build_section();
+    test_build_section_omitted();
     test_no_dev_deps();
 
     if (failures > 0) {
