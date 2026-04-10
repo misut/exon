@@ -4,7 +4,9 @@ import manifest;
 import fetch;
 import toolchain;
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+extern "C" int _putenv(char const* envstring);
+#else
 extern "C" int setenv(char const* name, char const* value, int overwrite);
 extern "C" int unsetenv(char const* name);
 #endif
