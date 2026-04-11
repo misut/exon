@@ -105,6 +105,9 @@ struct TargetSection {
     std::map<std::string, std::string> defines;
     std::map<std::string, std::string> defines_debug;
     std::map<std::string, std::string> defines_release;
+    Build build;          // [target.'cfg(...)'.build]
+    Build build_debug;    // [target.'cfg(...)'.build.debug]
+    Build build_release;  // [target.'cfg(...)'.build.release]
 };
 
 struct Manifest {
@@ -371,6 +374,14 @@ Manifest from_toml(toml::Table const& table) {
                     }
                 }
             }
+            if (pred_table.contains("build")) {
+                auto const& bt = pred_table.at("build").as_table();
+                parse_build_table(bt, ts.build);
+                if (bt.contains("debug") && bt.at("debug").is_table())
+                    parse_build_table(bt.at("debug").as_table(), ts.build_debug);
+                if (bt.contains("release") && bt.at("release").is_table())
+                    parse_build_table(bt.at("release").as_table(), ts.build_release);
+            }
             m.target_sections.push_back(std::move(ts));
         }
     }
@@ -394,6 +405,16 @@ void merge_section_into(Manifest& m, TargetSection const& ts) {
     for (auto const& [k, v] : ts.defines) m.defines.emplace(k, v);
     for (auto const& [k, v] : ts.defines_debug) m.defines_debug.emplace(k, v);
     for (auto const& [k, v] : ts.defines_release) m.defines_release.emplace(k, v);
+    // Build flags append (not emplace) so multiple matching sections can stack.
+    auto append = [](auto& dst, auto const& src) {
+        dst.insert(dst.end(), src.begin(), src.end());
+    };
+    append(m.build.cxxflags,         ts.build.cxxflags);
+    append(m.build.ldflags,          ts.build.ldflags);
+    append(m.build_debug.cxxflags,   ts.build_debug.cxxflags);
+    append(m.build_debug.ldflags,    ts.build_debug.ldflags);
+    append(m.build_release.cxxflags, ts.build_release.cxxflags);
+    append(m.build_release.ldflags,  ts.build_release.ldflags);
 }
 
 Manifest resolve_for_platform(Manifest m, toolchain::Platform const& target) {

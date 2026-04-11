@@ -734,6 +734,78 @@ IO_BACKEND = "kqueue"
     check(win_m.defines.empty(), "target: windows no platform defines");
 }
 
+void test_target_section_build() {
+    auto input = R"(
+[package]
+name = "app"
+version = "1.0.0"
+
+[build]
+cxxflags = ["-Wall"]
+
+[target.'cfg(os = "linux")'.build]
+cxxflags = ["-fsanitize=address,undefined"]
+ldflags = ["-fsanitize=address,undefined"]
+
+[target.'cfg(os = "linux")'.build.debug]
+cxxflags = ["-O0"]
+
+[target.'cfg(os = "windows")'.build]
+cxxflags = ["/fsanitize=address"]
+)";
+
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    // Parser populated TargetSection.build / build_debug / build_release
+    check(m.target_sections.size() == 2, "build: 2 target sections parsed");
+
+    manifest::TargetSection const* linux_ts = nullptr;
+    manifest::TargetSection const* windows_ts = nullptr;
+    for (auto const& ts : m.target_sections) {
+        if (ts.predicate.find("linux") != std::string::npos) linux_ts = &ts;
+        else if (ts.predicate.find("windows") != std::string::npos) windows_ts = &ts;
+    }
+    check(linux_ts != nullptr, "build: linux section found");
+    check(windows_ts != nullptr, "build: windows section found");
+
+    check(linux_ts->build.cxxflags.size() == 1 &&
+              linux_ts->build.cxxflags[0] == "-fsanitize=address,undefined",
+          "build: linux base cxxflag parsed");
+    check(linux_ts->build.ldflags.size() == 1 &&
+              linux_ts->build.ldflags[0] == "-fsanitize=address,undefined",
+          "build: linux base ldflag parsed");
+    check(linux_ts->build_debug.cxxflags.size() == 1 &&
+              linux_ts->build_debug.cxxflags[0] == "-O0",
+          "build: linux build.debug parsed");
+    check(linux_ts->build_release.cxxflags.empty(),
+          "build: linux build.release empty");
+
+    check(windows_ts->build.cxxflags.size() == 1 &&
+              windows_ts->build.cxxflags[0] == "/fsanitize=address",
+          "build: windows MSVC cxxflag parsed");
+
+    // After resolve_for_platform(linux), m.build should have base + linux merged
+    auto linux_m = manifest::resolve_for_platform(m, {.os = "linux", .arch = "x86_64"});
+    check(linux_m.build.cxxflags.size() == 2, "build: linux merged base + linux cxxflags");
+    check(linux_m.build.cxxflags[0] == "-Wall", "build: linux base flag first");
+    check(linux_m.build.cxxflags[1] == "-fsanitize=address,undefined",
+          "build: linux per-target appended");
+    check(linux_m.build.ldflags.size() == 1 &&
+              linux_m.build.ldflags[0] == "-fsanitize=address,undefined",
+          "build: linux merged ldflags");
+    check(linux_m.build_debug.cxxflags.size() == 1 &&
+              linux_m.build_debug.cxxflags[0] == "-O0",
+          "build: linux build_debug merged");
+
+    // Windows resolve gets base + windows
+    auto win_m = manifest::resolve_for_platform(m, {.os = "windows", .arch = "x86_64"});
+    check(win_m.build.cxxflags.size() == 2, "build: windows merged base + windows");
+    check(win_m.build.cxxflags[1] == "/fsanitize=address",
+          "build: windows MSVC flag appended");
+    check(win_m.build.ldflags.empty(), "build: windows ldflags empty");
+}
+
 void test_target_section_vcpkg() {
     auto input = R"(
 [package]
@@ -809,6 +881,7 @@ int main() {
     test_platforms_errors();
     test_eval_predicate();
     test_target_section_resolve();
+    test_target_section_build();
     test_target_section_vcpkg();
     test_defines();
     test_build_section();

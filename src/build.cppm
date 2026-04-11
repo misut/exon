@@ -8,33 +8,22 @@ import vcpkg;
 
 export namespace build {
 
-// Join user-supplied compile/link flags from [build] sections + env var.
-// Order: manifest [build] (always) → manifest [build.debug|release] (profile) → env var.
-// Env var goes last so it overrides (CMake processes flags left-to-right).
-std::string join_user_flags(std::vector<std::string> const& base,
-                            std::vector<std::string> const& profile,
-                            char const* env_name) {
-    std::string out;
-    auto append = [&](std::string_view flag) {
-        if (flag.empty()) return;
-        if (!out.empty()) out += ' ';
-        out += flag;
-    };
-    for (auto const& f : base) append(f);
-    for (auto const& f : profile) append(f);
-    if (auto const* env = std::getenv(env_name); env && *env)
-        append(env);
-    return out;
+// Read EXON_CXXFLAGS / EXON_LDFLAGS environment variables. These are an
+// exon-only escape hatch — they pass through `cmake -DCMAKE_CXX_FLAGS=...`
+// at configure time and do NOT propagate to raw cmake / add_subdirectory
+// consumers. Declarative `[build]` and `[target.X.build]` flags now live
+// in the generated CMakeLists.txt as target_compile_options/target_link_options
+// so they DO propagate to those consumers.
+std::string user_cxxflags() {
+    if (auto const* env = std::getenv("EXON_CXXFLAGS"); env && *env)
+        return std::string{env};
+    return {};
 }
 
-std::string user_cxxflags(manifest::Manifest const& m, bool release) {
-    auto const& profile = release ? m.build_release.cxxflags : m.build_debug.cxxflags;
-    return join_user_flags(m.build.cxxflags, profile, "EXON_CXXFLAGS");
-}
-
-std::string user_ldflags(manifest::Manifest const& m, bool release) {
-    auto const& profile = release ? m.build_release.ldflags : m.build_debug.ldflags;
-    return join_user_flags(m.build.ldflags, profile, "EXON_LDFLAGS");
+std::string user_ldflags() {
+    if (auto const* env = std::getenv("EXON_LDFLAGS"); env && *env)
+        return std::string{env};
+    return {};
 }
 
 namespace detail {
@@ -148,7 +137,7 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
         std::string wasm_cxx =
             "-fno-exceptions -D_LIBCPP_NO_EXCEPTIONS"
             " -mllvm -wasm-enable-sjlj -D_WASI_EMULATED_SIGNAL";
-        auto wasm_extra_cxx = user_cxxflags(m, release);
+        auto wasm_extra_cxx = user_cxxflags();
         if (!wasm_extra_cxx.empty()) {
             wasm_cxx += ' ';
             wasm_cxx += wasm_extra_cxx;
@@ -156,7 +145,7 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
         cmd += std::format(" \"-DCMAKE_CXX_FLAGS={}\"", wasm_cxx);
         // Link against wasi-emulated-signal so std::signal stubs resolve.
         std::string wasm_ld = "-lwasi-emulated-signal";
-        auto wasm_extra_ld = user_ldflags(m, release);
+        auto wasm_extra_ld = user_ldflags();
         if (!wasm_extra_ld.empty()) {
             wasm_ld += ' ';
             wasm_ld += wasm_extra_ld;
@@ -180,8 +169,8 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
     }
 
     auto flags = resolve_flags(tc, m, release);
-    auto extra_cxx = user_cxxflags(m, release);
-    auto extra_ld = user_ldflags(m, release);
+    auto extra_cxx = user_cxxflags();
+    auto extra_ld = user_ldflags();
 
     auto combine = [](std::string_view a, std::string_view b) {
         if (a.empty()) return std::string{b};
@@ -547,6 +536,29 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         }
     }
 
+    // base [build] flags + per-target flags merged into m.build at resolve time.
+    // PRIVATE so add_subdirectory consumers don't inherit via INTERFACE_COMPILE_OPTIONS.
+    {
+        auto cxx_target = has_modules ? modules_lib : std::string{m.name};
+        auto const& prof_b = release ? m.build_release : m.build_debug;
+        if (!m.build.cxxflags.empty() || !prof_b.cxxflags.empty()) {
+            out << std::format("\ntarget_compile_options({} PRIVATE", cxx_target);
+            for (auto const& f : m.build.cxxflags)
+                out << std::format("\n    {}", f);
+            for (auto const& f : prof_b.cxxflags)
+                out << std::format("\n    {}", f);
+            out << "\n)\n";
+        }
+        if (!m.build.ldflags.empty() || !prof_b.ldflags.empty()) {
+            out << std::format("\ntarget_link_options({} PRIVATE", cxx_target);
+            for (auto const& f : m.build.ldflags)
+                out << std::format("\n    {}", f);
+            for (auto const& f : prof_b.ldflags)
+                out << std::format("\n    {}", f);
+            out << "\n)\n";
+        }
+    }
+
     // test targets
     if (with_tests) {
         auto tests_dir = project_root / "tests";
@@ -788,15 +800,50 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         }
     }
 
-    // platform-conditional sections (target.'cfg(...)' blocks)
+    // base [build] flags as target_compile_options/target_link_options on the
+    // module library (or main target if no modules). PRIVATE so consumers via
+    // add_subdirectory don't inherit them through INTERFACE_COMPILE_OPTIONS.
     auto link_target = has_modules ? modules_lib : std::string{m.name};
+    auto emit_build_options = [&](manifest::Build const& b,
+                                  manifest::Build const& bd,
+                                  manifest::Build const& br,
+                                  std::string_view indent) {
+        bool any_cxx = !b.cxxflags.empty() || !bd.cxxflags.empty() || !br.cxxflags.empty();
+        bool any_ld = !b.ldflags.empty() || !bd.ldflags.empty() || !br.ldflags.empty();
+        if (any_cxx) {
+            out << std::format("\n{}target_compile_options({} PRIVATE", indent, link_target);
+            for (auto const& f : b.cxxflags)
+                out << std::format("\n{}    {}", indent, f);
+            for (auto const& f : bd.cxxflags)
+                out << std::format("\n{}    $<$<CONFIG:Debug>:{}>", indent, f);
+            for (auto const& f : br.cxxflags)
+                out << std::format("\n{}    $<$<CONFIG:Release>:{}>", indent, f);
+            out << std::format("\n{})\n", indent);
+        }
+        if (any_ld) {
+            out << std::format("\n{}target_link_options({} PRIVATE", indent, link_target);
+            for (auto const& f : b.ldflags)
+                out << std::format("\n{}    {}", indent, f);
+            for (auto const& f : bd.ldflags)
+                out << std::format("\n{}    $<$<CONFIG:Debug>:{}>", indent, f);
+            for (auto const& f : br.ldflags)
+                out << std::format("\n{}    $<$<CONFIG:Release>:{}>", indent, f);
+            out << std::format("\n{})\n", indent);
+        }
+    };
+    emit_build_options(m.build, m.build_debug, m.build_release, "");
+
+    // platform-conditional sections (target.'cfg(...)' blocks)
     for (auto const& ts : m.target_sections) {
         auto cmake_cond = manifest::predicate_to_cmake(ts.predicate);
         if (cmake_cond.empty())
             continue;
+        bool has_build = !ts.build.cxxflags.empty() || !ts.build.ldflags.empty() ||
+                         !ts.build_debug.cxxflags.empty() || !ts.build_debug.ldflags.empty() ||
+                         !ts.build_release.cxxflags.empty() || !ts.build_release.ldflags.empty();
         bool has_content = !ts.find_deps.empty() || !ts.dev_find_deps.empty() ||
                            !ts.defines.empty() || !ts.defines_debug.empty() ||
-                           !ts.defines_release.empty();
+                           !ts.defines_release.empty() || has_build;
         if (!has_content)
             continue;
 
@@ -823,6 +870,9 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             for (auto const& [key, val] : ts.defines)
                 out << std::format("\n        {}=\"{}\"", key, val);
             out << "\n    )\n";
+        }
+        if (has_build) {
+            emit_build_options(ts.build, ts.build_debug, ts.build_release, "    ");
         }
         out << "endif()\n";
     }
