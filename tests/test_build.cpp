@@ -370,70 +370,216 @@ void test_no_import_std_below_23() {
     check(cmake.contains("CMAKE_CXX_STANDARD 20"), "standard 20");
 }
 
-void test_user_cxxflags_basic() {
-    manifest::Manifest m;
-    m.build.cxxflags = {"-Wall", "-Wextra"};
-    m.build_debug.cxxflags = {"-g", "-fsanitize=address"};
-    m.build_release.cxxflags = {"-O3"};
+void test_user_cxxflags_env_only() {
+    // After v0.21.0, user_cxxflags / user_ldflags read ONLY the
+    // EXON_CXXFLAGS / EXON_LDFLAGS env vars. Declarative `[build]`
+    // flags now live in the generated CMakeLists.txt as
+    // target_compile_options, so they propagate to raw cmake users
+    // and add_subdirectory consumers — see test_generate_cmake_*
+    // for the emission-side coverage.
 
-    auto debug = build::user_cxxflags(m, false);
-    check(debug == "-Wall -Wextra -g -fsanitize=address",
-          "user_cxxflags: debug joins base + debug profile");
-
-    auto release = build::user_cxxflags(m, true);
-    check(release == "-Wall -Wextra -O3",
-          "user_cxxflags: release joins base + release profile");
-}
-
-void test_user_ldflags_basic() {
-    manifest::Manifest m;
-    m.build.ldflags = {"-Wl,--gc-sections"};
-    m.build_debug.ldflags = {"-fsanitize=address"};
-
-    auto debug = build::user_ldflags(m, false);
-    check(debug == "-Wl,--gc-sections -fsanitize=address",
-          "user_ldflags: debug joins base + debug profile");
-
-    auto release = build::user_ldflags(m, true);
-    check(release == "-Wl,--gc-sections",
-          "user_ldflags: release with no release profile");
-}
-
-void test_user_flags_empty() {
-    manifest::Manifest m;
-    check(build::user_cxxflags(m, false).empty(), "user_cxxflags: empty when nothing set");
-    check(build::user_ldflags(m, true).empty(), "user_ldflags: empty when nothing set");
-}
-
-void test_user_cxxflags_env_override() {
-    // Use a unique env var name to avoid contaminating other tests
-    manifest::Manifest m;
-    m.build.cxxflags = {"-Wall"};
-
-    // Default state (no env var)
+    // Default state (no env var) → empty
 #if defined(_WIN32)
     _putenv("EXON_CXXFLAGS=");
+    _putenv("EXON_LDFLAGS=");
 #else
     unsetenv("EXON_CXXFLAGS");
+    unsetenv("EXON_LDFLAGS");
 #endif
-    check(build::user_cxxflags(m, false) == "-Wall", "user_cxxflags: no env var");
+    check(build::user_cxxflags().empty(), "user_cxxflags: empty when env unset");
+    check(build::user_ldflags().empty(), "user_ldflags: empty when env unset");
 
-    // Set env var
+    // Set env vars → returned verbatim
 #if defined(_WIN32)
     _putenv("EXON_CXXFLAGS=-fsanitize=address -g");
+    _putenv("EXON_LDFLAGS=-fsanitize=address");
 #else
     setenv("EXON_CXXFLAGS", "-fsanitize=address -g", 1);
+    setenv("EXON_LDFLAGS", "-fsanitize=address", 1);
 #endif
-    auto with_env = build::user_cxxflags(m, false);
-    check(with_env == "-Wall -fsanitize=address -g",
-          "user_cxxflags: env var appended after manifest flags");
+    check(build::user_cxxflags() == "-fsanitize=address -g",
+          "user_cxxflags: returns env var contents");
+    check(build::user_ldflags() == "-fsanitize=address",
+          "user_ldflags: returns env var contents");
 
     // Cleanup
 #if defined(_WIN32)
     _putenv("EXON_CXXFLAGS=");
+    _putenv("EXON_LDFLAGS=");
 #else
     unsetenv("EXON_CXXFLAGS");
+    unsetenv("EXON_LDFLAGS");
 #endif
+}
+
+void test_generate_cmake_base_build_flags() {
+    // Base [build] cxxflags/ldflags should appear as
+    // target_compile_options/target_link_options on the lib target.
+    manifest::Manifest m;
+    m.name = "myproj";
+    m.version = "0.1.0";
+    m.standard = 23;
+    m.type = "lib";
+    m.build.cxxflags = {"-Wall", "-Wextra"};
+    m.build.ldflags = {"-Wl,--gc-sections"};
+
+    auto temp = std::filesystem::temp_directory_path() / "exon_test_base_build";
+    std::filesystem::create_directories(temp / "src");
+    {
+        auto f = std::ofstream(temp / "src" / "myproj.cppm");
+        f << "export module myproj;\n";
+    }
+    auto saved_cwd = std::filesystem::current_path();
+    std::filesystem::current_path(temp);
+
+    try {
+        toolchain::Toolchain tc;
+        tc.native_import_std = true;
+        auto cmake = build::generate_portable_cmake(m, {});
+
+        check(cmake.contains("target_compile_options(myproj-modules PRIVATE"),
+              "base build flags emit target_compile_options");
+        check(cmake.contains("-Wall"), "base cxxflag -Wall present");
+        check(cmake.contains("-Wextra"), "base cxxflag -Wextra present");
+        check(cmake.contains("target_link_options(myproj-modules PRIVATE"),
+              "base build flags emit target_link_options");
+        check(cmake.contains("-Wl,--gc-sections"), "base ldflag present");
+    } catch (...) {
+        std::filesystem::current_path(saved_cwd);
+        std::filesystem::remove_all(temp);
+        throw;
+    }
+    std::filesystem::current_path(saved_cwd);
+    std::filesystem::remove_all(temp);
+}
+
+void test_generate_cmake_target_section_build() {
+    // Per-target build flags should appear inside an if(<cmake-cond>)
+    // block emitted from the existing target_sections loop.
+    manifest::Manifest m;
+    m.name = "myproj";
+    m.version = "0.1.0";
+    m.standard = 23;
+    m.type = "lib";
+    m.build.cxxflags = {"-Wall"};
+
+    manifest::TargetSection ts_linux;
+    ts_linux.predicate = "cfg(os = \"linux\")";
+    ts_linux.build.cxxflags = {"-fsanitize=address,undefined"};
+    ts_linux.build.ldflags = {"-fsanitize=address,undefined"};
+    m.target_sections.push_back(std::move(ts_linux));
+
+    manifest::TargetSection ts_windows;
+    ts_windows.predicate = "cfg(os = \"windows\")";
+    ts_windows.build.cxxflags = {"/fsanitize=address"};
+    m.target_sections.push_back(std::move(ts_windows));
+
+    auto temp = std::filesystem::temp_directory_path() / "exon_test_target_build";
+    std::filesystem::create_directories(temp / "src");
+    {
+        auto f = std::ofstream(temp / "src" / "myproj.cppm");
+        f << "export module myproj;\n";
+    }
+    auto saved_cwd = std::filesystem::current_path();
+    std::filesystem::current_path(temp);
+
+    try {
+        auto cmake = build::generate_portable_cmake(m, {});
+
+        // Base flag still emits at the top
+        check(cmake.contains("-Wall"), "base -Wall present");
+
+        // Linux block
+        check(cmake.contains("if(CMAKE_SYSTEM_NAME STREQUAL \"Linux\")"),
+              "Linux if() block present");
+        check(cmake.contains("-fsanitize=address,undefined"),
+              "Linux sanitizer cxxflag present");
+
+        // Windows block
+        check(cmake.contains("if(WIN32)"),
+              "Windows if() block present");
+        check(cmake.contains("/fsanitize=address"),
+              "Windows ASan cxxflag present");
+    } catch (...) {
+        std::filesystem::current_path(saved_cwd);
+        std::filesystem::remove_all(temp);
+        throw;
+    }
+    std::filesystem::current_path(saved_cwd);
+    std::filesystem::remove_all(temp);
+}
+
+void test_generate_cmake_target_section_build_profiles() {
+    // [target.X.build.debug] / [target.X.build.release] should emit
+    // generator expressions inside the if() block.
+    manifest::Manifest m;
+    m.name = "myproj";
+    m.version = "0.1.0";
+    m.standard = 23;
+    m.type = "lib";
+
+    manifest::TargetSection ts;
+    ts.predicate = "cfg(os = \"linux\")";
+    ts.build.cxxflags = {"-fsanitize=address"};
+    ts.build_debug.cxxflags = {"-O0"};
+    ts.build_release.cxxflags = {"-O3"};
+    m.target_sections.push_back(std::move(ts));
+
+    auto temp = std::filesystem::temp_directory_path() / "exon_test_target_profiles";
+    std::filesystem::create_directories(temp / "src");
+    {
+        auto f = std::ofstream(temp / "src" / "myproj.cppm");
+        f << "export module myproj;\n";
+    }
+    auto saved_cwd = std::filesystem::current_path();
+    std::filesystem::current_path(temp);
+
+    try {
+        auto cmake = build::generate_portable_cmake(m, {});
+        check(cmake.contains("$<$<CONFIG:Debug>:-O0>"),
+              "debug profile uses CONFIG:Debug genex");
+        check(cmake.contains("$<$<CONFIG:Release>:-O3>"),
+              "release profile uses CONFIG:Release genex");
+    } catch (...) {
+        std::filesystem::current_path(saved_cwd);
+        std::filesystem::remove_all(temp);
+        throw;
+    }
+    std::filesystem::current_path(saved_cwd);
+    std::filesystem::remove_all(temp);
+}
+
+void test_generate_cmake_no_build_flags_skipped() {
+    // Backwards compat: a manifest without [build] or [target.X.build]
+    // should not emit any target_compile_options block.
+    manifest::Manifest m;
+    m.name = "myproj";
+    m.version = "0.1.0";
+    m.standard = 23;
+    m.type = "lib";
+
+    auto temp = std::filesystem::temp_directory_path() / "exon_test_no_build";
+    std::filesystem::create_directories(temp / "src");
+    {
+        auto f = std::ofstream(temp / "src" / "myproj.cppm");
+        f << "export module myproj;\n";
+    }
+    auto saved_cwd = std::filesystem::current_path();
+    std::filesystem::current_path(temp);
+
+    try {
+        auto cmake = build::generate_portable_cmake(m, {});
+        check(!cmake.contains("target_compile_options(myproj-modules PRIVATE"),
+              "no target_compile_options when no build flags");
+        check(!cmake.contains("target_link_options"),
+              "no target_link_options when no build flags");
+    } catch (...) {
+        std::filesystem::current_path(saved_cwd);
+        std::filesystem::remove_all(temp);
+        throw;
+    }
+    std::filesystem::current_path(saved_cwd);
+    std::filesystem::remove_all(temp);
 }
 
 int main() {
@@ -449,10 +595,11 @@ int main() {
     test_dev_find_deps();
     test_path_dep_in_generate_cmake();
     test_no_import_std_below_23();
-    test_user_cxxflags_basic();
-    test_user_ldflags_basic();
-    test_user_flags_empty();
-    test_user_cxxflags_env_override();
+    test_user_cxxflags_env_only();
+    test_generate_cmake_base_build_flags();
+    test_generate_cmake_target_section_build();
+    test_generate_cmake_target_section_build_profiles();
+    test_generate_cmake_no_build_flags_skipped();
 
     if (failures > 0) {
         std::println("{} test(s) failed", failures);
