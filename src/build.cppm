@@ -74,9 +74,19 @@ BuildFlags resolve_flags(toolchain::Toolchain const& tc, manifest::Manifest cons
     bool has_static_libs = !tc.lib_dir.empty() && std::filesystem::exists(libcxx_a) &&
                            std::filesystem::exists(libcxxabi_a);
 
-    if (release && tc.has_clang_config) {
-        // intron LLVM release: bypass clang config to avoid rpath to toolchain dir.
-        // uses system libc++ (/usr/lib/) on macOS instead.
+    if (release && has_static_libs && tc.needs_stdlib_flag) {
+        // Linux release: statically link libc++ for portable binaries that
+        // run without intron / system libc++. Must come BEFORE the
+        // has_clang_config branch — intron ≥0.16.2 generates a clang config
+        // file with -lc++, which would otherwise force the dynamic-link
+        // path and produce a libc++.so.1-dependent binary.
+        flags.cxx_flags = "--no-default-config -stdlib=libc++";
+        flags.linker_flags = "--no-default-config -nostdlib++ -stdlib=libc++";
+        flags.standard_libraries = std::format("{} {}", libcxx_a.string(), libcxxabi_a.string());
+    } else if (release && tc.has_clang_config) {
+        // macOS release: bypass clang config to avoid rpath to toolchain
+        // dir; uses system libc++ (/usr/lib/) instead. needs_stdlib_flag
+        // is false on macOS so the static-link branch above is skipped.
         flags.cxx_flags = "--no-default-config -stdlib=libc++";
         flags.linker_flags = "--no-default-config -lc++ -lc++abi";
         if (!tc.sysroot.empty()) {
@@ -84,11 +94,6 @@ BuildFlags resolve_flags(toolchain::Toolchain const& tc, manifest::Manifest cons
             flags.cxx_flags += sysroot;
             flags.linker_flags += sysroot;
         }
-    } else if (release && has_static_libs && tc.needs_stdlib_flag) {
-        // Linux release: statically link libc++ for portable binaries
-        flags.cxx_flags = "-stdlib=libc++";
-        flags.linker_flags = "-nostdlib++ -stdlib=libc++";
-        flags.standard_libraries = std::format("{} {}", libcxx_a.string(), libcxxabi_a.string());
     } else if (!tc.has_clang_config && !tc.lib_dir.empty()) {
         // debug or fallback: dynamic libc++ from lib_dir
         if (tc.needs_stdlib_flag)
