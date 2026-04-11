@@ -14,11 +14,17 @@ if(MSVC)
 endif()
 
 include(FetchContent)
+FetchContent_Declare(cppx
+    GIT_REPOSITORY https://github.com/misut/cppx.git
+    GIT_TAG v0.1.0
+    GIT_SHALLOW ON
+)
 FetchContent_Declare(tomlcpp
     GIT_REPOSITORY https://github.com/misut/tomlcpp.git
     GIT_TAG v0.3.0
     GIT_SHALLOW ON
 )
+FetchContent_MakeAvailable(cppx)
 FetchContent_MakeAvailable(tomlcpp)
 
 add_library(exon-modules)
@@ -36,6 +42,7 @@ target_sources(exon-modules
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vcpkg.cppm
 )
 target_link_libraries(exon-modules PUBLIC
+    cppx
     tomlcpp
 )
 
@@ -58,7 +65,7 @@ set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vcpkg.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
     PROPERTIES COMPILE_DEFINITIONS
-    "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.19.0\""
+    "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.20.0\""
 )
 
 add_executable(test-test_build)

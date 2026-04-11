@@ -1,5 +1,6 @@
 export module toolchain;
 import std;
+import cppx.env;
 
 #if defined(_WIN32)
 extern "C" int __cdecl _putenv_s(char const*, char const*);
@@ -7,30 +8,21 @@ extern "C" int __cdecl _putenv_s(char const*, char const*);
 
 export namespace toolchain {
 
-// platform-specific executable suffix (".exe" on Windows, empty otherwise)
-#if defined(_WIN32)
-constexpr std::string_view exe_suffix = ".exe";
-#else
-constexpr std::string_view exe_suffix = "";
-#endif
+// platform-specific executable suffix (".exe" on Windows, empty otherwise).
+// Delegated to cppx::env::EXE_SUFFIX so the constant lives in one place.
+inline constexpr std::string_view exe_suffix = cppx::env::EXE_SUFFIX;
 
 // wrap a path/command in double quotes if it contains whitespace, so that
 // `std::system()` can invoke binaries at paths like "C:\Program Files\...".
-std::string shell_quote(std::string_view s) {
-    if (s.find_first_of(" \t") == std::string_view::npos)
-        return std::string{s};
-    return std::format("\"{}\"", s);
+inline std::string shell_quote(std::string_view s) {
+    return cppx::env::shell_quote(s);
 }
 
-// cross-platform home directory (HOME, falling back to USERPROFILE on Windows)
-std::filesystem::path home_dir() {
-    if (auto const* h = std::getenv("HOME"); h && *h)
-        return std::filesystem::path{h};
-#if defined(_WIN32)
-    if (auto const* up = std::getenv("USERPROFILE"); up && *up)
-        return std::filesystem::path{up};
-#endif
-    return {};
+// cross-platform home directory (HOME, falling back to USERPROFILE on Windows).
+// Returns an empty path on failure for backwards compatibility with callers
+// that use `.empty()` to detect "not set".
+inline std::filesystem::path home_dir() {
+    return cppx::env::home_dir().value_or(std::filesystem::path{});
 }
 
 struct Platform {
@@ -90,38 +82,16 @@ struct Toolchain {
 
 namespace detail {
 
-#if defined(_WIN32)
-constexpr char path_separator = ';';
-constexpr std::string_view exe_suffix = ".exe";
-#else
-constexpr char path_separator = ':';
-constexpr std::string_view exe_suffix = "";
-#endif
+// Re-exports of cppx::env constants for in-namespace use.
+inline constexpr char path_separator = cppx::env::PATH_SEPARATOR;
+inline constexpr std::string_view exe_suffix = cppx::env::EXE_SUFFIX;
 
-std::string find_in_path(std::string_view name) {
-    auto path_env = std::getenv("PATH");
-    if (!path_env)
-        return std::string{name};
-
-    auto path_str = std::string_view{path_env};
-    std::size_t pos = 0;
-    while (pos < path_str.size()) {
-        auto sep = path_str.find(path_separator, pos);
-        auto dir = path_str.substr(pos, sep == std::string_view::npos ? sep : sep - pos);
-        auto full = std::filesystem::path{dir} / name;
-        if (std::filesystem::exists(full)) {
-            return std::filesystem::canonical(full).string();
-        }
-        if constexpr (!exe_suffix.empty()) {
-            auto full_exe = full;
-            full_exe += exe_suffix;
-            if (std::filesystem::exists(full_exe))
-                return std::filesystem::canonical(full_exe).string();
-        }
-        if (sep == std::string_view::npos)
-            break;
-        pos = sep + 1;
-    }
+// Search PATH for `name`. Returns the canonical full path on success, or
+// the bare `name` (acts as fallback for std::system) on failure — preserves
+// the previous semantics so callers can fall through to the system PATH.
+inline std::string find_in_path(std::string_view name) {
+    if (auto found = cppx::env::find_in_path(name))
+        return found->string();
     return std::string{name};
 }
 

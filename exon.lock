@@ -5,3 +5,8 @@ name = "github.com/misut/tomlcpp"
 version = "0.3.0"
 commit = "53ddc4c4b3213f5aabc0b08829d8666e6aa86fb3"
 
+[[package]]
+name = "github.com/misut/cppx"
+version = "0.1.0"
+commit = "6a95197400d65e9f4dd07640d63209723dc4c8e6"
+
