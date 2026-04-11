@@ -538,11 +538,12 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
 
     // base [build] flags + per-target flags merged into m.build at resolve time.
     // PRIVATE so add_subdirectory consumers don't inherit via INTERFACE_COMPILE_OPTIONS.
-    {
-        auto cxx_target = has_modules ? modules_lib : std::string{m.name};
-        auto const& prof_b = release ? m.build_release : m.build_debug;
+    // Applied to BOTH the lib target and every test executable so sanitizer-
+    // instrumented libs link cleanly with their tests.
+    auto const& prof_b = release ? m.build_release : m.build_debug;
+    auto emit_build_for = [&](std::string_view target) {
         if (!m.build.cxxflags.empty() || !prof_b.cxxflags.empty()) {
-            out << std::format("\ntarget_compile_options({} PRIVATE", cxx_target);
+            out << std::format("\ntarget_compile_options({} PRIVATE", target);
             for (auto const& f : m.build.cxxflags)
                 out << std::format("\n    {}", f);
             for (auto const& f : prof_b.cxxflags)
@@ -550,13 +551,17 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             out << "\n)\n";
         }
         if (!m.build.ldflags.empty() || !prof_b.ldflags.empty()) {
-            out << std::format("\ntarget_link_options({} PRIVATE", cxx_target);
+            out << std::format("\ntarget_link_options({} PRIVATE", target);
             for (auto const& f : m.build.ldflags)
                 out << std::format("\n    {}", f);
             for (auto const& f : prof_b.ldflags)
                 out << std::format("\n    {}", f);
             out << "\n)\n";
         }
+    };
+    {
+        auto cxx_target = has_modules ? modules_lib : std::string{m.name};
+        emit_build_for(cxx_target);
     }
 
     // test targets
@@ -588,6 +593,8 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
                     out << std::format("\n    {}", t);
                 out << "\n)\n";
             }
+
+            emit_build_for(test_name);
         }
     }
 
@@ -800,18 +807,25 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         }
     }
 
-    // base [build] flags as target_compile_options/target_link_options on the
-    // module library (or main target if no modules). PRIVATE so consumers via
-    // add_subdirectory don't inherit them through INTERFACE_COMPILE_OPTIONS.
+    // Build flag emission. PRIVATE so consumers via add_subdirectory don't
+    // inherit them through INTERFACE_COMPILE_OPTIONS — each project decides
+    // its own flags.
+    //
+    // Applied to BOTH the lib target and every test executable: when a lib
+    // is built with sanitizers (e.g. -fsanitize=address,undefined), the test
+    // executables linking against the lib must also be sanitizer-instrumented
+    // so the runtime symbols (UBSan handlers etc.) get pulled in. PRIVATE on
+    // the lib alone produces unresolved-symbol link errors in tests.
     auto link_target = has_modules ? modules_lib : std::string{m.name};
-    auto emit_build_options = [&](manifest::Build const& b,
-                                  manifest::Build const& bd,
-                                  manifest::Build const& br,
-                                  std::string_view indent) {
+    auto emit_build_options_for = [&](std::string_view target,
+                                      manifest::Build const& b,
+                                      manifest::Build const& bd,
+                                      manifest::Build const& br,
+                                      std::string_view indent) {
         bool any_cxx = !b.cxxflags.empty() || !bd.cxxflags.empty() || !br.cxxflags.empty();
         bool any_ld = !b.ldflags.empty() || !bd.ldflags.empty() || !br.ldflags.empty();
         if (any_cxx) {
-            out << std::format("\n{}target_compile_options({} PRIVATE", indent, link_target);
+            out << std::format("\n{}target_compile_options({} PRIVATE", indent, target);
             for (auto const& f : b.cxxflags)
                 out << std::format("\n{}    {}", indent, f);
             for (auto const& f : bd.cxxflags)
@@ -821,7 +835,7 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             out << std::format("\n{})\n", indent);
         }
         if (any_ld) {
-            out << std::format("\n{}target_link_options({} PRIVATE", indent, link_target);
+            out << std::format("\n{}target_link_options({} PRIVATE", indent, target);
             for (auto const& f : b.ldflags)
                 out << std::format("\n{}    {}", indent, f);
             for (auto const& f : bd.ldflags)
@@ -831,19 +845,35 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             out << std::format("\n{})\n", indent);
         }
     };
-    emit_build_options(m.build, m.build_debug, m.build_release, "");
+    auto ts_has_build = [](manifest::TargetSection const& ts) {
+        return !ts.build.cxxflags.empty() || !ts.build.ldflags.empty() ||
+               !ts.build_debug.cxxflags.empty() || !ts.build_debug.ldflags.empty() ||
+               !ts.build_release.cxxflags.empty() || !ts.build_release.ldflags.empty();
+    };
+    auto emit_all_build_for = [&](std::string_view target) {
+        emit_build_options_for(target, m.build, m.build_debug, m.build_release, "");
+        for (auto const& ts : m.target_sections) {
+            if (!ts_has_build(ts))
+                continue;
+            auto cmake_cond = manifest::predicate_to_cmake(ts.predicate);
+            if (cmake_cond.empty())
+                continue;
+            out << std::format("\nif({})\n", cmake_cond);
+            emit_build_options_for(target, ts.build, ts.build_debug, ts.build_release, "    ");
+            out << "endif()\n";
+        }
+    };
+    emit_all_build_for(link_target);
 
-    // platform-conditional sections (target.'cfg(...)' blocks)
+    // platform-conditional sections (target.'cfg(...)' blocks) for non-build
+    // bits — find_package and defines, both lib-only.
     for (auto const& ts : m.target_sections) {
         auto cmake_cond = manifest::predicate_to_cmake(ts.predicate);
         if (cmake_cond.empty())
             continue;
-        bool has_build = !ts.build.cxxflags.empty() || !ts.build.ldflags.empty() ||
-                         !ts.build_debug.cxxflags.empty() || !ts.build_debug.ldflags.empty() ||
-                         !ts.build_release.cxxflags.empty() || !ts.build_release.ldflags.empty();
         bool has_content = !ts.find_deps.empty() || !ts.dev_find_deps.empty() ||
                            !ts.defines.empty() || !ts.defines_debug.empty() ||
-                           !ts.defines_release.empty() || has_build;
+                           !ts.defines_release.empty();
         if (!has_content)
             continue;
 
@@ -870,9 +900,6 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             for (auto const& [key, val] : ts.defines)
                 out << std::format("\n        {}=\"{}\"", key, val);
             out << "\n    )\n";
-        }
-        if (has_build) {
-            emit_build_options(ts.build, ts.build_debug, ts.build_release, "    ");
         }
         out << "endif()\n";
     }
@@ -905,6 +932,11 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
                     out << std::format("\n    {}", t);
                 out << "\n)\n";
             }
+
+            // Apply same build flags (base + per-target if() blocks) to the
+            // test executable. Required for sanitizer-instrumented libs whose
+            // tests must also be instrumented to satisfy runtime symbol refs.
+            emit_all_build_for(test_name);
         }
     }
 
