@@ -1,6 +1,7 @@
 export module toolchain;
 import std;
 import cppx.env;
+import cppx.env.system;
 
 #if defined(_WIN32)
 extern "C" int __cdecl _putenv_s(char const*, char const*);
@@ -22,7 +23,7 @@ inline std::string shell_quote(std::string_view s) {
 // Returns an empty path on failure for backwards compatibility with callers
 // that use `.empty()` to detect "not set".
 inline std::filesystem::path home_dir() {
-    return cppx::env::home_dir().value_or(std::filesystem::path{});
+    return cppx::env::system::home_dir().value_or(std::filesystem::path{});
 }
 
 struct Platform {
@@ -89,8 +90,10 @@ inline constexpr std::string_view exe_suffix = cppx::env::EXE_SUFFIX;
 // Search PATH for `name`. Returns the canonical full path on success, or
 // the bare `name` (acts as fallback for std::system) on failure — preserves
 // the previous semantics so callers can fall through to the system PATH.
+// Both `no_PATH_set` and `not_found_on_PATH` collapse to the fallback,
+// matching the previous behavior.
 inline std::string find_in_path(std::string_view name) {
-    if (auto found = cppx::env::find_in_path(name))
+    if (auto found = cppx::env::system::find_in_path(name))
         return found->string();
     return std::string{name};
 }
