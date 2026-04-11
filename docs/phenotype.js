@@ -13,6 +13,7 @@ const CMD_ROUND_RECT = 4;
 const CMD_DRAW_TEXT  = 5;
 const CMD_DRAW_LINE  = 6;
 const CMD_HIT_REGION = 7;
+const CMD_DRAW_IMAGE = 8;
 
 // --- Color helpers ---
 
@@ -284,8 +285,91 @@ function createRenderer(device, context, canvas, format) {
   const atlasCanvas = new OffscreenCanvas(ATLAS_SIZE, ATLAS_SIZE);
   const atlasCtx = atlasCanvas.getContext('2d');
 
+  // ----------------------------------------------------------------
+  // Image atlas — persistent (created on first image), packed top-
+  // left as PNG / JPEG / SVG / GIF assets load asynchronously via
+  // <img> elements. The cache is keyed on URL and never evicts in
+  // v1; the atlas dimensions are fixed and once full subsequent
+  // image URLs render as the neutral grey placeholder. The renderer
+  // reuses the existing textPipeline shader (it's already a
+  // textured-quad sampler) by binding imageBindGroup instead of the
+  // text bind group when drawing image instances.
+  // ----------------------------------------------------------------
+  const IMAGE_ATLAS_SIZE = 2048;
+  let imageAtlasTexture = null;
+  let imageBindGroup = null;
+  let atlasCursorX = 0;
+  let atlasCursorY = 0;
+  let atlasRowHeight = 0;
+  const imageCache = new Map();
+
+  function ensureImageAtlas() {
+    if (imageAtlasTexture) return;
+    imageAtlasTexture = device.createTexture({
+      size: [IMAGE_ATLAS_SIZE, IMAGE_ATLAS_SIZE],
+      format: 'rgba8unorm',
+      // RENDER_ATTACHMENT is required by Dawn (Chrome WebGPU) for
+      // copyExternalImageToTexture's destination because the impl
+      // uses an internal render pass to do the copy. Same flag set
+      // as textAtlasTexture.
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST |
+             GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    imageBindGroup = createBindGroup(uniformBuffer, imageAtlasTexture, textSampler);
+  }
+
+  function ensureImage(url, repaintCallback) {
+    let entry = imageCache.get(url);
+    if (entry) return entry;
+    entry = { loaded: false, error: false, slot: null };
+    imageCache.set(url, entry);
+
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      ensureImageAtlas();
+      const iw = img.naturalWidth;
+      const ih = img.naturalHeight;
+
+      // Top-left atlas packer — wrap to next row when current row is
+      // full, fail with error flag when atlas is full.
+      if (atlasCursorX + iw > IMAGE_ATLAS_SIZE) {
+        atlasCursorX = 0;
+        atlasCursorY += atlasRowHeight;
+        atlasRowHeight = 0;
+      }
+      if (atlasCursorY + ih > IMAGE_ATLAS_SIZE) {
+        entry.error = true;
+        return;
+      }
+      const slotX = atlasCursorX;
+      const slotY = atlasCursorY;
+      atlasCursorX += iw;
+      if (ih > atlasRowHeight) atlasRowHeight = ih;
+
+      // Upload only the slot region (not the whole atlas).
+      device.queue.copyExternalImageToTexture(
+        { source: img },
+        { texture: imageAtlasTexture, origin: { x: slotX, y: slotY } },
+        [iw, ih],
+      );
+
+      entry.slot = {
+        u: slotX / IMAGE_ATLAS_SIZE,
+        v: slotY / IMAGE_ATLAS_SIZE,
+        uw: iw / IMAGE_ATLAS_SIZE,
+        vh: ih / IMAGE_ATLAS_SIZE,
+      };
+      entry.loaded = true;
+      repaintCallback();
+    };
+    img.onerror = () => { entry.error = true; };
+    img.src = url;
+    return entry;
+  }
+
   return {
-    render(colorQuads, textEntries, clearColor) {
+    render(colorQuads, textEntries, imageEntries, clearColor, onImageLoaded) {
       const dpr = window.devicePixelRatio || 1;
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
@@ -383,6 +467,52 @@ function createRenderer(device, context, canvas, format) {
         textInstanceData = textData;
       }
 
+      // --- Build image instance buffer ---
+      // Walk the parsed image entries; loaded entries become textured
+      // quads pointing at the image atlas slot. Not-yet-loaded URLs
+      // are pushed into colorQuads as neutral grey placeholders so
+      // they ride the existing color pipeline pass (no extra draw
+      // call). This block runs BEFORE the color buffer is built so
+      // the placeholders make it into the colorData typed array.
+      let imageInstanceData = null;
+      let imageInstanceCount = 0;
+      if (imageEntries && imageEntries.length > 0) {
+        const repaint = () => {
+          if (typeof onImageLoaded === 'function') onImageLoaded();
+        };
+        const imageQuads = [];
+        for (const im of imageEntries) {
+          const entry = ensureImage(im.url, repaint);
+          if (entry.loaded && entry.slot) {
+            imageQuads.push({
+              x: im.x, y: im.y, w: im.w, h: im.h,
+              u: entry.slot.u, v: entry.slot.v,
+              uw: entry.slot.uw, vh: entry.slot.vh,
+            });
+          } else {
+            colorQuads.push({
+              x: im.x, y: im.y, w: im.w, h: im.h,
+              r: 0.93, g: 0.93, b: 0.93, a: 1, type: 0,
+            });
+          }
+        }
+        imageInstanceCount = imageQuads.length;
+        if (imageInstanceCount > 0) {
+          imageInstanceData = new Float32Array(imageInstanceCount * 8);
+          for (let i = 0; i < imageInstanceCount; i++) {
+            const q = imageQuads[i];
+            imageInstanceData[i * 8 + 0] = q.x;
+            imageInstanceData[i * 8 + 1] = q.y;
+            imageInstanceData[i * 8 + 2] = q.w;
+            imageInstanceData[i * 8 + 3] = q.h;
+            imageInstanceData[i * 8 + 4] = q.u;
+            imageInstanceData[i * 8 + 5] = q.v;
+            imageInstanceData[i * 8 + 6] = q.uw;
+            imageInstanceData[i * 8 + 7] = q.vh;
+          }
+        }
+      }
+
       // --- Build color instance buffer ---
       const colorCount = colorQuads.length;
       const colorData = new Float32Array(colorCount * 12);
@@ -446,9 +576,28 @@ function createRenderer(device, context, canvas, format) {
         pass.draw(6, textInstanceCount);
       }
 
+      // Image quads — same shader / pipeline as text but with the
+      // image atlas bound instead of the text atlas. Loaded images
+      // come from the persistent imageCache; not-yet-loaded URLs
+      // were already pushed into colorQuads above as the placeholder.
+      if (imageInstanceCount > 0 && imageInstanceData && imageBindGroup) {
+        const imageBuf = device.createBuffer({
+          size: imageInstanceData.byteLength,
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+          mappedAtCreation: true,
+        });
+        new Float32Array(imageBuf.getMappedRange()).set(imageInstanceData);
+        imageBuf.unmap();
+        pass.setBindGroup(0, imageBindGroup);
+        pass.setPipeline(textPipeline);
+        pass.setVertexBuffer(0, imageBuf);
+        pass.draw(6, imageInstanceCount);
+      }
+
       pass.end();
       device.queue.submit([encoder.finish()]);
     },
+    ensureImage,
   };
 }
 
@@ -458,7 +607,7 @@ function parseCommands(instance) {
   const mem = instance.exports.memory.buffer;
   const bufOffset = instance.exports.phenotype_get_cmd_buf();
   const bufLen = instance.exports.phenotype_get_cmd_len();
-  if (bufLen === 0) return { quads: [], texts: [], hitRegions: [], clearColor: { r: 0.98, g: 0.98, b: 0.98, a: 1 } };
+  if (bufLen === 0) return { quads: [], texts: [], images: [], hitRegions: [], clearColor: { r: 0.98, g: 0.98, b: 0.98, a: 1 } };
 
   const bytes = new Uint8Array(mem);
   const view = new DataView(mem);
@@ -475,6 +624,7 @@ function parseCommands(instance) {
 
   const quads = [];
   const texts = [];
+  const images = [];
   const hitRegions = [];
   let clearColor = { r: 0.98, g: 0.98, b: 0.98, a: 1 };
 
@@ -565,13 +715,24 @@ function parseCommands(instance) {
         hitRegions.push({ x, y, w, h, callbackId, cursorType });
         break;
       }
+      case CMD_DRAW_IMAGE: {
+        const x = view.getFloat32(pos, true); pos += 4;
+        const y = view.getFloat32(pos, true); pos += 4;
+        const w = view.getFloat32(pos, true); pos += 4;
+        const h = view.getFloat32(pos, true); pos += 4;
+        const len = view.getUint32(pos, true); pos += 4;
+        const url = readStr(pos, len);
+        pos = align4(pos + len);
+        images.push({ x, y, w, h, url });
+        break;
+      }
       default:
         console.error(`phenotype: unknown command ${cmd} at offset ${pos - 4}`);
-        return { quads, texts, hitRegions, clearColor };
+        return { quads, texts, images, hitRegions, clearColor };
     }
   }
 
-  return { quads, texts, hitRegions, clearColor };
+  return { quads, texts, images, hitRegions, clearColor };
 }
 
 // --- Loader ---
@@ -639,7 +800,14 @@ export async function mount(wasmUrl, rootElement = document.body) {
   function doFlush() {
     const parsed = parseCommands(inst);
     hitRegions = parsed.hitRegions;
-    renderer.render(parsed.quads, parsed.texts, parsed.clearColor);
+    renderer.render(parsed.quads, parsed.texts, parsed.images, parsed.clearColor, () => {
+      // Triggered when an asynchronously-loading image finishes
+      // upload to the GPU image atlas — re-run paint so the now-
+      // available texture coordinates replace the placeholder.
+      if (inst.exports.phenotype_repaint) {
+        inst.exports.phenotype_repaint(scrollY);
+      }
+    });
   }
 
   // --- WASI polyfill ---
@@ -814,12 +982,20 @@ export async function mount(wasmUrl, rootElement = document.body) {
     hiddenInput.style.color = 'rgb(26, 26, 26)';
     hiddenInput.style.caretColor = 'rgb(37, 99, 235)';
     hiddenInput.style.zIndex = '1';
-    // pointer-events: none keeps mouse clicks routing to the canvas
-    // (so canvas-side click → focus-change logic stays the source of
-    // truth). Click-to-position-caret inside an already-focused field
-    // is a small UX limitation; arrow / Home / End / Backspace still
-    // work via the HTML input's native key handling.
-    hiddenInput.style.pointerEvents = 'none';
+    // pointer-events: auto so clicks within the focused field's
+    // screen rectangle are caught by the HTML input — that's what
+    // enables click-to-position-caret, drag-select, double-click
+    // word selection, triple-click line selection, paste, and the
+    // I-beam mouse cursor over the field. This is safe because the
+    // overlay is positioned exactly over the focused field's
+    // hit-region rectangle, so a click within it is by definition
+    // a click on the currently focused field — there is no scenario
+    // where it should change focus to anything else. Clicks
+    // *outside* the input's bounding box still reach the canvas
+    // because the overlay isn't covering them, so the canvas-side
+    // click → focus-change logic stays the source of truth for
+    // every other interaction.
+    hiddenInput.style.pointerEvents = 'auto';
 
     // Load the C++ side's current value so the user starts editing
     // from the existing text rather than an empty buffer.
