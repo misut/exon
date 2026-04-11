@@ -1,34 +1,44 @@
 import phenotype;
-using namespace phenotype;
 
-void DocsApp() {
-    Scaffold(
-        // topBar
+namespace docs {
+
+// exon's docs site is non-interactive — no buttons, no text fields,
+// no state mutations — so the message DSL is degenerate: empty State,
+// empty Msg, no-op update.
+struct State {};
+struct Msg {};
+
+void update(State&, Msg) {}
+
+void view(State const&) {
+    using namespace phenotype;
+    layout::scaffold(
+        // Hero
         [&] {
-            Text("exon");
-            Text("A modern C++ package manager inspired by Cargo");
+            widget::text("exon");
+            widget::text("A modern C++ package manager inspired by Cargo");
         },
-        // content
+        // Content
         [&] {
             // Features
-            Column([&] {
-                Text("Features");
-                ListItems([&] {
-                    Item("C++23 modules (import std;)");
-                    Item("Automatic CMakeLists.txt generation");
-                    Item("Git-based dependency management with lockfile");
-                    Item("WebAssembly cross-compilation (wasm32-wasi)");
-                    Item("Workspace support for monorepos");
-                    Item("vcpkg integration");
-                    Item("Platform-conditional dependencies");
+            layout::column([&] {
+                widget::text("Features");
+                layout::list_items([&] {
+                    layout::item("C++23 modules (import std;)");
+                    layout::item("Automatic CMakeLists.txt generation");
+                    layout::item("Git-based dependency management with lockfile");
+                    layout::item("WebAssembly cross-compilation (wasm32-wasi)");
+                    layout::item("Workspace support for monorepos");
+                    layout::item("vcpkg integration");
+                    layout::item("Platform-conditional dependencies");
                 });
             });
 
             // Quick Start
-            Column([&] {
-                Text("Quick Start");
-                Text("Install exon, create a project, and run it:");
-                Code(
+            layout::column([&] {
+                widget::text("Quick Start");
+                widget::text("Install exon, create a project, and run it:");
+                widget::code(
                     "# Install via mise\n"
                     "mise use -g vfox:misut/mise-exon@latest\n"
                     "\n"
@@ -41,37 +51,39 @@ void DocsApp() {
                 );
             });
 
-            Divider();
+            layout::divider();
 
             // Commands
-            Column([&] {
-                Text("Commands");
-                Row([&] { Code("exon init [name]");     Text("Create a new project"); });
-                Row([&] { Code("exon build");           Text("Build the project"); });
-                Row([&] { Code("exon run");             Text("Build and run"); });
-                Row([&] { Code("exon test");            Text("Build and run tests"); });
-                Row([&] { Code("exon check");           Text("Check syntax without linking"); });
-                Row([&] { Code("exon add <pkg> <ver>"); Text("Add a dependency"); });
-                Row([&] { Code("exon remove <pkg>");    Text("Remove a dependency"); });
-                Row([&] { Code("exon update");          Text("Update dependencies"); });
-                Row([&] { Code("exon sync");            Text("Sync CMakeLists.txt"); });
-                Row([&] { Code("exon clean");           Text("Remove build artifacts"); });
-                Row([&] { Code("exon fmt");             Text("Format source files"); });
+            layout::column([&] {
+                widget::text("Commands");
+                layout::row([&] { widget::code("exon init [name]");     widget::text("Create a new project"); });
+                layout::row([&] { widget::code("exon build");           widget::text("Build the project"); });
+                layout::row([&] { widget::code("exon run");             widget::text("Build and run"); });
+                layout::row([&] { widget::code("exon test");            widget::text("Build and run tests"); });
+                layout::row([&] { widget::code("exon check");           widget::text("Check syntax without linking"); });
+                layout::row([&] { widget::code("exon add <pkg> <ver>"); widget::text("Add a dependency"); });
+                layout::row([&] { widget::code("exon remove <pkg>");    widget::text("Remove a dependency"); });
+                layout::row([&] { widget::code("exon update");          widget::text("Update dependencies"); });
+                layout::row([&] { widget::code("exon sync");            widget::text("Sync CMakeLists.txt"); });
+                layout::row([&] { widget::code("exon clean");           widget::text("Remove build artifacts"); });
+                layout::row([&] { widget::code("exon fmt");             widget::text("Format source files"); });
             });
         },
-        // bottomBar
+        // Footer
         [&] {
-            Row(
-                [&] { Text("Built with "); },
-                [&] { Link("phenotype", "https://github.com/misut/phenotype"); },
-                [&] { Text(" · "); },
-                [&] { Link("GitHub", "https://github.com/misut/exon"); }
+            layout::row(
+                [&] { widget::text("Built with "); },
+                [&] { widget::link("phenotype", "https://github.com/misut/phenotype"); },
+                [&] { widget::text(" · "); },
+                [&] { widget::link("GitHub", "https://github.com/misut/exon"); }
             );
         }
     );
 }
 
+} // namespace docs
+
 int main() {
-    express(DocsApp);
+    phenotype::run<docs::State, docs::Msg>(docs::view, docs::update);
     return 0;
 }
