@@ -130,25 +130,38 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
 
     if (!wasm_toolchain.empty()) {
         // WASM cross-compilation: toolchain file handles compiler, sysroot, flags.
-        // import std; is disabled (stdlib_modules_json cleared) because WASI lacks
-        // csetjmp/csignal support that the standard module requires.
-        // User .cppm modules still work via host clang-scan-deps.
+        // User .cppm modules and `import std;` both work via host clang-scan-deps
+        // and the wasi-sdk libc++.modules.json (passed via stdlib_modules_json).
         cmd += std::format(" -DCMAKE_TOOLCHAIN_FILE={}", wasm_toolchain);
         // wasi-sdk lacks clang-scan-deps; use the host LLVM's copy
         if (!tc.cxx_compiler.empty())
             cmd += std::format(" -DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS={}",
                                toolchain::shell_quote(tc.cxx_compiler));
-        // WASI: disable exceptions (libc++abi lacks exception support)
-        std::string wasm_cxx = "-fno-exceptions -D_LIBCPP_NO_EXCEPTIONS";
+        // import std; on wasi-sdk pulls in libc++ headers including csetjmp
+        // (needs setjmp/longjmp lowering, enabled by -mllvm -wasm-enable-sjlj)
+        // and csignal (needs -D_WASI_EMULATED_SIGNAL). Without these flags
+        // the std module fails to compile on bare wasm32-wasip1.
+        // -fno-exceptions stays so user code remains exception-free.
+        if (!tc.stdlib_modules_json.empty() && m.standard >= 23)
+            cmd += std::format(" -DCMAKE_CXX_STDLIB_MODULES_JSON={}",
+                               tc.stdlib_modules_json);
+        std::string wasm_cxx =
+            "-fno-exceptions -D_LIBCPP_NO_EXCEPTIONS"
+            " -mllvm -wasm-enable-sjlj -D_WASI_EMULATED_SIGNAL";
         auto wasm_extra_cxx = user_cxxflags(m, release);
         if (!wasm_extra_cxx.empty()) {
             wasm_cxx += ' ';
             wasm_cxx += wasm_extra_cxx;
         }
         cmd += std::format(" \"-DCMAKE_CXX_FLAGS={}\"", wasm_cxx);
+        // Link against wasi-emulated-signal so std::signal stubs resolve.
+        std::string wasm_ld = "-lwasi-emulated-signal";
         auto wasm_extra_ld = user_ldflags(m, release);
-        if (!wasm_extra_ld.empty())
-            cmd += std::format(" \"-DCMAKE_EXE_LINKER_FLAGS={}\"", wasm_extra_ld);
+        if (!wasm_extra_ld.empty()) {
+            wasm_ld += ' ';
+            wasm_ld += wasm_extra_ld;
+        }
+        cmd += std::format(" \"-DCMAKE_EXE_LINKER_FLAGS={}\"", wasm_ld);
         // WASI: let dlmalloc/sbrk manage heap growth via memory.grow.
         // Do NOT use --initial-heap or --initial-memory; these corrupt the
         // allocator's heap metadata and cause abort on the first allocation.
@@ -890,9 +903,11 @@ int run(manifest::Manifest const& m, bool release = false, std::string_view targ
     if (is_wasm) {
         auto wasm_tc = toolchain::detect_wasm(target);
         wasm_toolchain_file = wasm_tc.cmake_toolchain;
-        // import std; is unsupported on WASM (csetjmp/csignal headers fail),
-        // so clear modules json; users must use #include instead
-        tc.stdlib_modules_json.clear();
+        // import std; on wasm32-wasip1 needs -mllvm -wasm-enable-sjlj and
+        // -D_WASI_EMULATED_SIGNAL because libc++'s csetjmp/csignal headers
+        // include setjmp.h/signal.h which #error on bare wasi-sdk-32. Those
+        // flags are injected by configure_cmd alongside -fno-exceptions.
+        tc.stdlib_modules_json = wasm_tc.modules_json;
         tc.cxx_compiler = wasm_tc.scan_deps; // repurpose for host clang-scan-deps
         tc.sysroot.clear();
         tc.lib_dir.clear();
@@ -957,8 +972,9 @@ int run_check(manifest::Manifest const& m, bool release = false, std::string_vie
     if (is_wasm) {
         auto wasm_tc = toolchain::detect_wasm(target);
         wasm_toolchain_file = wasm_tc.cmake_toolchain;
-        // import std; is unsupported on WASM (csetjmp/csignal headers fail)
-        tc.stdlib_modules_json.clear();
+        // import std; on wasm32-wasip1 needs sjlj + emulated signal flags
+        // (injected by configure_cmd alongside -fno-exceptions).
+        tc.stdlib_modules_json = wasm_tc.modules_json;
         tc.cxx_compiler = wasm_tc.scan_deps; // repurpose for host clang-scan-deps
         tc.sysroot.clear();
         tc.lib_dir.clear();
@@ -1042,8 +1058,9 @@ int run_test(manifest::Manifest const& m, bool release = false, std::string_view
     if (is_wasm) {
         auto wasm_tc = toolchain::detect_wasm(target);
         wasm_toolchain_file = wasm_tc.cmake_toolchain;
-        // import std; is unsupported on WASM (csetjmp/csignal headers fail)
-        tc.stdlib_modules_json.clear();
+        // import std; on wasm32-wasip1 needs sjlj + emulated signal flags
+        // (injected by configure_cmd alongside -fno-exceptions).
+        tc.stdlib_modules_json = wasm_tc.modules_json;
         tc.cxx_compiler = wasm_tc.scan_deps; // repurpose for host clang-scan-deps
         tc.sysroot.clear();
         tc.lib_dir.clear();
@@ -1100,7 +1117,11 @@ int run_test(manifest::Manifest const& m, bool release = false, std::string_view
         auto exe = build_dir / (name + exe_suffix);
         std::string run_cmd;
         if (is_wasm)
-            run_cmd = std::format("{} {}", toolchain::shell_quote(wasm_runtime),
+            // -W exceptions=y enables the WebAssembly exception-handling
+            // proposal (Wasmtime ≥37). Required because import std; uses
+            // wasm-sjlj which lowers to try_table/throw/throw_ref opcodes.
+            run_cmd = std::format("{} -W exceptions=y {}",
+                                  toolchain::shell_quote(wasm_runtime),
                                   toolchain::shell_quote(exe.string()));
         else
             run_cmd = toolchain::shell_quote(exe.string());
