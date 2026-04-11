@@ -850,18 +850,45 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
                !ts.build_debug.cxxflags.empty() || !ts.build_debug.ldflags.empty() ||
                !ts.build_release.cxxflags.empty() || !ts.build_release.ldflags.empty();
     };
+
+    // Whether the manifest has any declarative build flags worth emitting.
+    bool const base_has_build =
+        !m.build.cxxflags.empty() || !m.build.ldflags.empty() ||
+        !m.build_debug.cxxflags.empty() || !m.build_debug.ldflags.empty() ||
+        !m.build_release.cxxflags.empty() || !m.build_release.ldflags.empty();
+    bool any_ts_has_build = false;
+    for (auto const& ts : m.target_sections) {
+        if (ts_has_build(ts) && !manifest::predicate_to_cmake(ts.predicate).empty()) {
+            any_ts_has_build = true;
+            break;
+        }
+    }
+    bool const has_any_build = base_has_build || any_ts_has_build;
+
+    // Wrap all declarative [build] / [target.cfg.build] flags in
+    // if(PROJECT_IS_TOP_LEVEL) so they only apply when this project is the
+    // top-level cmake project. When a project is consumed via FetchContent
+    // or add_subdirectory, sanitizer-instrumented .o files would otherwise
+    // be archived into the static library and force every downstream
+    // consumer to also link the sanitizer runtimes. Matches Cargo's rule
+    // that [build] flags apply only to the workspace member that declares
+    // them, not to its dependencies.
     auto emit_all_build_for = [&](std::string_view target) {
-        emit_build_options_for(target, m.build, m.build_debug, m.build_release, "");
+        if (!has_any_build)
+            return;
+        out << "\nif(PROJECT_IS_TOP_LEVEL)\n";
+        emit_build_options_for(target, m.build, m.build_debug, m.build_release, "    ");
         for (auto const& ts : m.target_sections) {
             if (!ts_has_build(ts))
                 continue;
             auto cmake_cond = manifest::predicate_to_cmake(ts.predicate);
             if (cmake_cond.empty())
                 continue;
-            out << std::format("\nif({})\n", cmake_cond);
-            emit_build_options_for(target, ts.build, ts.build_debug, ts.build_release, "    ");
-            out << "endif()\n";
+            out << std::format("\n    if({})\n", cmake_cond);
+            emit_build_options_for(target, ts.build, ts.build_debug, ts.build_release, "        ");
+            out << "    endif()\n";
         }
+        out << "endif()\n";
     };
     emit_all_build_for(link_target);
 

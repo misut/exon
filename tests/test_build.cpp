@@ -437,6 +437,8 @@ void test_generate_cmake_base_build_flags() {
         tc.native_import_std = true;
         auto cmake = build::generate_portable_cmake(m, {});
 
+        check(cmake.contains("if(PROJECT_IS_TOP_LEVEL)"),
+              "base build flags wrapped in PROJECT_IS_TOP_LEVEL");
         check(cmake.contains("target_compile_options(myproj-modules PRIVATE"),
               "base build flags emit target_compile_options");
         check(cmake.contains("-Wall"), "base cxxflag -Wall present");
@@ -486,7 +488,11 @@ void test_generate_cmake_target_section_build() {
     try {
         auto cmake = build::generate_portable_cmake(m, {});
 
-        // Base flag still emits at the top
+        // Outer top-level guard wraps everything
+        check(cmake.contains("if(PROJECT_IS_TOP_LEVEL)"),
+              "outer PROJECT_IS_TOP_LEVEL guard present");
+
+        // Base flag still emits at the top of the guarded block
         check(cmake.contains("-Wall"), "base -Wall present");
 
         // Linux block
@@ -500,6 +506,15 @@ void test_generate_cmake_target_section_build() {
               "Windows if() block present");
         check(cmake.contains("/fsanitize=address"),
               "Windows ASan cxxflag present");
+
+        // Verify nesting order: PROJECT_IS_TOP_LEVEL must come before the
+        // first per-target if() block. Otherwise the per-target sections
+        // would emit unguarded.
+        auto top_pos = cmake.find("if(PROJECT_IS_TOP_LEVEL)");
+        auto linux_pos = cmake.find("if(CMAKE_SYSTEM_NAME STREQUAL \"Linux\")");
+        check(top_pos != std::string::npos && linux_pos != std::string::npos &&
+                  top_pos < linux_pos,
+              "PROJECT_IS_TOP_LEVEL guard precedes per-target if() blocks");
     } catch (...) {
         std::filesystem::current_path(saved_cwd);
         std::filesystem::remove_all(temp);
@@ -536,6 +551,8 @@ void test_generate_cmake_target_section_build_profiles() {
 
     try {
         auto cmake = build::generate_portable_cmake(m, {});
+        check(cmake.contains("if(PROJECT_IS_TOP_LEVEL)"),
+              "profile flags wrapped in PROJECT_IS_TOP_LEVEL");
         check(cmake.contains("$<$<CONFIG:Debug>:-O0>"),
               "debug profile uses CONFIG:Debug genex");
         check(cmake.contains("$<$<CONFIG:Release>:-O3>"),
@@ -573,6 +590,8 @@ void test_generate_cmake_no_build_flags_skipped() {
               "no target_compile_options when no build flags");
         check(!cmake.contains("target_link_options"),
               "no target_link_options when no build flags");
+        check(!cmake.contains("if(PROJECT_IS_TOP_LEVEL)"),
+              "no PROJECT_IS_TOP_LEVEL guard when there are no build flags");
     } catch (...) {
         std::filesystem::current_path(saved_cwd);
         std::filesystem::remove_all(temp);
