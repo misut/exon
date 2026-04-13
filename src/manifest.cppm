@@ -16,6 +16,12 @@ struct GitSubdirDep {
     std::string subdir;   // "refl" (required, non-empty)
 };
 
+struct GitFeatureDep {
+    std::string version;
+    std::vector<std::string> features;
+    bool default_features = true;
+};
+
 // evaluate a cfg() predicate string against a platform
 // supported forms:
 //   cfg(os = "linux")
@@ -96,12 +102,14 @@ struct TargetSection {
     std::set<std::string> workspace_deps;
     std::map<std::string, VcpkgDep> vcpkg_deps;
     std::map<std::string, GitSubdirDep> subdir_deps;
+    std::map<std::string, GitFeatureDep> featured_deps;
     std::map<std::string, std::string> dev_dependencies;
     std::map<std::string, std::string> dev_find_deps;
     std::map<std::string, std::string> dev_path_deps;
     std::set<std::string> dev_workspace_deps;
     std::map<std::string, VcpkgDep> dev_vcpkg_deps;
     std::map<std::string, GitSubdirDep> dev_subdir_deps;
+    std::map<std::string, GitFeatureDep> dev_featured_deps;
     std::map<std::string, std::string> defines;
     std::map<std::string, std::string> defines_debug;
     std::map<std::string, std::string> defines_release;
@@ -130,6 +138,9 @@ struct Manifest {
     std::map<std::string, VcpkgDep> dev_vcpkg_deps;      // [dev-dependencies.vcpkg]
     std::map<std::string, GitSubdirDep> subdir_deps;     // [dependencies] inline-table form
     std::map<std::string, GitSubdirDep> dev_subdir_deps; // [dev-dependencies] inline-table form
+    std::map<std::string, GitFeatureDep> featured_deps;  // [dependencies] with features
+    std::map<std::string, GitFeatureDep> dev_featured_deps; // [dev-dependencies] with features
+    std::map<std::string, std::vector<std::string>> features; // [features]
     std::vector<toolchain::Platform> platforms;          // [package].platforms (empty = all)
     std::vector<TargetSection> target_sections;          // [target.'cfg(...)'.* ]
     std::map<std::string, std::string> defines;         // [defines]
@@ -229,7 +240,8 @@ Manifest from_toml(toml::Table const& table) {
                                   std::map<std::string, std::string>& path_deps,
                                   std::set<std::string>& workspace_deps,
                                   std::map<std::string, VcpkgDep>& vcpkg_deps,
-                                  std::map<std::string, GitSubdirDep>& subdir_deps) {
+                                  std::map<std::string, GitSubdirDep>& subdir_deps,
+                                  std::map<std::string, GitFeatureDep>& featured_deps) {
         for (auto const& [key, val] : deps) {
             if (val.is_string()) {
                 string_deps.emplace(key, val.as_string());
@@ -268,6 +280,24 @@ Manifest from_toml(toml::Table const& table) {
                     }
                     vcpkg_deps.emplace(k, std::move(dep));
                 }
+            } else if (val.is_table() && !val.as_table().contains("git") &&
+                       !val.as_table().contains("subdir")) {
+                // inline-table git dep with features: key = { version = "...", features = [...] }
+                auto const& t = val.as_table();
+                if (!t.contains("version") || !t.at("version").is_string())
+                    throw std::runtime_error(std::format(
+                        "dependency '{}': missing required 'version' field", key));
+                GitFeatureDep dep;
+                dep.version = t.at("version").as_string();
+                if (t.contains("features") && t.at("features").is_array()) {
+                    for (auto const& f : t.at("features").as_array()) {
+                        if (f.is_string())
+                            dep.features.push_back(f.as_string());
+                    }
+                }
+                if (t.contains("default-features") && t.at("default-features").is_bool())
+                    dep.default_features = t.at("default-features").as_bool();
+                featured_deps.emplace(key, std::move(dep));
             } else if (val.is_table()) {
                 // inline-table git dep: name = { git = "...", version = "...", subdir = "..." }
                 auto const& t = val.as_table();
@@ -295,13 +325,29 @@ Manifest from_toml(toml::Table const& table) {
 
     if (table.contains("dependencies")) {
         parse_deps_section(table.at("dependencies").as_table(), m.dependencies, m.find_deps,
-                           m.path_deps, m.workspace_deps, m.vcpkg_deps, m.subdir_deps);
+                           m.path_deps, m.workspace_deps, m.vcpkg_deps, m.subdir_deps,
+                           m.featured_deps);
     }
 
     if (table.contains("dev-dependencies")) {
         parse_deps_section(table.at("dev-dependencies").as_table(), m.dev_dependencies,
                            m.dev_find_deps, m.dev_path_deps, m.dev_workspace_deps, m.dev_vcpkg_deps,
-                           m.dev_subdir_deps);
+                           m.dev_subdir_deps, m.dev_featured_deps);
+    }
+
+    if (table.contains("features")) {
+        auto const& feat = table.at("features").as_table();
+        for (auto const& [key, val] : feat) {
+            if (!val.is_array())
+                throw std::runtime_error(std::format(
+                    "[features].{} must be an array of strings", key));
+            std::vector<std::string> entries;
+            for (auto const& f : val.as_array()) {
+                if (f.is_string())
+                    entries.push_back(f.as_string());
+            }
+            m.features.emplace(key, std::move(entries));
+        }
     }
 
     if (table.contains("defines")) {
@@ -354,12 +400,14 @@ Manifest from_toml(toml::Table const& table) {
             if (pred_table.contains("dependencies")) {
                 parse_deps_section(pred_table.at("dependencies").as_table(),
                                    ts.dependencies, ts.find_deps, ts.path_deps,
-                                   ts.workspace_deps, ts.vcpkg_deps, ts.subdir_deps);
+                                   ts.workspace_deps, ts.vcpkg_deps, ts.subdir_deps,
+                                   ts.featured_deps);
             }
             if (pred_table.contains("dev-dependencies")) {
                 parse_deps_section(pred_table.at("dev-dependencies").as_table(),
                                    ts.dev_dependencies, ts.dev_find_deps, ts.dev_path_deps,
-                                   ts.dev_workspace_deps, ts.dev_vcpkg_deps, ts.dev_subdir_deps);
+                                   ts.dev_workspace_deps, ts.dev_vcpkg_deps, ts.dev_subdir_deps,
+                                   ts.dev_featured_deps);
             }
             if (pred_table.contains("defines")) {
                 auto const& defs = pred_table.at("defines").as_table();
@@ -396,12 +444,14 @@ void merge_section_into(Manifest& m, TargetSection const& ts) {
     for (auto const& ws : ts.workspace_deps) m.workspace_deps.insert(ws);
     for (auto const& [k, v] : ts.vcpkg_deps) m.vcpkg_deps.emplace(k, v);
     for (auto const& [k, v] : ts.subdir_deps) m.subdir_deps.emplace(k, v);
+    for (auto const& [k, v] : ts.featured_deps) m.featured_deps.emplace(k, v);
     for (auto const& [k, v] : ts.dev_dependencies) m.dev_dependencies.emplace(k, v);
     for (auto const& [k, v] : ts.dev_find_deps) m.dev_find_deps.emplace(k, v);
     for (auto const& [k, v] : ts.dev_path_deps) m.dev_path_deps.emplace(k, v);
     for (auto const& ws : ts.dev_workspace_deps) m.dev_workspace_deps.insert(ws);
     for (auto const& [k, v] : ts.dev_vcpkg_deps) m.dev_vcpkg_deps.emplace(k, v);
     for (auto const& [k, v] : ts.dev_subdir_deps) m.dev_subdir_deps.emplace(k, v);
+    for (auto const& [k, v] : ts.dev_featured_deps) m.dev_featured_deps.emplace(k, v);
     for (auto const& [k, v] : ts.defines) m.defines.emplace(k, v);
     for (auto const& [k, v] : ts.defines_debug) m.defines_debug.emplace(k, v);
     for (auto const& [k, v] : ts.defines_release) m.defines_release.emplace(k, v);
@@ -430,6 +480,60 @@ Manifest resolve_all_targets(Manifest m) {
     for (auto const& ts : m.target_sections)
         merge_section_into(m, ts);
     return m;
+}
+
+// resolve consumer-selected features into a set of .cppm module basenames
+// provider_features: the [features] table from the dep's exon.toml
+// selected: features requested by the consumer
+// use_defaults: whether to include the "default" feature set
+std::set<std::string> resolve_features(
+    std::map<std::string, std::vector<std::string>> const& provider_features,
+    std::vector<std::string> const& selected,
+    bool use_defaults) {
+
+    // collect active feature names
+    std::set<std::string> active;
+    if (use_defaults) {
+        if (auto it = provider_features.find("default"); it != provider_features.end()) {
+            for (auto const& f : it->second)
+                active.insert(f);
+        }
+    }
+    for (auto const& f : selected)
+        active.insert(f);
+
+    // validate that all requested features exist
+    for (auto const& f : active) {
+        if (f != "default" && !provider_features.contains(f))
+            throw std::runtime_error(std::format("unknown feature '{}'", f));
+    }
+
+    // recursively expand features to module basenames
+    std::set<std::string> modules;
+    std::set<std::string> visited;
+
+    auto expand = [&](this auto const& self, std::string const& name) -> void {
+        if (visited.contains(name))
+            return;
+        visited.insert(name);
+        auto it = provider_features.find(name);
+        if (it == provider_features.end())
+            return;
+        for (auto const& entry : it->second) {
+            if (provider_features.contains(entry))
+                self(entry); // entry is another feature name
+            else
+                modules.insert(entry); // entry is a module basename
+        }
+    };
+
+    for (auto const& f : active)
+        expand(f);
+
+    if (modules.empty())
+        throw std::runtime_error("no features enabled (resolved to zero modules)");
+
+    return modules;
 }
 
 std::string predicate_to_cmake(std::string_view pred) {

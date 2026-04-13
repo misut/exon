@@ -357,12 +357,14 @@ bool dep_exists(manifest::Manifest const& m, std::string const& name) {
            m.path_deps.contains(name) || m.dev_path_deps.contains(name) ||
            m.workspace_deps.contains(name) || m.dev_workspace_deps.contains(name) ||
            m.vcpkg_deps.contains(name) || m.dev_vcpkg_deps.contains(name) ||
-           m.subdir_deps.contains(name) || m.dev_subdir_deps.contains(name);
+           m.subdir_deps.contains(name) || m.dev_subdir_deps.contains(name) ||
+           m.featured_deps.contains(name) || m.dev_featured_deps.contains(name);
 }
 
 int cmd_add(int argc, char* argv[]) {
     auto args = cli::parse(argc, argv, 2, {
         cli::Flag{"--dev"}, cli::Flag{"--path"}, cli::Flag{"--workspace"}, cli::Flag{"--vcpkg"},
+        cli::Flag{"--no-default-features"},
         cli::Option{"--git"}, cli::Option{"--subdir"}, cli::Option{"--version"},
         cli::Option{"--name"}, cli::ListOption{"--features"},
     });
@@ -371,6 +373,7 @@ int cmd_add(int argc, char* argv[]) {
     bool is_workspace_dep = args.has("--workspace");
     bool is_vcpkg = args.has("--vcpkg");
     bool is_git_subdir = !args.get("--git").empty();
+    bool no_default_features = args.has("--no-default-features");
     auto features = args.get_list("--features");
     auto git_repo = std::string{args.get("--git")};
     auto git_version = std::string{args.get("--version")};
@@ -378,8 +381,10 @@ int cmd_add(int argc, char* argv[]) {
     auto git_name = std::string{args.get("--name")};
     auto& positional = args.positional();
 
-    if (!features.empty() && !is_vcpkg)
-        return cli::error("--features is only valid with --vcpkg");
+    if (!features.empty() && (is_path || is_workspace_dep || is_git_subdir))
+        return cli::error("--features is not valid with --path, --workspace, or --git");
+    if (no_default_features && features.empty())
+        return cli::error("--no-default-features requires --features");
 
     int exclusive_count = int(is_path) + int(is_workspace_dep) + int(is_vcpkg) + int(is_git_subdir);
     if (exclusive_count > 1)
@@ -475,7 +480,7 @@ int cmd_add(int argc, char* argv[]) {
     } else {
         if (positional.size() < 2) {
             std::println(std::cerr,
-                         "usage: exon add [--dev] <package> <version>\n"
+                         "usage: exon add [--dev] <package> <version> [--features a,b --no-default-features]\n"
                          "       exon add [--dev] --path <name> <path>\n"
                          "       exon add [--dev] --workspace <name>\n"
                          "       exon add [--dev] --vcpkg <name> <version>\n"
@@ -486,9 +491,28 @@ int cmd_add(int argc, char* argv[]) {
         name = positional[0];
         value = positional[1];
         section = section_prefix;
-        dep_line = std::format("\"{}\" = \"{}\"\n", name, value);
-        display = std::format("{} {} = \"{}\"",
-                              dev ? "dev-dependency" : "dependency", name, value);
+        if (!features.empty()) {
+            std::string feat_list;
+            for (std::size_t fi = 0; fi < features.size(); ++fi) {
+                if (fi > 0)
+                    feat_list += ", ";
+                feat_list += std::format("\"{}\"", features[fi]);
+            }
+            if (no_default_features)
+                dep_line = std::format(
+                    "\"{}\" = {{ version = \"{}\", default-features = false, features = [{}] }}\n",
+                    name, value, feat_list);
+            else
+                dep_line = std::format(
+                    "\"{}\" = {{ version = \"{}\", features = [{}] }}\n",
+                    name, value, feat_list);
+            display = std::format("{} {} = {{ version = \"{}\", features = [{}] }}",
+                                  dev ? "dev-dependency" : "dependency", name, value, feat_list);
+        } else {
+            dep_line = std::format("\"{}\" = \"{}\"\n", name, value);
+            display = std::format("{} {} = \"{}\"",
+                                  dev ? "dev-dependency" : "dependency", name, value);
+        }
     }
 
     // use the base name for duplicate check (for git deps, key is the full URL path)

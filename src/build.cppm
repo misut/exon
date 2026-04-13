@@ -381,6 +381,22 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         auto dep_src = dep.path / "src";
         auto dep_sf = detail::collect_sources(dep_src);
 
+        // filter .cppm files by features if consumer selected specific features
+        if (!dep.features.empty()) {
+            auto dep_manifest_path = dep.path / "exon.toml";
+            if (std::filesystem::exists(dep_manifest_path)) {
+                auto dep_m = manifest::load(dep_manifest_path.string());
+                if (!dep_m.features.empty()) {
+                    auto modules = manifest::resolve_features(
+                        dep_m.features, dep.features, dep.default_features);
+                    std::erase_if(dep_sf.cppm, [&](std::string const& path) {
+                        auto stem = std::filesystem::path{path}.stem().string();
+                        return !modules.contains(stem);
+                    });
+                }
+            }
+        }
+
         if (dep_sf.cpp.empty() && dep_sf.cppm.empty()) {
             auto dep_cmake = dep.path / "CMakeLists.txt";
             if (std::filesystem::exists(dep_cmake)) {
@@ -417,9 +433,13 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         auto dep_manifest_path = dep.path / "exon.toml";
         if (std::filesystem::exists(dep_manifest_path)) {
             auto dep_m = manifest::load(dep_manifest_path.string());
-            if (!dep_m.dependencies.empty()) {
+            if (!dep_m.dependencies.empty() || !dep_m.featured_deps.empty()) {
                 out << std::format("target_link_libraries({} PUBLIC", dep.name);
                 for (auto const& [sub_key, sub_ver] : dep_m.dependencies) {
+                    auto sub_name = sub_key.substr(sub_key.rfind('/') + 1);
+                    out << std::format("\n    {}", sub_name);
+                }
+                for (auto const& [sub_key, sub_fdep] : dep_m.featured_deps) {
                     auto sub_name = sub_key.substr(sub_key.rfind('/') + 1);
                     out << std::format("\n    {}", sub_name);
                 }
