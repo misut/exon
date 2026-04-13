@@ -471,6 +471,11 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
     bool has_modules = !sf.cppm.empty();
 
     if (has_modules) {
+        // Diamond dependency guard: when multiple consumers
+        // FetchContent_MakeAvailable the same library, CMake re-enters
+        // this file. The early return prevents a duplicate target error.
+        if (m.type == "lib")
+            out << std::format("if(TARGET {})\n    return()\nendif()\n\n", m.name);
         out << std::format("add_library({})\n", modules_lib);
         out << std::format(
             "target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS {} FILES", modules_lib,
@@ -747,6 +752,8 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
     bool has_modules = !sf.cppm.empty();
 
     if (has_modules) {
+        if (m.type == "lib")
+            out << std::format("if(TARGET {})\n    return()\nendif()\n\n", m.name);
         out << std::format("add_library({})\n", modules_lib);
         out << std::format(
             "target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS ${{CMAKE_CURRENT_SOURCE_DIR}} FILES",
