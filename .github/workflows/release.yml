@@ -87,8 +87,14 @@ jobs:
       - name: Install intron
         shell: pwsh
         run: |
-          iwr -useb https://raw.githubusercontent.com/misut/intron/main/install.ps1 | iex
+          gh release download v0.16.2 -R misut/intron -p "intron-*-x86_64-pc-windows-msvc.zip"
+          Expand-Archive -Path intron-*.zip -DestinationPath .
+          Remove-Item intron-*.zip
+          New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.intron\bin" | Out-Null
+          Move-Item -Path intron.exe -Destination "$env:USERPROFILE\.intron\bin\intron.exe"
           echo "$env:USERPROFILE\.intron\bin" >> $env:GITHUB_PATH
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Install toolchains
         shell: pwsh
