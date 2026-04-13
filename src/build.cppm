@@ -1160,7 +1160,8 @@ int run_check(manifest::Manifest const& m, bool release = false, std::string_vie
     return 0;
 }
 
-int run_test(manifest::Manifest const& m, bool release = false, std::string_view target = {}) {
+int run_test(manifest::Manifest const& m, bool release = false,
+             std::string_view target = {}, std::string_view filter = {}) {
     detail::ensure_intron_tools();
 
     bool is_wasm = !target.empty();
@@ -1235,8 +1236,14 @@ int run_test(manifest::Manifest const& m, bool release = false, std::string_view
     // collect test names
     std::vector<std::string> test_names;
     for (auto const& test_cpp : test_sf.cpp) {
-        test_names.push_back(
-            std::format("test-{}", std::filesystem::path{test_cpp}.stem().string()));
+        auto name = std::format("test-{}", std::filesystem::path{test_cpp}.stem().string());
+        if (filter.empty() || name.find(filter) != std::string::npos)
+            test_names.push_back(std::move(name));
+    }
+
+    if (test_names.empty()) {
+        std::println(std::cerr, "error: no tests matched filter '{}'", filter);
+        return 1;
     }
 
     // build
