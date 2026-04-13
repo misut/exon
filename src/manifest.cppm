@@ -22,6 +22,14 @@ struct GitFeatureDep {
     bool default_features = true;
 };
 
+struct CmakeDep {
+    std::string git;         // Git repository URL
+    std::string tag;         // Git tag, branch, or commit hash
+    std::string targets;     // Semicolon-separated CMake target names to link
+    std::map<std::string, std::string> options; // set(KEY VALUE) before FetchContent
+    bool shallow = true;
+};
+
 // evaluate a cfg() predicate string against a platform
 // supported forms:
 //   cfg(os = "linux")
@@ -110,6 +118,8 @@ struct TargetSection {
     std::map<std::string, VcpkgDep> dev_vcpkg_deps;
     std::map<std::string, GitSubdirDep> dev_subdir_deps;
     std::map<std::string, GitFeatureDep> dev_featured_deps;
+    std::map<std::string, CmakeDep> cmake_deps;             // [dependencies.cmake]
+    std::map<std::string, CmakeDep> dev_cmake_deps;          // [dev-dependencies.cmake]
     std::map<std::string, std::string> defines;
     std::map<std::string, std::string> defines_debug;
     std::map<std::string, std::string> defines_release;
@@ -140,6 +150,8 @@ struct Manifest {
     std::map<std::string, GitSubdirDep> dev_subdir_deps; // [dev-dependencies] inline-table form
     std::map<std::string, GitFeatureDep> featured_deps;  // [dependencies] with features
     std::map<std::string, GitFeatureDep> dev_featured_deps; // [dev-dependencies] with features
+    std::map<std::string, CmakeDep> cmake_deps;              // [dependencies.cmake]
+    std::map<std::string, CmakeDep> dev_cmake_deps;           // [dev-dependencies.cmake]
     std::map<std::string, std::vector<std::string>> features; // [features]
     std::vector<toolchain::Platform> platforms;          // [package].platforms (empty = all)
     std::vector<TargetSection> target_sections;          // [target.'cfg(...)'.* ]
@@ -241,7 +253,8 @@ Manifest from_toml(toml::Table const& table) {
                                   std::set<std::string>& workspace_deps,
                                   std::map<std::string, VcpkgDep>& vcpkg_deps,
                                   std::map<std::string, GitSubdirDep>& subdir_deps,
-                                  std::map<std::string, GitFeatureDep>& featured_deps) {
+                                  std::map<std::string, GitFeatureDep>& featured_deps,
+                                  std::map<std::string, CmakeDep>& cmake_deps) {
         for (auto const& [key, val] : deps) {
             if (val.is_string()) {
                 string_deps.emplace(key, val.as_string());
@@ -259,6 +272,33 @@ Manifest from_toml(toml::Table const& table) {
                 for (auto const& [k, v] : val.as_table()) {
                     if (v.is_bool() && v.as_bool())
                         workspace_deps.insert(k);
+                }
+            } else if (val.is_table() && key == "cmake") {
+                for (auto const& [k, v] : val.as_table()) {
+                    if (!v.is_table()) continue;
+                    auto const& t = v.as_table();
+                    CmakeDep dep;
+                    if (!t.contains("git") || !t.at("git").is_string())
+                        throw std::runtime_error(std::format(
+                            "cmake dependency '{}': missing required 'git' field", k));
+                    dep.git = t.at("git").as_string();
+                    if (!t.contains("tag") || !t.at("tag").is_string())
+                        throw std::runtime_error(std::format(
+                            "cmake dependency '{}': missing required 'tag' field", k));
+                    dep.tag = t.at("tag").as_string();
+                    if (!t.contains("targets") || !t.at("targets").is_string())
+                        throw std::runtime_error(std::format(
+                            "cmake dependency '{}': missing required 'targets' field", k));
+                    dep.targets = t.at("targets").as_string();
+                    if (t.contains("shallow") && t.at("shallow").is_bool())
+                        dep.shallow = t.at("shallow").as_bool();
+                    if (t.contains("options") && t.at("options").is_table()) {
+                        for (auto const& [ok, ov] : t.at("options").as_table()) {
+                            if (ov.is_string())
+                                dep.options.emplace(ok, ov.as_string());
+                        }
+                    }
+                    cmake_deps.emplace(k, std::move(dep));
                 }
             } else if (val.is_table() && key == "vcpkg") {
                 for (auto const& [k, v] : val.as_table()) {
@@ -326,13 +366,13 @@ Manifest from_toml(toml::Table const& table) {
     if (table.contains("dependencies")) {
         parse_deps_section(table.at("dependencies").as_table(), m.dependencies, m.find_deps,
                            m.path_deps, m.workspace_deps, m.vcpkg_deps, m.subdir_deps,
-                           m.featured_deps);
+                           m.featured_deps, m.cmake_deps);
     }
 
     if (table.contains("dev-dependencies")) {
         parse_deps_section(table.at("dev-dependencies").as_table(), m.dev_dependencies,
                            m.dev_find_deps, m.dev_path_deps, m.dev_workspace_deps, m.dev_vcpkg_deps,
-                           m.dev_subdir_deps, m.dev_featured_deps);
+                           m.dev_subdir_deps, m.dev_featured_deps, m.dev_cmake_deps);
     }
 
     if (table.contains("features")) {
@@ -401,13 +441,13 @@ Manifest from_toml(toml::Table const& table) {
                 parse_deps_section(pred_table.at("dependencies").as_table(),
                                    ts.dependencies, ts.find_deps, ts.path_deps,
                                    ts.workspace_deps, ts.vcpkg_deps, ts.subdir_deps,
-                                   ts.featured_deps);
+                                   ts.featured_deps, ts.cmake_deps);
             }
             if (pred_table.contains("dev-dependencies")) {
                 parse_deps_section(pred_table.at("dev-dependencies").as_table(),
                                    ts.dev_dependencies, ts.dev_find_deps, ts.dev_path_deps,
                                    ts.dev_workspace_deps, ts.dev_vcpkg_deps, ts.dev_subdir_deps,
-                                   ts.dev_featured_deps);
+                                   ts.dev_featured_deps, ts.dev_cmake_deps);
             }
             if (pred_table.contains("defines")) {
                 auto const& defs = pred_table.at("defines").as_table();
@@ -445,6 +485,7 @@ void merge_section_into(Manifest& m, TargetSection const& ts) {
     for (auto const& [k, v] : ts.vcpkg_deps) m.vcpkg_deps.emplace(k, v);
     for (auto const& [k, v] : ts.subdir_deps) m.subdir_deps.emplace(k, v);
     for (auto const& [k, v] : ts.featured_deps) m.featured_deps.emplace(k, v);
+    for (auto const& [k, v] : ts.cmake_deps) m.cmake_deps.emplace(k, v);
     for (auto const& [k, v] : ts.dev_dependencies) m.dev_dependencies.emplace(k, v);
     for (auto const& [k, v] : ts.dev_find_deps) m.dev_find_deps.emplace(k, v);
     for (auto const& [k, v] : ts.dev_path_deps) m.dev_path_deps.emplace(k, v);
@@ -452,6 +493,7 @@ void merge_section_into(Manifest& m, TargetSection const& ts) {
     for (auto const& [k, v] : ts.dev_vcpkg_deps) m.dev_vcpkg_deps.emplace(k, v);
     for (auto const& [k, v] : ts.dev_subdir_deps) m.dev_subdir_deps.emplace(k, v);
     for (auto const& [k, v] : ts.dev_featured_deps) m.dev_featured_deps.emplace(k, v);
+    for (auto const& [k, v] : ts.dev_cmake_deps) m.dev_cmake_deps.emplace(k, v);
     for (auto const& [k, v] : ts.defines) m.defines.emplace(k, v);
     for (auto const& [k, v] : ts.defines_debug) m.defines_debug.emplace(k, v);
     for (auto const& [k, v] : ts.defines_release) m.defines_release.emplace(k, v);
