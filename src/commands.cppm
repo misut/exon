@@ -294,7 +294,36 @@ int cmd_run(int argc, char* argv[]) {
 }
 
 int cmd_test(int argc, char* argv[]) {
-    return run_build_command(argc, argv, build::run_test);
+    try {
+        std::vector<cli::ArgDef> const test_defs = {
+            cli::Flag{"--release"},
+            cli::Option{"--target"},
+            cli::Option{"--filter"},
+        };
+        auto args = cli::parse(argc, argv, 2, test_defs);
+        auto release = args.has("--release");
+        auto target = std::string{args.get("--target")};
+        auto filter = std::string{args.get("--filter")};
+        auto m = load_manifest();
+        if (!check_platform(m, target))
+            return 1;
+        m = resolve_manifest(std::move(m), target);
+        if (manifest::is_workspace(m)) {
+            return run_for_workspace(m, [&](auto const&) {
+                auto member_m = manifest::load("exon.toml");
+                if (!check_platform(member_m, target))
+                    return 1;
+                member_m = resolve_manifest(std::move(member_m), target);
+                return build::run_test(member_m, release, target, filter);
+            });
+        }
+        if (m.name.empty())
+            return cli::error("package name is required in exon.toml");
+        return build::run_test(m, release, target, filter);
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
 }
 
 int cmd_clean() {
