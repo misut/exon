@@ -15,6 +15,8 @@ struct FetchedDep {
     std::string subdir;         // non-empty for git+subdir deps
     bool is_dev = false;        // dev-dependency (test-only)
     bool is_path = false;       // local path / workspace dep (no git, no lock)
+    std::vector<std::string> features; // consumer-selected features (empty = all)
+    bool default_features = true;
 };
 
 namespace detail {
@@ -327,9 +329,10 @@ FetchResult fetch_all(manifest::Manifest const& m, std::string_view lock_path,
     FetchResult result;
 
     bool has_any = !m.dependencies.empty() || !m.path_deps.empty() || !m.workspace_deps.empty() ||
-                   !m.subdir_deps.empty();
+                   !m.subdir_deps.empty() || !m.featured_deps.empty();
     bool has_dev = include_dev && (!m.dev_dependencies.empty() || !m.dev_path_deps.empty() ||
-                                    !m.dev_workspace_deps.empty() || !m.dev_subdir_deps.empty());
+                                    !m.dev_workspace_deps.empty() || !m.dev_subdir_deps.empty() ||
+                                    !m.dev_featured_deps.empty());
     if (!has_any && !has_dev)
         return result;
 
@@ -356,6 +359,8 @@ FetchResult fetch_all(manifest::Manifest const& m, std::string_view lock_path,
 
     for (auto const& [key, version] : m.dependencies)
         detail::fetch_recursive(key, version, result.lock_file, result.deps, visited);
+    for (auto const& [key, fdep] : m.featured_deps)
+        detail::fetch_recursive(key, fdep.version, result.lock_file, result.deps, visited);
     for (auto const& [name, sdep] : m.subdir_deps)
         detail::fetch_subdir_recursive(name, sdep, ctx);
     for (auto const& [name, rel] : m.path_deps)
@@ -374,6 +379,8 @@ FetchResult fetch_all(manifest::Manifest const& m, std::string_view lock_path,
         auto dev_start = result.deps.size();
         for (auto const& [key, version] : m.dev_dependencies)
             detail::fetch_recursive(key, version, result.lock_file, result.deps, visited);
+        for (auto const& [key, fdep] : m.dev_featured_deps)
+            detail::fetch_recursive(key, fdep.version, result.lock_file, result.deps, visited);
         for (auto const& [name, sdep] : m.dev_subdir_deps)
             detail::fetch_subdir_recursive(name, sdep, ctx);
         for (auto const& [name, rel] : m.dev_path_deps)
@@ -390,6 +397,38 @@ FetchResult fetch_all(manifest::Manifest const& m, std::string_view lock_path,
         }
         for (auto i = dev_start; i < result.deps.size(); ++i)
             result.deps[i].is_dev = true;
+    }
+
+    // annotate deps with consumer-selected features (additive: union across all sources)
+    auto annotate = [&](std::map<std::string, manifest::GitFeatureDep> const& fdeps) {
+        for (auto const& [key, fdep] : fdeps) {
+            for (auto& dep : result.deps) {
+                if (dep.key == key && dep.version == fdep.version) {
+                    // union features additively
+                    for (auto const& f : fdep.features) {
+                        if (std::ranges::find(dep.features, f) == dep.features.end())
+                            dep.features.push_back(f);
+                    }
+                    dep.default_features = dep.default_features && fdep.default_features;
+                    break;
+                }
+            }
+        }
+    };
+    annotate(m.featured_deps);
+    if (include_dev)
+        annotate(m.dev_featured_deps);
+
+    // sync features into lock file entries
+    for (auto const& dep : result.deps) {
+        if (!dep.features.empty() && !dep.is_path) {
+            for (auto& pkg : result.lock_file.packages) {
+                if (pkg.name == dep.key && pkg.version == dep.version) {
+                    pkg.features = dep.features;
+                    break;
+                }
+            }
+        }
     }
 
     lock::save(result.lock_file, lock_path);

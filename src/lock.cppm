@@ -9,6 +9,7 @@ struct LockedDep {
     std::string version;
     std::string commit; // exact git commit hash
     std::string subdir; // non-empty for git+subdir deps
+    std::vector<std::string> features; // consumer-selected features (empty = all)
 };
 
 struct LockFile {
@@ -35,6 +36,7 @@ struct LockFile {
             if (p.name == dep.name && p.version == dep.version) {
                 p.commit = std::move(dep.commit);
                 p.subdir = std::move(dep.subdir);
+                p.features = std::move(dep.features);
                 return;
             }
         }
@@ -63,6 +65,12 @@ LockFile load(std::string_view path) {
                 dep.commit = pkg.at("commit").as_string();
             if (pkg.contains("subdir"))
                 dep.subdir = pkg.at("subdir").as_string();
+            if (pkg.contains("features") && pkg.at("features").is_array()) {
+                for (auto const& f : pkg.at("features").as_array()) {
+                    if (f.is_string())
+                        dep.features.push_back(f.as_string());
+                }
+            }
             lf.packages.push_back(std::move(dep));
         }
     }
@@ -85,6 +93,14 @@ void save(LockFile const& lf, std::string_view path) {
         file << std::format("commit = \"{}\"\n", pkg.commit);
         if (!pkg.subdir.empty())
             file << std::format("subdir = \"{}\"\n", pkg.subdir);
+        if (!pkg.features.empty()) {
+            file << "features = [";
+            for (std::size_t i = 0; i < pkg.features.size(); ++i) {
+                if (i > 0) file << ", ";
+                file << std::format("\"{}\"", pkg.features[i]);
+            }
+            file << "]\n";
+        }
         file << "\n";
     }
 }
