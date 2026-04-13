@@ -186,6 +186,15 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
     auto cxx = combine(flags.cxx_flags, extra_cxx);
     auto ld = combine(flags.linker_flags, extra_ld);
 
+    // When cmake deps are present (e.g. Dawn) and the toolchain has a
+    // clang config that resolves -lc++ to the system libc++, the
+    // system libc++ may lack newer C++23 symbols. Add -L and -rpath to
+    // the toolchain's lib dir so the linker finds the matching version,
+    // plus -lc++abi (the config doesn't include it but Dawn needs it).
+    if (!m.cmake_deps.empty() && tc.has_clang_config && !tc.lib_dir.empty()) {
+        ld = combine(ld, std::format("-L{0} -Wl,-rpath,{0} -lc++abi", tc.lib_dir));
+    }
+
     if (!cxx.empty())
         cmd += std::format(" -DCMAKE_CXX_FLAGS=\"{}\"", cxx);
     if (!ld.empty())
@@ -293,6 +302,51 @@ void emit_msvc_options(std::ostringstream& out) {
     out << "endif()\n\n";
 }
 
+// Emit FetchContent blocks for [dependencies.cmake] entries. These are
+// raw CMake projects (like Dawn) that need custom options + targets.
+// Emitted BEFORE regular FetchContent deps so their targets are available.
+void emit_cmake_deps(std::ostringstream& out, manifest::Manifest const& m, bool with_dev) {
+    bool any = !m.cmake_deps.empty() || (with_dev && !m.dev_cmake_deps.empty());
+    if (!any) return;
+    out << "include(FetchContent)\n";
+    auto emit = [&](std::string const& name, manifest::CmakeDep const& dep) {
+        for (auto const& [k, v] : dep.options)
+            out << std::format("set({} {})\n", k, v);
+        out << std::format("FetchContent_Declare({}\n", name);
+        out << std::format("    GIT_REPOSITORY {}\n", dep.git);
+        out << std::format("    GIT_TAG {}\n", dep.tag);
+        if (dep.shallow)
+            out << "    GIT_SHALLOW ON\n";
+        // Skip submodule update — projects like Dawn use their own
+        // dependency fetching (DAWN_FETCH_DEPENDENCIES) instead.
+        out << "    GIT_SUBMODULES \"\"\n";
+        out << "    EXCLUDE_FROM_ALL\n";
+        out << ")\n";
+        out << std::format("FetchContent_MakeAvailable({})\n\n", name);
+    };
+    for (auto const& [name, dep] : m.cmake_deps)
+        emit(name, dep);
+    if (with_dev) {
+        for (auto const& [name, dep] : m.dev_cmake_deps)
+            emit(name, dep);
+    }
+}
+
+// Collect all cmake dep targets for target_link_libraries.
+std::string collect_cmake_targets(manifest::Manifest const& m, bool dev) {
+    std::string targets;
+    auto add = [&](manifest::CmakeDep const& dep) {
+        for (auto const& t : split_targets(dep.targets)) {
+            if (!targets.empty()) targets += "\n    ";
+            targets += t;
+        }
+    };
+    for (auto const& [_, dep] : m.cmake_deps) add(dep);
+    if (dev)
+        for (auto const& [_, dep] : m.dev_cmake_deps) add(dep);
+    return targets;
+}
+
 void emit_find_packages(std::ostringstream& out, manifest::Manifest const& m, bool with_dev) {
     for (auto const& [pkg, _] : m.find_deps)
         out << std::format("find_package({} REQUIRED)\n", pkg);
@@ -347,6 +401,10 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             regular_deps.push_back(&dep);
     }
 
+    // [dependencies.cmake] — raw CMake projects (e.g. Dawn). Emitted
+    // first so their targets are available for downstream deps.
+    detail::emit_cmake_deps(out, m, with_tests);
+
     detail::emit_find_packages(out, m, with_tests);
     if (with_tests) {
         for (auto const& [pkg, _] : m.dev_find_deps)
@@ -355,13 +413,19 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
     if (!m.find_deps.empty() || (with_tests && !m.dev_find_deps.empty()))
         out << "\n";
 
-    // collect find_package imported targets for linkage
+    // collect find_package + cmake imported targets for linkage
     std::vector<std::string> find_targets, dev_find_targets;
     for (auto const& [_, tgts] : m.find_deps)
         for (auto& t : detail::split_targets(tgts))
             find_targets.push_back(std::move(t));
+    for (auto const& [_, dep] : m.cmake_deps)
+        for (auto& t : detail::split_targets(dep.targets))
+            find_targets.push_back(std::move(t));
     for (auto const& [_, tgts] : m.dev_find_deps)
         for (auto& t : detail::split_targets(tgts))
+            dev_find_targets.push_back(std::move(t));
+    for (auto const& [_, dep] : m.dev_cmake_deps)
+        for (auto& t : detail::split_targets(dep.targets))
             dev_find_targets.push_back(std::move(t));
 
     // emit dependency as static library
@@ -668,6 +732,12 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         bucket.push_back(&dep);
     }
 
+    // [dependencies.cmake] — raw CMake projects
+    if (!m.cmake_deps.empty() || !m.dev_cmake_deps.empty()) {
+        out << "include(FetchContent)\n";
+        detail::emit_cmake_deps(out, m, true);
+    }
+
     // emit find_package() calls
     for (auto const& [pkg, _] : m.find_deps)
         out << std::format("find_package({} REQUIRED)\n", pkg);
@@ -676,13 +746,19 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
     if (!m.find_deps.empty() || !m.dev_find_deps.empty())
         out << "\n";
 
-    // collect imported targets
+    // collect imported targets (find + cmake)
     std::vector<std::string> p_find, p_dev_find;
     for (auto const& [_, tgts] : m.find_deps)
         for (auto& t : detail::split_targets(tgts))
             p_find.push_back(std::move(t));
+    for (auto const& [_, dep] : m.cmake_deps)
+        for (auto& t : detail::split_targets(dep.targets))
+            p_find.push_back(std::move(t));
     for (auto const& [_, tgts] : m.dev_find_deps)
         for (auto& t : detail::split_targets(tgts))
+            p_dev_find.push_back(std::move(t));
+    for (auto const& [_, dep] : m.dev_cmake_deps)
+        for (auto& t : detail::split_targets(dep.targets))
             p_dev_find.push_back(std::move(t));
 
     // git deps via FetchContent
