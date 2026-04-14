@@ -48,7 +48,7 @@ jobs:
 
       - name: Install intron
         run: |
-          gh release download v0.17.0 -R misut/intron -p "intron-*-${{ matrix.platform }}.tar.gz"
+          gh release download v0.18.0 -R misut/intron -p "intron-*-${{ matrix.platform }}.tar.gz"
           tar xzf intron-*.tar.gz && rm intron-*.tar.gz
           mkdir -p "$HOME/.intron/bin" && mv intron "$HOME/.intron/bin/"
           echo "$HOME/.intron/bin" >> $GITHUB_PATH
@@ -114,7 +114,7 @@ jobs:
       - name: Install intron
         shell: pwsh
         run: |
-          gh release download v0.17.0 -R misut/intron -p "intron-*-x86_64-pc-windows-msvc.zip"
+          gh release download v0.18.0 -R misut/intron -p "intron-*-x86_64-pc-windows-msvc.zip"
           Expand-Archive -Path intron-*.zip -DestinationPath .
           Remove-Item intron-*.zip
           New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.intron\bin" | Out-Null
