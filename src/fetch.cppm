@@ -99,6 +99,7 @@ struct FetchContext {
     std::vector<FetchedDep>& result;
     std::set<std::string>& visited;          // git: "key@version"
     std::set<std::filesystem::path>& visited_paths; // path/workspace: absolute paths
+    std::optional<toolchain::Platform> platform; // for resolving target sections in path deps
 };
 
 void fetch_recursive(std::string const& dep_key, std::string const& version, lock::LockFile& lf,
@@ -145,6 +146,10 @@ void fetch_path_recursive(std::filesystem::path const& abs_dir, std::string name
                                              canon.string()));
 
     auto dep_m = manifest::load(dep_toml.string());
+    if (ctx.platform)
+        dep_m = manifest::resolve_for_platform(std::move(dep_m), *ctx.platform);
+    else
+        dep_m = manifest::resolve_all_targets(std::move(dep_m));
 
     // recurse into transitive deps FIRST (topological: deps come before this package)
     for (auto const& [sub_key, sub_version] : dep_m.dependencies)
@@ -325,7 +330,8 @@ struct FetchResult {
 };
 
 FetchResult fetch_all(manifest::Manifest const& m, std::string_view lock_path,
-                      bool include_dev = false) {
+                      bool include_dev = false,
+                      std::optional<toolchain::Platform> platform = std::nullopt) {
     FetchResult result;
 
     bool has_any = !m.dependencies.empty() || !m.path_deps.empty() || !m.workspace_deps.empty() ||
@@ -341,7 +347,7 @@ FetchResult fetch_all(manifest::Manifest const& m, std::string_view lock_path,
     std::println("fetching dependencies...");
     std::set<std::string> visited;
     std::set<std::filesystem::path> visited_paths;
-    detail::FetchContext ctx{result.lock_file, result.deps, visited, visited_paths};
+    detail::FetchContext ctx{result.lock_file, result.deps, visited, visited_paths, platform};
 
     auto cwd = std::filesystem::current_path();
 

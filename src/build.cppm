@@ -113,7 +113,8 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
                           std::filesystem::path const& source_dir, bool release,
                           std::string_view vcpkg_toolchain = {},
                           std::filesystem::path const& vcpkg_manifest_dir = {},
-                          std::string_view wasm_toolchain = {}) {
+                          std::string_view wasm_toolchain = {},
+                          bool any_cmake_deps = false) {
     auto build_type = release ? "Release" : "Debug";
     auto cmd = std::format("{} -B {} -S {} -G Ninja -DCMAKE_BUILD_TYPE={}",
                            toolchain::shell_quote(tc.cmake),
@@ -191,7 +192,7 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
     // system libc++ may lack newer C++23 symbols. Add -L and -rpath to
     // the toolchain's lib dir so the linker finds the matching version,
     // plus -lc++abi (the config doesn't include it but Dawn needs it).
-    if (!m.cmake_deps.empty() && tc.has_clang_config && !tc.lib_dir.empty()) {
+    if (any_cmake_deps && tc.has_clang_config && !tc.lib_dir.empty()) {
         ld = combine(ld, std::format("-L{0} -Wl,-rpath,{0} -lc++abi", tc.lib_dir));
     }
 
@@ -382,7 +383,7 @@ std::string collect_find_targets(manifest::Manifest const& m, bool dev) {
 std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path const& project_root,
                            std::vector<fetch::FetchedDep> const& deps,
                            toolchain::Toolchain const& tc, bool with_tests = false,
-                           bool release = false) {
+                           bool release = false, std::string_view target = {}) {
     std::ostringstream out;
 
     bool import_std = (m.standard >= 23 &&
@@ -401,9 +402,57 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             regular_deps.push_back(&dep);
     }
 
-    // [dependencies.cmake] — raw CMake projects (e.g. Dawn). Emitted
-    // first so their targets are available for downstream deps.
-    detail::emit_cmake_deps(out, m, with_tests);
+    // Pre-scan path deps: resolve their manifests for the current platform
+    // so we can collect cmake deps and reuse them in emit_dep.
+    auto platform = target.empty()
+        ? toolchain::detect_host_platform()
+        : *toolchain::platform_from_target(target);
+
+    std::map<std::string, manifest::CmakeDep> all_cmake_deps = m.cmake_deps;
+    std::map<std::string, manifest::CmakeDep> all_dev_cmake_deps =
+        with_tests ? m.dev_cmake_deps : std::map<std::string, manifest::CmakeDep>{};
+    std::map<std::string, manifest::Manifest> resolved_dep_manifests;
+
+    for (auto const& dep : deps) {
+        if (!dep.subdir.empty()) continue;
+        auto dep_manifest_path = dep.path / "exon.toml";
+        if (!std::filesystem::exists(dep_manifest_path)) continue;
+        auto dep_m = manifest::load(dep_manifest_path.string());
+        dep_m = manifest::resolve_for_platform(std::move(dep_m), platform);
+        for (auto const& [k, v] : dep_m.cmake_deps)
+            all_cmake_deps.emplace(k, v);
+        if (with_tests)
+            for (auto const& [k, v] : dep_m.dev_cmake_deps)
+                all_dev_cmake_deps.emplace(k, v);
+        resolved_dep_manifests.emplace(dep.path.string(), std::move(dep_m));
+    }
+
+    // [dependencies.cmake] — raw CMake projects (e.g. Dawn). Includes
+    // cmake deps from path dependencies so their targets are available.
+    {
+        bool any = !all_cmake_deps.empty() || (with_tests && !all_dev_cmake_deps.empty());
+        if (any) {
+            out << "include(FetchContent)\n";
+            auto emit_one = [&](std::string const& name, manifest::CmakeDep const& cd) {
+                for (auto const& [k, v] : cd.options)
+                    out << std::format("set({} {})\n", k, v);
+                out << std::format("FetchContent_Declare({}\n", name);
+                out << std::format("    GIT_REPOSITORY {}\n", cd.git);
+                out << std::format("    GIT_TAG {}\n", cd.tag);
+                if (cd.shallow)
+                    out << "    GIT_SHALLOW ON\n";
+                out << "    GIT_SUBMODULES \"\"\n";
+                out << "    EXCLUDE_FROM_ALL\n";
+                out << ")\n";
+                out << std::format("FetchContent_MakeAvailable({})\n\n", name);
+            };
+            for (auto const& [name, cd] : all_cmake_deps)
+                emit_one(name, cd);
+            if (with_tests)
+                for (auto const& [name, cd] : all_dev_cmake_deps)
+                    emit_one(name, cd);
+        }
+    }
 
     detail::emit_find_packages(out, m, with_tests);
     if (with_tests) {
@@ -413,7 +462,8 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
     if (!m.find_deps.empty() || (with_tests && !m.dev_find_deps.empty()))
         out << "\n";
 
-    // collect find_package + cmake imported targets for linkage
+    // collect find_package + cmake imported targets for linkage (top-level only;
+    // path dep cmake targets flow transitively through PUBLIC linkage)
     std::vector<std::string> find_targets, dev_find_targets;
     for (auto const& [_, tgts] : m.find_deps)
         for (auto& t : detail::split_targets(tgts))
@@ -445,19 +495,19 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         auto dep_src = dep.path / "src";
         auto dep_sf = detail::collect_sources(dep_src);
 
+        // Use pre-scanned resolved manifest for feature filtering and linking
+        auto cached_it = resolved_dep_manifests.find(dep.path.string());
+
         // filter .cppm files by features if consumer selected specific features
-        if (!dep.features.empty()) {
-            auto dep_manifest_path = dep.path / "exon.toml";
-            if (std::filesystem::exists(dep_manifest_path)) {
-                auto dep_m = manifest::load(dep_manifest_path.string());
-                if (!dep_m.features.empty()) {
-                    auto modules = manifest::resolve_features(
-                        dep_m.features, dep.features, dep.default_features);
-                    std::erase_if(dep_sf.cppm, [&](std::string const& path) {
-                        auto stem = std::filesystem::path{path}.stem().string();
-                        return !modules.contains(stem);
-                    });
-                }
+        if (!dep.features.empty() && cached_it != resolved_dep_manifests.end()) {
+            auto const& dep_m = cached_it->second;
+            if (!dep_m.features.empty()) {
+                auto modules = manifest::resolve_features(
+                    dep_m.features, dep.features, dep.default_features);
+                std::erase_if(dep_sf.cppm, [&](std::string const& path) {
+                    auto stem = std::filesystem::path{path}.stem().string();
+                    return !modules.contains(stem);
+                });
             }
         }
 
@@ -494,19 +544,24 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
                                std::filesystem::canonical(include_dir).generic_string());
         }
 
-        auto dep_manifest_path = dep.path / "exon.toml";
-        if (std::filesystem::exists(dep_manifest_path)) {
-            auto dep_m = manifest::load(dep_manifest_path.string());
-            if (!dep_m.dependencies.empty() || !dep_m.featured_deps.empty()) {
+        // Link transitive deps: git deps + featured deps + cmake dep targets
+        if (cached_it != resolved_dep_manifests.end()) {
+            auto const& dep_m = cached_it->second;
+            std::vector<std::string> link_targets;
+            for (auto const& [sub_key, sub_ver] : dep_m.dependencies) {
+                link_targets.push_back(sub_key.substr(sub_key.rfind('/') + 1));
+            }
+            for (auto const& [sub_key, sub_fdep] : dep_m.featured_deps) {
+                link_targets.push_back(sub_key.substr(sub_key.rfind('/') + 1));
+            }
+            for (auto const& [_, cmake_dep] : dep_m.cmake_deps) {
+                for (auto& t : detail::split_targets(cmake_dep.targets))
+                    link_targets.push_back(std::move(t));
+            }
+            if (!link_targets.empty()) {
                 out << std::format("target_link_libraries({} PUBLIC", dep.name);
-                for (auto const& [sub_key, sub_ver] : dep_m.dependencies) {
-                    auto sub_name = sub_key.substr(sub_key.rfind('/') + 1);
-                    out << std::format("\n    {}", sub_name);
-                }
-                for (auto const& [sub_key, sub_fdep] : dep_m.featured_deps) {
-                    auto sub_name = sub_key.substr(sub_key.rfind('/') + 1);
-                    out << std::format("\n    {}", sub_name);
-                }
+                for (auto const& t : link_targets)
+                    out << std::format("\n    {}", t);
                 out << "\n)\n";
             }
         }
@@ -1132,20 +1187,36 @@ int run(manifest::Manifest const& m, bool release = false, std::string_view targ
         tc.needs_stdlib_flag = false;
     }
 
+    auto plat = target.empty() ? toolchain::detect_host_platform()
+                               : *toolchain::platform_from_target(target);
     auto lock_path = (project_root / "exon.lock").string();
-    auto fetch_result = fetch::fetch_all(m, lock_path);
+    auto fetch_result = fetch::fetch_all(m, lock_path, false, plat);
     auto vcpkg_toolchain = is_wasm ? std::filesystem::path{} : detail::setup_vcpkg(m, exon_dir);
 
-    auto content = generate_cmake(m, project_root, fetch_result.deps, tc, false, release);
+    auto content = generate_cmake(m, project_root, fetch_result.deps, tc, false, release, target);
     bool changed = sync_cmake(content, exon_dir);
     sync_root_cmake(m, fetch_result.deps);
     bool configured = std::filesystem::exists(build_dir / "build.ninja");
+
+    // Check if any cmake deps exist (top-level or from path deps)
+    bool any_cmake_deps = !m.cmake_deps.empty();
+    if (!any_cmake_deps) {
+        for (auto const& dep : fetch_result.deps) {
+            if (!dep.is_path) continue;
+            auto p = dep.path / "exon.toml";
+            if (!std::filesystem::exists(p)) continue;
+            auto dm = manifest::load(p.string());
+            dm = manifest::resolve_for_platform(std::move(dm), plat);
+            if (!dm.cmake_deps.empty()) { any_cmake_deps = true; break; }
+        }
+    }
 
     if (changed || !configured) {
         std::println("configuring...");
         int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release,
                                                     vcpkg_toolchain.string(), exon_dir,
-                                                    wasm_toolchain_file).c_str());
+                                                    wasm_toolchain_file,
+                                                    any_cmake_deps).c_str());
         if (rc != 0)
             return rc;
     }
@@ -1199,20 +1270,35 @@ int run_check(manifest::Manifest const& m, bool release = false, std::string_vie
         tc.needs_stdlib_flag = false;
     }
 
+    auto plat = target.empty() ? toolchain::detect_host_platform()
+                               : *toolchain::platform_from_target(target);
     auto lock_path = (project_root / "exon.lock").string();
-    auto fetch_result = fetch::fetch_all(m, lock_path);
+    auto fetch_result = fetch::fetch_all(m, lock_path, false, plat);
     auto vcpkg_toolchain = is_wasm ? std::filesystem::path{} : detail::setup_vcpkg(m, exon_dir);
 
-    auto content = generate_cmake(m, project_root, fetch_result.deps, tc, false, release);
+    auto content = generate_cmake(m, project_root, fetch_result.deps, tc, false, release, target);
     bool changed = sync_cmake(content, exon_dir);
     sync_root_cmake(m, fetch_result.deps);
     bool configured = std::filesystem::exists(build_dir / "build.ninja");
+
+    bool any_cmake_deps = !m.cmake_deps.empty();
+    if (!any_cmake_deps) {
+        for (auto const& dep : fetch_result.deps) {
+            if (!dep.is_path) continue;
+            auto p = dep.path / "exon.toml";
+            if (!std::filesystem::exists(p)) continue;
+            auto dm = manifest::load(p.string());
+            dm = manifest::resolve_for_platform(std::move(dm), plat);
+            if (!dm.cmake_deps.empty()) { any_cmake_deps = true; break; }
+        }
+    }
 
     if (changed || !configured) {
         std::println("configuring...");
         int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release,
                                                     vcpkg_toolchain.string(), exon_dir,
-                                                    wasm_toolchain_file).c_str());
+                                                    wasm_toolchain_file,
+                                                    any_cmake_deps).c_str());
         if (rc != 0)
             return rc;
     }
@@ -1291,20 +1377,35 @@ int run_test(manifest::Manifest const& m, bool release = false,
                 "wasmtime not found on PATH (install: https://wasmtime.dev)");
     }
 
+    auto plat = target.empty() ? toolchain::detect_host_platform()
+                               : *toolchain::platform_from_target(target);
     auto lock_path = (project_root / "exon.lock").string();
-    auto fetch_result = fetch::fetch_all(m, lock_path, true);
+    auto fetch_result = fetch::fetch_all(m, lock_path, true, plat);
     auto vcpkg_toolchain = is_wasm ? std::filesystem::path{} : detail::setup_vcpkg(m, exon_dir);
 
-    auto content = generate_cmake(m, project_root, fetch_result.deps, tc, true, release);
+    auto content = generate_cmake(m, project_root, fetch_result.deps, tc, true, release, target);
     bool changed = sync_cmake(content, exon_dir);
     sync_root_cmake(m, fetch_result.deps);
     bool configured = std::filesystem::exists(build_dir / "build.ninja");
+
+    bool any_cmake_deps = !m.cmake_deps.empty();
+    if (!any_cmake_deps) {
+        for (auto const& dep : fetch_result.deps) {
+            if (!dep.is_path) continue;
+            auto p = dep.path / "exon.toml";
+            if (!std::filesystem::exists(p)) continue;
+            auto dm = manifest::load(p.string());
+            dm = manifest::resolve_for_platform(std::move(dm), plat);
+            if (!dm.cmake_deps.empty()) { any_cmake_deps = true; break; }
+        }
+    }
 
     if (changed || !configured) {
         std::println("configuring...");
         int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release,
                                                     vcpkg_toolchain.string(), exon_dir,
-                                                    wasm_toolchain_file).c_str());
+                                                    wasm_toolchain_file,
+                                                    any_cmake_deps).c_str());
         if (rc != 0)
             return rc;
     }
