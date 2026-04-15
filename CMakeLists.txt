@@ -65,7 +65,7 @@ set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vcpkg.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
     PROPERTIES COMPILE_DEFINITIONS
-    "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.22.1\""
+    "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.22.2\""
 )
 
 add_executable(test-test_build)

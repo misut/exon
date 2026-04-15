@@ -283,7 +283,7 @@ int cmd_run(int argc, char* argv[]) {
             run_cmd = toolchain::shell_quote(exe.string());
         }
         for (auto const& a : args.positional()) {
-            run_cmd += std::format(" {}", a);
+            run_cmd += std::format(" {}", toolchain::shell_quote(a));
         }
         std::println("running {}...\n", m.name);
         return std::system(run_cmd.c_str());
@@ -758,7 +758,7 @@ int cmd_fmt() {
     std::ranges::sort(files);
     auto cmd = std::string{"clang-format -i"};
     for (auto const& f : files) {
-        cmd += std::format(" {}", f);
+        cmd += std::format(" {}", toolchain::shell_quote(f));
     }
 
     int rc = std::system(cmd.c_str());
