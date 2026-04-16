@@ -560,7 +560,7 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
                                std::filesystem::canonical(include_dir).generic_string());
         }
 
-        // Link transitive deps: git deps + featured deps + cmake dep targets
+        // Link transitive deps: git deps + featured deps + cmake dep targets + path deps
         if (cached_it != resolved_dep_manifests.end()) {
             auto const& dep_m = cached_it->second;
             std::vector<std::string> link_targets;
@@ -573,6 +573,9 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             for (auto const& [_, cmake_dep] : dep_m.cmake_deps) {
                 for (auto& t : detail::split_targets(cmake_dep.targets))
                     link_targets.push_back(std::move(t));
+            }
+            for (auto const& [sub_name, _] : dep_m.path_deps) {
+                link_targets.push_back(sub_name);
             }
             if (!link_targets.empty()) {
                 out << std::format("target_link_libraries({} PUBLIC", dep.name);
