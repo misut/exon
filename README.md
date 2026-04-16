@@ -72,7 +72,7 @@ hello, world!
 | `exon build [--release] [--target <t>]` | Build the project |
 | `exon check [--release] [--target <t>]` | Check syntax without linking |
 | `exon run [--release] [--target <t>]` | Build and run |
-| `exon test [--release] [--target <t>]` | Build and run tests |
+| `exon test [--release] [--target <t>] [--timeout <sec>]` | Build and run tests |
 | `exon clean` | Remove build artifacts |
 | `exon add [--dev] <pkg> <ver>` | Add a git dependency |
 | `exon add [--dev] --path <name> <path>` | Add a local path dependency |
@@ -174,6 +174,20 @@ EXON_LDFLAGS="-fsanitize=address,undefined" exon test
 ```
 
 Common uses: sanitizers (`-fsanitize=address`), coverage (`--coverage`), warnings, profile-guided optimization. For `[defines]`-style preprocessor macros, prefer `[defines]` instead — exon escapes them per-target.
+
+### Windows ASan
+
+On Windows, declare ASan in `[build]` or `[target.'cfg(os = "windows")'.build]`:
+
+```toml
+[target.'cfg(os = "windows")'.build]
+cxxflags = ["/fsanitize=address"]
+ldflags = ["/fsanitize=address"]
+```
+
+When these flags are present, exon now copies `clang_rt.asan_dynamic-x86_64.dll` next to each built executable and test binary. This makes direct execution from `.exon/debug/` work without manually editing `PATH`.
+
+`exon test --timeout <sec>` is also available for long-running or hung tests. On Windows, timeout uses a native process runner that terminates the full child process tree instead of leaving stale `cmake`, `ninja`, or test processes behind.
 
 ## Dependencies
 

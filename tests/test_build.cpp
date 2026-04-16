@@ -603,6 +603,10 @@ void test_generate_cmake_target_section_build() {
               "Windows if() block present");
         check(cmake.contains("/fsanitize=address"),
               "Windows ASan cxxflag present");
+        check(cmake.contains("function(exon_copy_windows_asan_runtime target)"),
+              "Windows ASan runtime helper emitted");
+        check(cmake.contains("clang_rt.asan_dynamic-x86_64.dll"),
+              "Windows ASan runtime dll referenced");
 
         // Verify nesting order: PROJECT_IS_TOP_LEVEL must come before the
         // first per-target if() block. Otherwise the per-target sections
@@ -619,6 +623,30 @@ void test_generate_cmake_target_section_build() {
     }
     std::filesystem::current_path(saved_cwd);
     std::filesystem::remove_all(temp);
+}
+
+void test_generate_cmake_windows_asan_runtime_copy_for_exec_and_tests() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() { return 0; }\n");
+    proj.write("tests/test_app.cpp", "int main() { return 0; }\n");
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "0.1.0";
+    m.standard = 23;
+    m.type = "bin";
+    m.build.cxxflags = {"/fsanitize=address"};
+
+    auto cmake = build::generate_cmake(m, proj.root, {}, make_tc(), true);
+
+    check(cmake.contains("function(exon_copy_windows_asan_runtime target)"),
+          "generate_cmake emits Windows ASan runtime helper");
+    check(cmake.contains("exon_copy_windows_asan_runtime(app)"),
+          "main executable gets Windows ASan runtime copy");
+    check(cmake.contains("exon_copy_windows_asan_runtime(test-test_app)"),
+          "test executable gets Windows ASan runtime copy");
+    check(cmake.contains("copy_if_different"),
+          "Windows ASan runtime copy command emitted");
 }
 
 void test_generate_cmake_target_section_build_profiles() {
@@ -689,6 +717,8 @@ void test_generate_cmake_no_build_flags_skipped() {
               "no target_link_options when no build flags");
         check(!cmake.contains("if(PROJECT_IS_TOP_LEVEL)"),
               "no PROJECT_IS_TOP_LEVEL guard when there are no build flags");
+        check(!cmake.contains("exon_copy_windows_asan_runtime"),
+              "no Windows ASan helper when ASan is not enabled");
     } catch (...) {
         std::filesystem::current_path(saved_cwd);
         std::filesystem::remove_all(temp);
@@ -978,6 +1008,7 @@ int main() {
     test_user_cxxflags_env_only();
     test_generate_cmake_base_build_flags();
     test_generate_cmake_target_section_build();
+    test_generate_cmake_windows_asan_runtime_copy_for_exec_and_tests();
     test_generate_cmake_target_section_build_profiles();
     test_generate_cmake_no_build_flags_skipped();
     test_transitive_cmake_deps_from_git();

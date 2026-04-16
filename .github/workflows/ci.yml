@@ -169,7 +169,41 @@ jobs:
 
       - name: Self-host test
         shell: cmd
-        run: .\.exon\debug\exon.exe test
+        run: .\.exon\debug\exon.exe test --timeout 60
+
+      - name: Windows ASan smoke
+        shell: pwsh
+        run: |
+          $smoke = Join-Path $env:RUNNER_TEMP "exon-asan-smoke"
+          Remove-Item -LiteralPath $smoke -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path (Join-Path $smoke "src") | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $smoke "tests") | Out-Null
+
+          @'
+[package]
+name = "asan-smoke"
+version = "0.1.0"
+type = "bin"
+standard = 23
+
+[target.'cfg(os = "windows")'.build]
+cxxflags = ["/fsanitize=address"]
+ldflags = ["/fsanitize=address"]
+'@ | Set-Content -LiteralPath (Join-Path $smoke "exon.toml") -Encoding utf8NoBOM
+
+          'int main() { return 0; }' | Set-Content -LiteralPath (Join-Path $smoke "src\\main.cpp") -Encoding utf8NoBOM
+          'int main() { return 0; }' | Set-Content -LiteralPath (Join-Path $smoke "tests\\smoke.cpp") -Encoding utf8NoBOM
+
+          Push-Location $smoke
+          try {
+            & "$env:GITHUB_WORKSPACE\\.exon\debug\exon.exe" test --timeout 60
+            if (-not (Test-Path ".\.exon\debug\clang_rt.asan_dynamic-x86_64.dll")) {
+              throw "clang_rt.asan_dynamic-x86_64.dll was not copied next to the test executable"
+            }
+            & ".\.exon\debug\test-smoke.exe"
+          } finally {
+            Pop-Location
+          }
 
       - name: Verify
         shell: cmd
