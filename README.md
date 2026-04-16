@@ -40,6 +40,8 @@ cmake --build build --target exon
 ./build/exon build
 ```
 
+On macOS, use `cmake --build build --target exon --parallel 1` for the bootstrap build. Self-hosted `exon build`, `exon check`, and `exon test` serialize the build automatically on macOS when `import std;` is enabled.
+
 On Windows, run the commands from a **Visual Studio Developer Command Prompt** (or PowerShell for VS 2022) so that `cl.exe` is on PATH. Requires CMake 3.30+ and Ninja.
 </details>
 

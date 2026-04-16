@@ -61,6 +61,22 @@ toolchain::Toolchain make_tc(bool with_modules = true) {
     return tc;
 }
 
+toolchain::Toolchain make_macos_tc(bool with_modules = true) {
+    auto tc = make_tc(with_modules);
+    tc.sysroot = "/fake/MacOSX.sdk";
+    tc.lib_dir = "/fake/lib";
+    tc.has_clang_config = true;
+    return tc;
+}
+
+toolchain::Toolchain make_linux_tc(bool with_modules = true) {
+    auto tc = make_tc(with_modules);
+    tc.lib_dir = "/fake/lib";
+    tc.has_clang_config = true;
+    tc.needs_stdlib_flag = true;
+    return tc;
+}
+
 void test_basic_bin() {
     TmpProject proj;
     proj.write("src/main.cpp", "int main() {}");
@@ -368,6 +384,87 @@ void test_no_import_std_below_23() {
     check(!cmake.contains("CMAKE_CXX_MODULE_STD"), "no module std for C++20");
     check(!cmake.contains("EXPERIMENTAL"), "no experimental for C++20");
     check(cmake.contains("CMAKE_CXX_STANDARD 20"), "standard 20");
+}
+
+void test_configure_command_macos_uses_system_runtime() {
+    TmpProject proj;
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    auto cmd =
+        build::configure_command(make_macos_tc(), m, proj.root / "build", proj.root, true,
+                                 {}, {}, {}, true);
+
+    check(cmd.contains("-DCMAKE_OSX_SYSROOT=/fake/MacOSX.sdk"), "macos: sysroot emitted");
+    check(cmd.contains("-DCMAKE_CXX_STDLIB_MODULES_JSON=/fake/libc++.modules.json"),
+          "macos: stdlib modules emitted");
+    check(!cmd.contains("--no-default-config"), "macos: no no-default-config");
+    check(!cmd.contains("-DCMAKE_CXX_FLAGS"), "macos: no manual cxx flags");
+    check(cmd.contains("-DCMAKE_EXE_LINKER_FLAGS=\"-lc++ -lc++abi\""),
+          "macos: explicit system libc++ link");
+    check(!cmd.contains("-L/fake/lib"), "macos: no llvm lib search path");
+    check(!cmd.contains("-Wl,-rpath,/fake/lib"), "macos: no llvm runtime rpath");
+}
+
+void test_configure_command_linux_cmake_deps_keep_toolchain_runtime() {
+    TmpProject proj;
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    auto cmd =
+        build::configure_command(make_linux_tc(), m, proj.root / "build", proj.root, false,
+                                 {}, {}, {}, true);
+
+    check(cmd.contains("-DCMAKE_CXX_FLAGS=\"-stdlib=libc++\""),
+          "linux: compile uses libc++");
+    check(cmd.contains("-DCMAKE_EXE_LINKER_FLAGS=\"-L/fake/lib -Wl,-rpath,/fake/lib -lc++abi\""),
+          "linux: cmake deps keep toolchain runtime");
+}
+
+void test_build_command_macos_import_std_serialized() {
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    auto cmd = build::build_command(make_macos_tc(), m, "/tmp/exon-build");
+
+    check(cmd.contains("cmake --build /tmp/exon-build"), "build cmd: base build");
+    check(cmd.contains("--parallel 1"), "build cmd: macos import std serialized");
+}
+
+void test_build_command_macos_no_std_modules_keeps_default_parallelism() {
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    auto cmd = build::build_command(make_macos_tc(false), m, "/tmp/exon-build");
+
+    check(!cmd.contains("--parallel 1"), "build cmd: no std modules keeps default parallelism");
+}
+
+void test_build_command_wasm_keeps_default_parallelism() {
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    auto cmd = build::build_command(make_macos_tc(), m, "/tmp/exon-build", "app", "wasm32-wasi");
+
+    check(cmd.contains("--target app"), "build cmd: target emitted");
+    check(!cmd.contains("--parallel 1"), "build cmd: wasm keeps default parallelism");
 }
 
 void test_user_cxxflags_env_only() {
@@ -873,6 +970,11 @@ int main() {
     test_dev_find_deps();
     test_path_dep_in_generate_cmake();
     test_no_import_std_below_23();
+    test_configure_command_macos_uses_system_runtime();
+    test_configure_command_linux_cmake_deps_keep_toolchain_runtime();
+    test_build_command_macos_import_std_serialized();
+    test_build_command_macos_no_std_modules_keeps_default_parallelism();
+    test_build_command_wasm_keeps_default_parallelism();
     test_user_cxxflags_env_only();
     test_generate_cmake_base_build_flags();
     test_generate_cmake_target_section_build();

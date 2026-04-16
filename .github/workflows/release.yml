@@ -62,8 +62,13 @@ jobs:
             export LD_LIBRARY_PATH="$LIBCXX_DIR:${LD_LIBRARY_PATH:-}"
           fi
           eval cmake $CMAKE_ARGS
-          cmake --build build --target exon
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            cmake --build build --target exon --parallel 1
+          else
+            cmake --build build --target exon
+          fi
           ./build/exon build --release
+          ./.exon/release/exon info
 
       - name: Package
         run: |
