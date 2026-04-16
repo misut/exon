@@ -16,7 +16,7 @@ endif()
 include(FetchContent)
 FetchContent_Declare(cppx
     GIT_REPOSITORY https://github.com/misut/cppx.git
-    GIT_TAG v0.3.1
+    GIT_TAG v1.0.2
     GIT_SHALLOW ON
 )
 FetchContent_Declare(tomlcpp
@@ -52,6 +52,14 @@ target_sources(exon PRIVATE
 )
 target_link_libraries(exon PRIVATE exon-modules)
 
+if(PROJECT_IS_TOP_LEVEL)
+    if(APPLE)
+        target_link_options(exon PRIVATE -framework Security -Wl,-framework,CoreFoundation)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_options(exon PRIVATE -lssl -lcrypto)
+    endif()
+endif()
+
 set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/build.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/cli.cppm
@@ -65,8 +73,17 @@ set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vcpkg.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
     PROPERTIES COMPILE_DEFINITIONS
-    "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.22.2\""
+    "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.23.0\""
 )
+
+if(PROJECT_IS_TOP_LEVEL)
+
+    target_link_options(exon-modules PRIVATE
+        -framework
+        Security
+        -Wl,-framework,CoreFoundation
+    )
+endif()
 
 add_executable(test-test_build)
 target_sources(test-test_build PRIVATE
@@ -76,6 +93,15 @@ target_link_libraries(test-test_build PRIVATE
     exon-modules
 )
 
+if(PROJECT_IS_TOP_LEVEL)
+
+    target_link_options(test-test_build PRIVATE
+        -framework
+        Security
+        -Wl,-framework,CoreFoundation
+    )
+endif()
+
 add_executable(test-test_cli)
 target_sources(test-test_cli PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.cpp
@@ -83,6 +109,15 @@ target_sources(test-test_cli PRIVATE
 target_link_libraries(test-test_cli PRIVATE
     exon-modules
 )
+
+if(PROJECT_IS_TOP_LEVEL)
+
+    target_link_options(test-test_cli PRIVATE
+        -framework
+        Security
+        -Wl,-framework,CoreFoundation
+    )
+endif()
 
 add_executable(test-test_fetch)
 target_sources(test-test_fetch PRIVATE
@@ -92,6 +127,15 @@ target_link_libraries(test-test_fetch PRIVATE
     exon-modules
 )
 
+if(PROJECT_IS_TOP_LEVEL)
+
+    target_link_options(test-test_fetch PRIVATE
+        -framework
+        Security
+        -Wl,-framework,CoreFoundation
+    )
+endif()
+
 add_executable(test-test_lock)
 target_sources(test-test_lock PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_lock.cpp
@@ -99,6 +143,15 @@ target_sources(test-test_lock PRIVATE
 target_link_libraries(test-test_lock PRIVATE
     exon-modules
 )
+
+if(PROJECT_IS_TOP_LEVEL)
+
+    target_link_options(test-test_lock PRIVATE
+        -framework
+        Security
+        -Wl,-framework,CoreFoundation
+    )
+endif()
 
 add_executable(test-test_manifest)
 target_sources(test-test_manifest PRIVATE
@@ -108,6 +161,15 @@ target_link_libraries(test-test_manifest PRIVATE
     exon-modules
 )
 
+if(PROJECT_IS_TOP_LEVEL)
+
+    target_link_options(test-test_manifest PRIVATE
+        -framework
+        Security
+        -Wl,-framework,CoreFoundation
+    )
+endif()
+
 add_executable(test-test_semver)
 target_sources(test-test_semver PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_semver.cpp
@@ -115,6 +177,15 @@ target_sources(test-test_semver PRIVATE
 target_link_libraries(test-test_semver PRIVATE
     exon-modules
 )
+
+if(PROJECT_IS_TOP_LEVEL)
+
+    target_link_options(test-test_semver PRIVATE
+        -framework
+        Security
+        -Wl,-framework,CoreFoundation
+    )
+endif()
 
 add_executable(test-test_toml)
 target_sources(test-test_toml PRIVATE
@@ -124,6 +195,15 @@ target_link_libraries(test-test_toml PRIVATE
     exon-modules
 )
 
+if(PROJECT_IS_TOP_LEVEL)
+
+    target_link_options(test-test_toml PRIVATE
+        -framework
+        Security
+        -Wl,-framework,CoreFoundation
+    )
+endif()
+
 add_executable(test-test_vcpkg)
 target_sources(test-test_vcpkg PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vcpkg.cpp
@@ -131,3 +211,12 @@ target_sources(test-test_vcpkg PRIVATE
 target_link_libraries(test-test_vcpkg PRIVATE
     exon-modules
 )
+
+if(PROJECT_IS_TOP_LEVEL)
+
+    target_link_options(test-test_vcpkg PRIVATE
+        -framework
+        Security
+        -Wl,-framework,CoreFoundation
+    )
+endif()

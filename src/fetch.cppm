@@ -3,6 +3,9 @@ import std;
 import manifest;
 import toolchain;
 import lock;
+import cppx.http;
+import cppx.http.client;
+import cppx.http.system;
 
 export namespace fetch {
 
@@ -39,6 +42,35 @@ std::string cache_safe_key(std::string const& dep_key) {
     if (k.size() >= 2 && k[1] == ':')
         k[1] = '_';
     return k;
+}
+
+bool is_github_key(std::string const& dep_key) {
+    return dep_key.starts_with("github.com/");
+}
+
+// Pre-flight check: verify a GitHub tag exists via the API before cloning.
+// Returns true if the tag was confirmed, false if the check was skipped or
+// inconclusive (caller should proceed with git clone either way).
+// Throws on definitive 404 (tag does not exist).
+void preflight_check_github_tag(std::string const& dep_key, std::string const& tag) {
+#if defined(__wasi__)
+    return; // no HTTP on WASM
+#else
+    if (!is_github_key(dep_key)) return;
+
+    // "github.com/user/repo" → "https://api.github.com/repos/user/repo/git/ref/tags/{tag}"
+    auto repo_path = dep_key.substr(11); // skip "github.com/"
+    auto api_url = std::format("https://api.github.com/repos/{}/git/ref/tags/{}", repo_path, tag);
+
+    auto resp = cppx::http::system::get(api_url);
+    if (!resp) return; // network error — skip check, let git clone try
+
+    if (resp->stat.code == 404) {
+        throw std::runtime_error(
+            std::format("tag '{}' not found in {} (GitHub API returned 404)", tag, dep_key));
+    }
+    // Any other status (200, 403 rate-limit, etc.) — proceed with clone
+#endif
 }
 
 // "github.com/user/repo" → "https://github.com/user/repo.git"
@@ -119,6 +151,10 @@ EnsureCloneResult ensure_git_clone(std::string const& repo, std::string const& v
         auto commit = get_git_commit(dep_cache);
         return {.path = dep_cache, .commit = commit};
     }
+
+    // Pre-flight: check if the tag exists on GitHub before cloning.
+    // Gives a clear error ("tag not found") instead of a cryptic git failure.
+    preflight_check_github_tag(repo, tag);
 
     std::filesystem::create_directories(dep_cache);
     auto git_url = to_git_url(repo);
@@ -286,6 +322,8 @@ void fetch_recursive(std::string const& dep_key, std::string const& version, loc
 
     // fresh clone
     if (dep.path.empty()) {
+        preflight_check_github_tag(dep_key, tag);
+
         std::filesystem::create_directories(dep_cache);
 
         auto git_url = to_git_url(dep_key);

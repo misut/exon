@@ -727,6 +727,11 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
     {
         auto cxx_target = has_modules ? modules_lib : std::string{m.name};
         emit_build_for(cxx_target);
+        // For bin projects with modules: ldflags on the static modules lib
+        // don't propagate to the executable. Emit them on the exe too so
+        // platform linker flags (e.g. -framework Security) reach the link.
+        if (m.type == "bin" && has_modules)
+            emit_build_for(m.name);
     }
 
     // test targets
@@ -1070,6 +1075,10 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         out << "endif()\n";
     };
     emit_all_build_for(link_target);
+    // For bin projects with modules: also emit on the executable so that
+    // PRIVATE ldflags (e.g. -framework Security) reach the final link step.
+    if (m.type == "bin" && has_modules)
+        emit_all_build_for(m.name);
 
     // platform-conditional sections (target.'cfg(...)' blocks) for non-build
     // bits — find_package and defines, both lib-only.

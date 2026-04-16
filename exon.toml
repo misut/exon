@@ -8,5 +8,12 @@ type = "bin"
 standard = 23
 
 [dependencies]
-"github.com/misut/cppx" = "0.3.1"
+"github.com/misut/cppx" = "1.0.2"
 "github.com/misut/tomlcpp" = "0.3.0"
+
+# cppx 1.0.2 HTTP/TLS requires platform system libraries
+[target.'cfg(os = "macos")'.build]
+ldflags = ["-framework", "Security", "-Wl,-framework,CoreFoundation"]
+
+[target.'cfg(os = "linux")'.build]
+ldflags = ["-lssl", "-lcrypto"]
