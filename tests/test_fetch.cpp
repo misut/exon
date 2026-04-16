@@ -507,12 +507,17 @@ missing = true
     fs::current_path(saved_cwd);
 }
 
-// helper: create a local git repo with exon.toml and tag it
+// helper: create a local git repo under a parent dir so that
+// extract_repo_name (last path component) returns the desired name
 struct TmpGitRepo {
     fs::path root;
+    fs::path parent;
+    bool owns_parent;
 
-    TmpGitRepo(std::string const& name) {
-        root = fs::temp_directory_path() / name;
+    // create at parent_dir/name so extract_repo_name returns "name"
+    TmpGitRepo(fs::path const& parent_dir, std::string const& name)
+        : parent(parent_dir), owns_parent(false) {
+        root = parent_dir / name;
         fs::remove_all(root);
         fs::create_directories(root / "src");
     }
@@ -547,8 +552,10 @@ void test_fetch_path_with_git_dep() {
     auto cache = ws.root / "cache";
     setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
 
-    // create a git repo that will be the transitive dep
-    TmpGitRepo leaf_repo{"exon_test_leaf_repo"};
+    // create a git repo; last path component = package name for extract_repo_name
+    auto repos = ws.root / "repos";
+    fs::create_directories(repos);
+    TmpGitRepo leaf_repo{repos, "leaf"};
     leaf_repo.write("exon.toml", R"([package]
 name = "leaf"
 version = "0.1.0"
@@ -611,8 +618,10 @@ void test_fetch_git_transitive() {
     auto cache = ws.root / "cache";
     setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
 
-    // leaf git repo (no deps)
-    TmpGitRepo leaf_repo{"exon_test_git_leaf"};
+    // leaf git repo (no deps); last path component = package name
+    auto repos = ws.root / "repos";
+    fs::create_directories(repos);
+    TmpGitRepo leaf_repo{repos, "leaf"};
     leaf_repo.write("exon.toml", R"([package]
 name = "leaf"
 version = "0.1.0"
@@ -623,7 +632,7 @@ standard = 23
     leaf_repo.init_and_tag("v0.1.0");
 
     // middle git repo depends on leaf
-    TmpGitRepo middle_repo{"exon_test_git_middle"};
+    TmpGitRepo middle_repo{repos, "middle"};
     middle_repo.write("exon.toml", std::format(R"([package]
 name = "middle"
 version = "0.1.0"
@@ -684,7 +693,9 @@ void test_fetch_path_with_subdir_dep() {
     setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
 
     // git repo with a workspace member "refl"
-    TmpGitRepo repo{"exon_test_subdir_repo"};
+    auto repos = ws.root / "repos";
+    fs::create_directories(repos);
+    TmpGitRepo repo{repos, "subrepo"};
     repo.write("exon.toml", "[workspace]\nmembers = [\"refl\"]\n");
     repo.write("refl/exon.toml", R"([package]
 name = "refl"
@@ -747,7 +758,9 @@ void test_fetch_path_with_featured_dep() {
     setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
 
     // git repo with features
-    TmpGitRepo feat_repo{"exon_test_feat_repo"};
+    auto repos = ws.root / "repos";
+    fs::create_directories(repos);
+    TmpGitRepo feat_repo{repos, "featlib"};
     feat_repo.write("exon.toml", R"([package]
 name = "featlib"
 version = "0.1.0"
