@@ -68,6 +68,14 @@ set_source_files_properties(
     "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.23.3\""
 )
 
+add_executable(test-regressions)
+target_sources(test-regressions PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/regressions.cpp
+)
+target_link_libraries(test-regressions PRIVATE
+    exon-modules
+)
+
 add_executable(test-test_build)
 target_sources(test-test_build PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_build.cpp
