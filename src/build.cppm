@@ -1,3 +1,9 @@
+module;
+#if defined(_WIN32)
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 export module build;
 import std;
 import toml;
@@ -27,6 +33,194 @@ std::string user_ldflags() {
 }
 
 namespace detail {
+
+struct CommandResult {
+    int exit_code = 0;
+    bool timed_out = false;
+};
+
+bool build_has_asan_flag(manifest::Build const& b) {
+    auto has_asan = [](std::vector<std::string> const& flags) {
+        return std::ranges::any_of(flags, [](std::string const& flag) {
+            return flag.contains("/fsanitize=address") ||
+                   flag.contains("-fsanitize=address");
+        });
+    };
+    return has_asan(b.cxxflags) || has_asan(b.ldflags);
+}
+
+bool build_has_windows_asan(manifest::Manifest const& m) {
+    if (build_has_asan_flag(m.build) || build_has_asan_flag(m.build_debug) ||
+        build_has_asan_flag(m.build_release)) {
+        return true;
+    }
+
+    toolchain::Platform windows_x64{.os = "windows", .arch = "x86_64"};
+    for (auto const& ts : m.target_sections) {
+        if (!manifest::eval_predicate(ts.predicate, windows_x64))
+            continue;
+        if (build_has_asan_flag(ts.build) || build_has_asan_flag(ts.build_debug) ||
+            build_has_asan_flag(ts.build_release)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void emit_windows_asan_runtime_support(std::ostringstream& out,
+                                       manifest::Manifest const& m) {
+    if (!build_has_windows_asan(m))
+        return;
+
+    out << R"(if(WIN32)
+function(exon_copy_windows_asan_runtime target)
+    get_target_property(_exon_target_type ${target} TYPE)
+    if(NOT _exon_target_type STREQUAL "EXECUTABLE")
+        return()
+    endif()
+
+    get_filename_component(_exon_compiler_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    set(_exon_asan_runtime "")
+    set(_exon_candidates
+        "${_exon_compiler_dir}/clang_rt.asan_dynamic-x86_64.dll"
+        "$ENV{VCToolsInstallDir}/bin/Hostx64/x64/clang_rt.asan_dynamic-x86_64.dll"
+    )
+
+    foreach(_exon_candidate IN LISTS _exon_candidates)
+        if(_exon_candidate AND EXISTS "${_exon_candidate}")
+            set(_exon_asan_runtime "${_exon_candidate}")
+            break()
+        endif()
+    endforeach()
+
+    if(NOT _exon_asan_runtime)
+        message(FATAL_ERROR
+            "Windows ASan runtime not found: clang_rt.asan_dynamic-x86_64.dll. "
+            "Run from a Visual Studio developer environment or install the MSVC ASan runtime.")
+    endif()
+
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_exon_asan_runtime}"
+            "$<TARGET_FILE_DIR:${target}>/clang_rt.asan_dynamic-x86_64.dll")
+endfunction()
+endif()
+
+)";
+}
+
+#if defined(_WIN32)
+std::wstring widen_command(std::string_view command) {
+    if (command.empty())
+        return {};
+    auto size = MultiByteToWideChar(CP_ACP, 0, command.data(),
+                                    static_cast<int>(command.size()), nullptr, 0);
+    if (size <= 0)
+        throw std::runtime_error("failed to convert command line to UTF-16");
+    std::wstring wide(static_cast<std::size_t>(size), L'\0');
+    MultiByteToWideChar(CP_ACP, 0, command.data(), static_cast<int>(command.size()),
+                        wide.data(), size);
+    return wide;
+}
+
+CommandResult run_command_windows(std::string_view command,
+                                  std::optional<std::chrono::milliseconds> timeout = {}) {
+    auto wide = widen_command(command);
+    std::vector<wchar_t> mutable_cmd(wide.begin(), wide.end());
+    mutable_cmd.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job != nullptr) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info,
+                                     sizeof(info))) {
+            CloseHandle(job);
+            job = nullptr;
+        }
+    }
+
+    auto old_error_mode =
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    auto restore_error_mode = [&] { SetErrorMode(old_error_mode); };
+
+    if (!CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+                        &si, &pi)) {
+        auto error = GetLastError();
+        if (job != nullptr)
+            CloseHandle(job);
+        restore_error_mode();
+        throw std::runtime_error(
+            std::format("failed to start process (GetLastError={})", error));
+    }
+
+    if (job != nullptr && !AssignProcessToJobObject(job, pi.hProcess)) {
+        CloseHandle(job);
+        job = nullptr;
+    }
+
+    auto wait_ms = timeout
+        ? static_cast<DWORD>(std::min<std::chrono::milliseconds::rep>(
+              timeout->count(), std::numeric_limits<DWORD>::max()))
+        : INFINITE;
+    auto wait_result = WaitForSingleObject(pi.hProcess, wait_ms);
+
+    CommandResult result;
+    if (wait_result == WAIT_TIMEOUT) {
+        result.timed_out = true;
+        if (job != nullptr) {
+            TerminateJobObject(job, 124);
+        } else {
+            TerminateProcess(pi.hProcess, 124);
+        }
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        result.exit_code = 124;
+    } else if (wait_result != WAIT_OBJECT_0) {
+        auto error = GetLastError();
+        if (job != nullptr)
+            CloseHandle(job);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        restore_error_mode();
+        throw std::runtime_error(
+            std::format("failed while waiting for process (GetLastError={})", error));
+    } else {
+        DWORD exit_code = 0;
+        if (!GetExitCodeProcess(pi.hProcess, &exit_code)) {
+            auto error = GetLastError();
+            if (job != nullptr)
+                CloseHandle(job);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            restore_error_mode();
+            throw std::runtime_error(
+                std::format("failed to read process exit code (GetLastError={})", error));
+        }
+        result.exit_code = static_cast<int>(exit_code);
+    }
+
+    if (job != nullptr)
+        CloseHandle(job);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    restore_error_mode();
+    return result;
+}
+#endif
+
+CommandResult run_command(std::string_view command,
+                          std::optional<std::chrono::milliseconds> timeout = {}) {
+#if defined(_WIN32)
+    return run_command_windows(command, timeout);
+#else
+    (void)timeout;
+    return CommandResult{.exit_code = std::system(std::string{command}.c_str())};
+#endif
+}
 
 struct SourceFiles {
     std::vector<std::string> cpp;  // .cpp files
@@ -427,6 +621,7 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
     detail::emit_cmake_preamble(out, m, import_std);
     if (tc.is_msvc)
         detail::emit_msvc_options(out);
+    detail::emit_windows_asan_runtime_support(out, m);
 
     // separate deps into regular and dev
     std::vector<fetch::FetchedDep const*> regular_deps, dev_deps;
@@ -706,6 +901,8 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             out << "\n)\n";
         }
     }
+    if (m.type != "lib" && detail::build_has_windows_asan(m))
+        out << std::format("exon_copy_windows_asan_runtime({})\n", m.name);
 
     // compile definitions
     // EXON_PKG_NAME/VERSION are set per-source so our value wins over any
@@ -798,6 +995,8 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             }
 
             emit_build_for(test_name);
+            if (detail::build_has_windows_asan(m))
+                out << std::format("exon_copy_windows_asan_runtime({})\n", test_name);
         }
     }
 
@@ -828,6 +1027,7 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
     bool import_std = (m.standard >= 23);
     detail::emit_cmake_preamble(out, m, import_std);
     detail::emit_msvc_options(out);
+    detail::emit_windows_asan_runtime_support(out, m);
 
     auto root = std::filesystem::current_path();
 
@@ -994,6 +1194,8 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             out << "\n)\n";
         }
     }
+    if (m.type != "lib" && detail::build_has_windows_asan(m))
+        out << std::format("exon_copy_windows_asan_runtime({})\n", m.name);
 
     // compile definitions
     // EXON_PKG_NAME/VERSION are set per-source so our value wins over any
@@ -1181,6 +1383,8 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             // test executable. Required for sanitizer-instrumented libs whose
             // tests must also be instrumented to satisfy runtime symbol refs.
             emit_all_build_for(test_name);
+            if (detail::build_has_windows_asan(m))
+                out << std::format("exon_copy_windows_asan_runtime({})\n", test_name);
         }
     }
 
@@ -1202,6 +1406,11 @@ bool sync_root_cmake(manifest::Manifest const& m, std::vector<fetch::FetchedDep>
     file << content;
     std::println("synced CMakeLists.txt");
     return true;
+}
+
+export int run_process(std::string_view command,
+                       std::optional<std::chrono::milliseconds> timeout = {}) {
+    return detail::run_command(command, timeout).exit_code;
 }
 
 int run(manifest::Manifest const& m, bool release = false, std::string_view target = {}) {
@@ -1268,16 +1477,16 @@ int run(manifest::Manifest const& m, bool release = false, std::string_view targ
 
     if (changed || !configured) {
         std::println("configuring...");
-        int rc = std::system(configure_command(tc, m, build_dir, exon_dir, release,
-                                               vcpkg_toolchain.string(), exon_dir,
-                                               wasm_toolchain_file,
-                                               any_cmake_deps).c_str());
+        int rc = detail::run_command(configure_command(tc, m, build_dir, exon_dir, release,
+                                                       vcpkg_toolchain.string(), exon_dir,
+                                                       wasm_toolchain_file,
+                                                       any_cmake_deps)).exit_code;
         if (rc != 0)
             return rc;
     }
 
     std::println("building...");
-    int rc = std::system(build_command(tc, m, build_dir, {}, target).c_str());
+    int rc = detail::run_command(build_command(tc, m, build_dir, {}, target)).exit_code;
     if (rc != 0)
         return rc;
 
@@ -1348,10 +1557,10 @@ int run_check(manifest::Manifest const& m, bool release = false, std::string_vie
 
     if (changed || !configured) {
         std::println("configuring...");
-        int rc = std::system(configure_command(tc, m, build_dir, exon_dir, release,
-                                               vcpkg_toolchain.string(), exon_dir,
-                                               wasm_toolchain_file,
-                                               any_cmake_deps).c_str());
+        int rc = detail::run_command(configure_command(tc, m, build_dir, exon_dir, release,
+                                                       vcpkg_toolchain.string(), exon_dir,
+                                                       wasm_toolchain_file,
+                                                       any_cmake_deps)).exit_code;
         if (rc != 0)
             return rc;
     }
@@ -1365,7 +1574,7 @@ int run_check(manifest::Manifest const& m, bool release = false, std::string_vie
         ? std::string{m.name}
         : std::format("{}-modules", m.name);
     std::println("checking...");
-    int rc = std::system(build_command(tc, m, build_dir, check_target, target).c_str());
+    int rc = detail::run_command(build_command(tc, m, build_dir, check_target, target)).exit_code;
     if (rc != 0)
         return rc;
 
@@ -1374,7 +1583,8 @@ int run_check(manifest::Manifest const& m, bool release = false, std::string_vie
 }
 
 int run_test(manifest::Manifest const& m, bool release = false,
-             std::string_view target = {}, std::string_view filter = {}) {
+             std::string_view target = {}, std::string_view filter = {},
+             std::optional<std::chrono::milliseconds> timeout = {}) {
     detail::ensure_intron_tools();
 
     bool is_wasm = !target.empty();
@@ -1453,10 +1663,10 @@ int run_test(manifest::Manifest const& m, bool release = false,
 
     if (changed || !configured) {
         std::println("configuring...");
-        int rc = std::system(configure_command(tc, m, build_dir, exon_dir, release,
-                                               vcpkg_toolchain.string(), exon_dir,
-                                               wasm_toolchain_file,
-                                               any_cmake_deps).c_str());
+        int rc = detail::run_command(configure_command(tc, m, build_dir, exon_dir, release,
+                                                       vcpkg_toolchain.string(), exon_dir,
+                                                       wasm_toolchain_file,
+                                                       any_cmake_deps)).exit_code;
         if (rc != 0)
             return rc;
     }
@@ -1477,7 +1687,7 @@ int run_test(manifest::Manifest const& m, bool release = false,
     // build
     std::println("building tests...");
     for (auto const& name : test_names) {
-        int rc = std::system(build_command(tc, m, build_dir, name, target).c_str());
+        int rc = detail::run_command(build_command(tc, m, build_dir, name, target)).exit_code;
         if (rc != 0)
             return rc;
     }
@@ -1499,8 +1709,11 @@ int run_test(manifest::Manifest const& m, bool release = false,
                                   toolchain::shell_quote(exe.string()));
         else
             run_cmd = toolchain::shell_quote(exe.string());
-        int rc = std::system(run_cmd.c_str());
-        if (rc == 0) {
+        auto result = detail::run_command(run_cmd, timeout);
+        if (result.timed_out) {
+            std::println("  {} ... TIMEOUT", name);
+            ++failed;
+        } else if (result.exit_code == 0) {
             std::println("  {} ... ok", name);
             ++passed;
         } else {

@@ -24,7 +24,7 @@ std::string usage_text() {
             {"build [--release] [--target <t>]",   "build the project"},
             {"check [--release] [--target <t>]",   "check syntax without linking"},
             {"run [--release] [--target <t>] [args]", "build and run the project"},
-            {"test [--release] [--target <t>]",    "build and run tests"},
+            {"test [--release] [--target <t>] [--timeout <sec>]", "build and run tests"},
             {"clean",                              "remove build artifacts"},
             {"add [--dev] <pkg> <ver>",            "add a git dependency"},
             {"add [--dev] --path <name> <path>",   "add a local path dependency"},
@@ -115,6 +115,25 @@ std::string read_file(std::string_view path) {
     auto file = std::ifstream(std::string{path}, std::ios::binary);
     if (!file) return {};
     return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+}
+
+std::optional<std::chrono::milliseconds> parse_timeout(std::string_view value) {
+    if (value.empty())
+        return std::nullopt;
+
+    long long seconds = 0;
+    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), seconds);
+    if (ec != std::errc{} || ptr != value.data() + value.size() || seconds <= 0) {
+        throw std::runtime_error(
+            std::format("invalid --timeout '{}': expected a positive integer in seconds", value));
+    }
+
+    constexpr auto max_ms = std::numeric_limits<std::chrono::milliseconds::rep>::max();
+    if (seconds > max_ms / 1000) {
+        throw std::runtime_error(
+            std::format("invalid --timeout '{}': value is too large", value));
+    }
+    return std::chrono::milliseconds{seconds * 1000};
 }
 
 int cmd_version() {
@@ -286,7 +305,7 @@ int cmd_run(int argc, char* argv[]) {
             run_cmd += std::format(" {}", toolchain::shell_quote(a));
         }
         std::println("running {}...\n", m.name);
-        return std::system(run_cmd.c_str());
+        return build::run_process(run_cmd);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
@@ -299,11 +318,13 @@ int cmd_test(int argc, char* argv[]) {
             cli::Flag{"--release"},
             cli::Option{"--target"},
             cli::Option{"--filter"},
+            cli::Option{"--timeout"},
         };
         auto args = cli::parse(argc, argv, 2, test_defs);
         auto release = args.has("--release");
         auto target = std::string{args.get("--target")};
         auto filter = std::string{args.get("--filter")};
+        auto timeout = parse_timeout(args.get("--timeout"));
         auto m = load_manifest();
         if (!check_platform(m, target))
             return 1;
@@ -314,12 +335,12 @@ int cmd_test(int argc, char* argv[]) {
                 if (!check_platform(member_m, target))
                     return 1;
                 member_m = resolve_manifest(std::move(member_m), target);
-                return build::run_test(member_m, release, target, filter);
+                return build::run_test(member_m, release, target, filter, timeout);
             });
         }
         if (m.name.empty())
             return cli::error("package name is required in exon.toml");
-        return build::run_test(m, release, target, filter);
+        return build::run_test(m, release, target, filter, timeout);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
