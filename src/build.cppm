@@ -72,8 +72,11 @@ void emit_windows_asan_runtime_support(std::ostringstream& out,
     if (!build_has_windows_asan(m))
         return;
 
-    out << R"(if(WIN32)
-function(exon_copy_windows_asan_runtime target)
+    out << R"(function(exon_copy_windows_asan_runtime target)
+    if(NOT WIN32)
+        return()
+    endif()
+
     get_target_property(_exon_target_type ${target} TYPE)
     if(NOT _exon_target_type STREQUAL "EXECUTABLE")
         return()
@@ -104,7 +107,6 @@ function(exon_copy_windows_asan_runtime target)
             "${_exon_asan_runtime}"
             "$<TARGET_FILE_DIR:${target}>/clang_rt.asan_dynamic-x86_64.dll")
 endfunction()
-endif()
 
 )";
 }
@@ -212,13 +214,24 @@ CommandResult run_command_windows(std::string_view command,
 }
 #endif
 
+int normalize_unix_exit_status(int status) {
+    if (status == -1)
+        return 1;
+    if ((status & 0x7f) == 0)
+        return (status >> 8) & 0xff;
+    if ((status & 0x7f) != 0x7f)
+        return 128 + (status & 0x7f);
+    return status;
+}
+
 CommandResult run_command(std::string_view command,
                           std::optional<std::chrono::milliseconds> timeout = {}) {
 #if defined(_WIN32)
     return run_command_windows(command, timeout);
 #else
     (void)timeout;
-    return CommandResult{.exit_code = std::system(std::string{command}.c_str())};
+    auto rc = std::system(std::string{command}.c_str());
+    return CommandResult{.exit_code = normalize_unix_exit_status(rc)};
 #endif
 }
 
