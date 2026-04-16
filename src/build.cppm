@@ -938,8 +938,8 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
 
     // base [build] flags + per-target flags merged into m.build at resolve time.
     // PRIVATE so add_subdirectory consumers don't inherit via INTERFACE_COMPILE_OPTIONS.
-    // Applied to BOTH the lib target and every test executable so sanitizer-
-    // instrumented libs link cleanly with their tests.
+    // Applied to every package-owned target plus every test executable so
+    // sanitizer-instrumented libs and executables link cleanly with their tests.
     auto const& prof_b = release ? m.build_release : m.build_debug;
     auto emit_build_for = [&](std::string_view target) {
         if (!m.build.cxxflags.empty() || !prof_b.cxxflags.empty()) {
@@ -962,6 +962,8 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
     {
         auto cxx_target = has_modules ? modules_lib : std::string{m.name};
         emit_build_for(cxx_target);
+        if (has_modules && m.type != "lib")
+            emit_build_for(m.name);
     }
 
     // test targets
@@ -1230,11 +1232,11 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
     // inherit them through INTERFACE_COMPILE_OPTIONS — each project decides
     // its own flags.
     //
-    // Applied to BOTH the lib target and every test executable: when a lib
-    // is built with sanitizers (e.g. -fsanitize=address,undefined), the test
-    // executables linking against the lib must also be sanitizer-instrumented
-    // so the runtime symbols (UBSan handlers etc.) get pulled in. PRIVATE on
-    // the lib alone produces unresolved-symbol link errors in tests.
+    // Applied to every package-owned target plus every test executable: when a
+    // lib or executable is built with sanitizers
+    // (e.g. -fsanitize=address,undefined), the final linked targets must also
+    // carry the corresponding link options so the runtime symbols get pulled
+    // in. PRIVATE on the modules lib alone is not enough for bin packages.
     auto link_target = has_modules ? modules_lib : std::string{m.name};
     auto emit_build_options_for = [&](std::string_view target,
                                       manifest::Build const& b,
@@ -1310,6 +1312,8 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         out << "endif()\n";
     };
     emit_all_build_for(link_target);
+    if (has_modules && m.type != "lib")
+        emit_all_build_for(m.name);
 
     // platform-conditional sections (target.'cfg(...)' blocks) for non-build
     // bits — find_package and defines, both lib-only.
