@@ -2,6 +2,8 @@ module;
 #if defined(_WIN32)
 #define NOMINMAX
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
 #endif
 
 export module build;
@@ -38,6 +40,73 @@ struct CommandResult {
     int exit_code = 0;
     bool timed_out = false;
 };
+
+std::optional<std::filesystem::path> current_executable_path() {
+    std::error_code ec;
+#if defined(_WIN32)
+    std::wstring buffer(32768, L'\0');
+    auto len = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (len == 0 || len == buffer.size())
+        return std::nullopt;
+    buffer.resize(len);
+    auto path = std::filesystem::path{buffer};
+#elif defined(__APPLE__)
+    uint32_t size = 0;
+    std::array<char, 1> probe{};
+    _NSGetExecutablePath(probe.data(), &size);
+    if (size == 0)
+        return std::nullopt;
+    std::string buffer(size, '\0');
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0)
+        return std::nullopt;
+    auto path = std::filesystem::path{buffer.c_str()};
+#else
+    auto path = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (ec)
+        return std::nullopt;
+#endif
+    auto canon = std::filesystem::weakly_canonical(path, ec);
+    if (!ec)
+        return canon;
+    return path;
+}
+
+bool is_exon_self_host_project(manifest::Manifest const& m,
+                               std::filesystem::path const& project_root) {
+    if (m.name != "exon")
+        return false;
+    auto required = {
+        project_root / "exon.toml",
+        project_root / "CMakeLists.txt",
+        project_root / "src" / "build.cppm",
+        project_root / "src" / "toolchain.cppm",
+        project_root / "tests" / "test_build.cpp",
+    };
+    return std::ranges::all_of(required, [](std::filesystem::path const& path) {
+        return std::filesystem::exists(path);
+    });
+}
+
+std::array<std::filesystem::path, 3> self_host_bootstrap_inputs(
+    std::filesystem::path const& project_root) {
+    return {
+        project_root / "exon.toml",
+        project_root / "src" / "build.cppm",
+        project_root / "src" / "toolchain.cppm",
+    };
+}
+
+std::string display_path(std::filesystem::path const& path,
+                         std::filesystem::path const& project_root) {
+    std::error_code ec;
+    auto rel = std::filesystem::relative(path, project_root, ec);
+    if (!ec && !rel.empty()) {
+        auto rel_str = rel.generic_string();
+        if (rel_str != "." && !rel_str.starts_with("../"))
+            return rel_str;
+    }
+    return path.generic_string();
+}
 
 bool build_has_asan_flag(manifest::Build const& b) {
     auto has_asan = [](std::vector<std::string> const& flags) {
@@ -601,6 +670,61 @@ std::string configure_command(toolchain::Toolchain const& tc, manifest::Manifest
                               bool any_cmake_deps = false) {
     return detail::configure_cmd(tc, m, build_dir, source_dir, release, vcpkg_toolchain,
                                  vcpkg_manifest_dir, wasm_toolchain, any_cmake_deps);
+}
+
+std::optional<std::string> stale_self_host_bootstrap_message(
+    manifest::Manifest const& m, std::filesystem::path const& project_root,
+    std::filesystem::path const& executable_path, toolchain::Platform const& host) {
+    if (host.os != "macos" || executable_path.empty() ||
+        !detail::is_exon_self_host_project(m, project_root)) {
+        return std::nullopt;
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::exists(executable_path, ec) || ec)
+        return std::nullopt;
+    auto executable_time = std::filesystem::last_write_time(executable_path, ec);
+    if (ec)
+        return std::nullopt;
+
+    std::filesystem::path newest_input;
+    std::filesystem::file_time_type newest_input_time;
+    bool has_newer_input = false;
+    for (auto const& input : detail::self_host_bootstrap_inputs(project_root)) {
+        auto input_time = std::filesystem::last_write_time(input, ec);
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        if (input_time > executable_time && (!has_newer_input || input_time > newest_input_time)) {
+            newest_input = input;
+            newest_input_time = input_time;
+            has_newer_input = true;
+        }
+    }
+    if (!has_newer_input)
+        return std::nullopt;
+
+    auto executable_display = detail::display_path(executable_path, project_root);
+    auto newest_input_display = detail::display_path(newest_input, project_root);
+    return std::format(
+        "stale bootstrap executable '{}': '{}' is newer. Rebuild the bootstrap binary before "
+        "running `exon build`, `exon check`, `exon run`, or `exon test` in the exon repo.\n"
+        "  cmake -S . -B build -G Ninja\n"
+        "  cmake --build build --target exon --parallel 1\n"
+        "If build/ points at an older source tree, remove it first.",
+        executable_display, newest_input_display);
+}
+
+void ensure_fresh_self_host_bootstrap(manifest::Manifest const& m,
+                                      std::filesystem::path const& project_root) {
+    auto executable_path = detail::current_executable_path();
+    if (!executable_path)
+        return;
+    if (auto message = stale_self_host_bootstrap_message(m, project_root, *executable_path,
+                                                         toolchain::detect_host_platform())) {
+        throw std::runtime_error(*message);
+    }
 }
 
 bool needs_serial_cxx_modules_build(toolchain::Toolchain const& tc, manifest::Manifest const& m,
@@ -1431,6 +1555,8 @@ int run_process(std::string_view command,
 }
 
 int run(manifest::Manifest const& m, bool release = false, std::string_view target = {}) {
+    auto project_root = std::filesystem::current_path();
+    ensure_fresh_self_host_bootstrap(m, project_root);
     detail::ensure_intron_tools();
 
     bool is_wasm = !target.empty();
@@ -1445,7 +1571,6 @@ int run(manifest::Manifest const& m, bool release = false, std::string_view targ
                 "use git or path dependencies instead");
     }
 
-    auto project_root = std::filesystem::current_path();
     auto exon_dir = project_root / ".exon";
     auto profile = release ? "release" : "debug";
     auto build_dir = is_wasm ? (exon_dir / target / profile) : (exon_dir / profile);
@@ -1515,6 +1640,8 @@ int run(manifest::Manifest const& m, bool release = false, std::string_view targ
 }
 
 int run_check(manifest::Manifest const& m, bool release = false, std::string_view target = {}) {
+    auto project_root = std::filesystem::current_path();
+    ensure_fresh_self_host_bootstrap(m, project_root);
     detail::ensure_intron_tools();
 
     bool is_wasm = !target.empty();
@@ -1528,7 +1655,6 @@ int run_check(manifest::Manifest const& m, bool release = false, std::string_vie
                 "use git or path dependencies instead");
     }
 
-    auto project_root = std::filesystem::current_path();
     auto exon_dir = project_root / ".exon";
     auto profile = release ? "release" : "debug";
     auto build_dir = is_wasm ? (exon_dir / target / profile) : (exon_dir / profile);
@@ -1602,6 +1728,8 @@ int run_check(manifest::Manifest const& m, bool release = false, std::string_vie
 int run_test(manifest::Manifest const& m, bool release = false,
              std::string_view target = {}, std::string_view filter = {},
              std::optional<std::chrono::milliseconds> timeout = {}) {
+    auto project_root = std::filesystem::current_path();
+    ensure_fresh_self_host_bootstrap(m, project_root);
     detail::ensure_intron_tools();
 
     bool is_wasm = !target.empty();
@@ -1615,7 +1743,6 @@ int run_test(manifest::Manifest const& m, bool release = false,
                 "use git or path dependencies instead");
     }
 
-    auto project_root = std::filesystem::current_path();
     auto tests_dir = project_root / "tests";
 
     if (!std::filesystem::exists(tests_dir)) {
