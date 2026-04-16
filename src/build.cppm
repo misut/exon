@@ -58,6 +58,10 @@ struct BuildFlags {
     std::string standard_libraries; // static libs appended after objects (for Linux)
 };
 
+bool use_system_macos_runtime(toolchain::Toolchain const& tc) {
+    return !tc.is_msvc && !tc.needs_stdlib_flag && !tc.sysroot.empty();
+}
+
 BuildFlags resolve_flags(toolchain::Toolchain const& tc, manifest::Manifest const& m,
                          bool release) {
     BuildFlags flags;
@@ -68,6 +72,17 @@ BuildFlags resolve_flags(toolchain::Toolchain const& tc, manifest::Manifest cons
 
     if (tc.stdlib_modules_json.empty() || m.standard < 23)
         return flags;
+
+    // On macOS, keep using the system libc++/libc++abi at runtime. The
+    // toolchain's stdlib modules are still used for `import std;`, but
+    // injecting the LLVM runtime path makes the release binary crash at
+    // startup with libc++abi initialization failures. We still add the
+    // standard library names explicitly because clean CMake configures do not
+    // reliably link libc++/libc++abi when using the intron clang toolchain.
+    if (use_system_macos_runtime(tc)) {
+        flags.linker_flags = "-lc++ -lc++abi";
+        return flags;
+    }
 
     auto libcxx_a = std::filesystem::path{tc.lib_dir} / "libc++.a";
     auto libcxxabi_a = std::filesystem::path{tc.lib_dir} / "libc++abi.a";
@@ -83,17 +98,6 @@ BuildFlags resolve_flags(toolchain::Toolchain const& tc, manifest::Manifest cons
         flags.cxx_flags = "--no-default-config -stdlib=libc++";
         flags.linker_flags = "--no-default-config -nostdlib++ -stdlib=libc++";
         flags.standard_libraries = std::format("{} {}", libcxx_a.string(), libcxxabi_a.string());
-    } else if (release && tc.has_clang_config) {
-        // macOS release: bypass clang config to avoid rpath to toolchain
-        // dir; uses system libc++ (/usr/lib/) instead. needs_stdlib_flag
-        // is false on macOS so the static-link branch above is skipped.
-        flags.cxx_flags = "--no-default-config -stdlib=libc++";
-        flags.linker_flags = "--no-default-config -lc++ -lc++abi";
-        if (!tc.sysroot.empty()) {
-            auto sysroot = std::format(" --sysroot={}", tc.sysroot);
-            flags.cxx_flags += sysroot;
-            flags.linker_flags += sysroot;
-        }
     } else if (!tc.has_clang_config && !tc.lib_dir.empty()) {
         // debug or fallback: dynamic libc++ from lib_dir
         if (tc.needs_stdlib_flag)
@@ -192,7 +196,8 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
     // system libc++ may lack newer C++23 symbols. Add -L and -rpath to
     // the toolchain's lib dir so the linker finds the matching version,
     // plus -lc++abi (the config doesn't include it but Dawn needs it).
-    if (any_cmake_deps && tc.has_clang_config && !tc.lib_dir.empty()) {
+    if (any_cmake_deps && tc.has_clang_config && !tc.lib_dir.empty() &&
+        !use_system_macos_runtime(tc)) {
         ld = combine(ld, std::format("-L{0} -Wl,-rpath,{0} -lc++abi", tc.lib_dir));
     }
 
@@ -379,6 +384,36 @@ std::string collect_find_targets(manifest::Manifest const& m, bool dev) {
 }
 
 } // namespace detail
+
+std::string configure_command(toolchain::Toolchain const& tc, manifest::Manifest const& m,
+                              std::filesystem::path const& build_dir,
+                              std::filesystem::path const& source_dir, bool release,
+                              std::string_view vcpkg_toolchain = {},
+                              std::filesystem::path const& vcpkg_manifest_dir = {},
+                              std::string_view wasm_toolchain = {},
+                              bool any_cmake_deps = false) {
+    return detail::configure_cmd(tc, m, build_dir, source_dir, release, vcpkg_toolchain,
+                                 vcpkg_manifest_dir, wasm_toolchain, any_cmake_deps);
+}
+
+bool needs_serial_cxx_modules_build(toolchain::Toolchain const& tc, manifest::Manifest const& m,
+                                    std::string_view target = {}) {
+    return target.empty() && !tc.is_msvc && !tc.sysroot.empty() &&
+           !tc.stdlib_modules_json.empty() && m.standard >= 23;
+}
+
+std::string build_command(toolchain::Toolchain const& tc, manifest::Manifest const& m,
+                          std::filesystem::path const& build_dir,
+                          std::string_view cmake_target = {},
+                          std::string_view target = {}) {
+    auto cmd = std::format("{} --build {}", toolchain::shell_quote(tc.cmake),
+                           toolchain::shell_quote(build_dir.string()));
+    if (!cmake_target.empty())
+        cmd += std::format(" --target {}", cmake_target);
+    if (needs_serial_cxx_modules_build(tc, m, target))
+        cmd += " --parallel 1";
+    return cmd;
+}
 
 std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path const& project_root,
                            std::vector<fetch::FetchedDep> const& deps,
@@ -1233,18 +1268,16 @@ int run(manifest::Manifest const& m, bool release = false, std::string_view targ
 
     if (changed || !configured) {
         std::println("configuring...");
-        int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release,
-                                                    vcpkg_toolchain.string(), exon_dir,
-                                                    wasm_toolchain_file,
-                                                    any_cmake_deps).c_str());
+        int rc = std::system(configure_command(tc, m, build_dir, exon_dir, release,
+                                               vcpkg_toolchain.string(), exon_dir,
+                                               wasm_toolchain_file,
+                                               any_cmake_deps).c_str());
         if (rc != 0)
             return rc;
     }
 
-    auto build_cmd = std::format("{} --build {}", toolchain::shell_quote(tc.cmake),
-                                 toolchain::shell_quote(build_dir.string()));
     std::println("building...");
-    int rc = std::system(build_cmd.c_str());
+    int rc = std::system(build_command(tc, m, build_dir, {}, target).c_str());
     if (rc != 0)
         return rc;
 
@@ -1315,10 +1348,10 @@ int run_check(manifest::Manifest const& m, bool release = false, std::string_vie
 
     if (changed || !configured) {
         std::println("configuring...");
-        int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release,
-                                                    vcpkg_toolchain.string(), exon_dir,
-                                                    wasm_toolchain_file,
-                                                    any_cmake_deps).c_str());
+        int rc = std::system(configure_command(tc, m, build_dir, exon_dir, release,
+                                               vcpkg_toolchain.string(), exon_dir,
+                                               wasm_toolchain_file,
+                                               any_cmake_deps).c_str());
         if (rc != 0)
             return rc;
     }
@@ -1331,10 +1364,8 @@ int run_check(manifest::Manifest const& m, bool release = false, std::string_vie
     auto check_target = src_sf.cppm.empty()
         ? std::string{m.name}
         : std::format("{}-modules", m.name);
-    auto build_cmd = std::format("{} --build {} --target {}", toolchain::shell_quote(tc.cmake),
-                                 toolchain::shell_quote(build_dir.string()), check_target);
     std::println("checking...");
-    int rc = std::system(build_cmd.c_str());
+    int rc = std::system(build_command(tc, m, build_dir, check_target, target).c_str());
     if (rc != 0)
         return rc;
 
@@ -1422,10 +1453,10 @@ int run_test(manifest::Manifest const& m, bool release = false,
 
     if (changed || !configured) {
         std::println("configuring...");
-        int rc = std::system(detail::configure_cmd(tc, m, build_dir, exon_dir, release,
-                                                    vcpkg_toolchain.string(), exon_dir,
-                                                    wasm_toolchain_file,
-                                                    any_cmake_deps).c_str());
+        int rc = std::system(configure_command(tc, m, build_dir, exon_dir, release,
+                                               vcpkg_toolchain.string(), exon_dir,
+                                               wasm_toolchain_file,
+                                               any_cmake_deps).c_str());
         if (rc != 0)
             return rc;
     }
@@ -1446,9 +1477,7 @@ int run_test(manifest::Manifest const& m, bool release = false,
     // build
     std::println("building tests...");
     for (auto const& name : test_names) {
-        auto build_cmd = std::format("{} --build {} --target {}", toolchain::shell_quote(tc.cmake),
-                                     toolchain::shell_quote(build_dir.string()), name);
-        int rc = std::system(build_cmd.c_str());
+        int rc = std::system(build_command(tc, m, build_dir, name, target).c_str());
         if (rc != 0)
             return rc;
     }
