@@ -93,6 +93,7 @@ authors = ["misut"]
 license = "MIT"
 type = "bin"                              # "bin" or "lib"
 standard = 23
+build-system = "exon"                     # "exon" (default) or "cmake"
 platforms = [                             # supported platforms (optional)
     { os = "linux" },
     { os = "macos", arch = "aarch64" },
@@ -130,6 +131,35 @@ cxxflags = ["-Wall", "-Wextra"]
 [build.debug]
 cxxflags = ["-g", "-fsanitize=address"]
 ldflags  = ["-fsanitize=address"]
+
+[sync]
+cmake-in-root = true                      # generate portable CMakeLists.txt
+```
+
+### Build system
+
+The `build-system` field in `[package]` declares who manages the package's build definition.
+
+- `"exon"` (default): exon scans `src/` for `.cpp`/`.cppm` files and generates cmake targets.
+- `"cmake"`: the package provides its own `CMakeLists.txt`. Exon skips source scanning and uses `add_subdirectory()` directly. Useful for header-only wrappers or packages with custom cmake logic.
+
+```toml
+# header-only library with hand-written CMakeLists.txt
+[package]
+name = "metal-cpp"
+type = "lib"
+build-system = "cmake"
+```
+
+### Sync
+
+The `[sync]` section controls what `exon sync` outputs.
+
+- `cmake-in-root` (default `true`): generate a portable `CMakeLists.txt` at the project root for IDE and raw cmake consumers. Set to `false` for exon-only projects. The internal `.exon/CMakeLists.txt` is always generated regardless of this setting.
+
+```toml
+[sync]
+cmake-in-root = false    # exon-only project, no root CMakeLists.txt needed
 ```
 
 ### Build flags
@@ -360,7 +390,8 @@ int main() {
 - **Five dependency kinds** — git, find_package, local path, workspace sibling, vcpkg
 - **Workspaces** — monorepos with `[workspace] members = [...]` and member-to-member references
 - **Compile definitions** — built-in (`EXON_PKG_NAME`, `EXON_PKG_VERSION`) and user-defined via `[defines]`
-- **CMakeLists.txt sync** — `exon sync` generates a portable CMakeLists.txt for plain cmake builds
+- **CMakeLists.txt sync** — `exon sync` generates a portable CMakeLists.txt for plain cmake builds (opt-out with `[sync] cmake-in-root = false`)
+- **Custom cmake packages** — `build-system = "cmake"` delegates to a hand-written CMakeLists.txt instead of scanning `src/`
 - **Syntax check** — `exon check` compiles modules without linking for fast feedback
 - **Self-hosting** — exon builds itself with `exon build`
 - **Cross-platform** — macOS (ARM64), Linux (x86_64, aarch64), and Windows (x86_64, MSVC)
