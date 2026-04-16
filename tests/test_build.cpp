@@ -77,6 +77,20 @@ toolchain::Toolchain make_linux_tc(bool with_modules = true) {
     return tc;
 }
 
+void write_fake_exon_repo(TmpProject& proj) {
+    proj.write("exon.toml", R"([package]
+name = "exon"
+version = "0.1.0"
+type = "bin"
+standard = 23
+)");
+    proj.write("CMakeLists.txt", "cmake_minimum_required(VERSION 3.30)\n");
+    proj.write("src/build.cppm", "export module build;\n");
+    proj.write("src/toolchain.cppm", "export module toolchain;\n");
+    proj.write("tests/test_build.cpp", "int main() { return 0; }\n");
+    proj.write("build/exon", "");
+}
+
 void test_basic_bin() {
     TmpProject proj;
     proj.write("src/main.cpp", "int main() {}");
@@ -465,6 +479,65 @@ void test_build_command_wasm_keeps_default_parallelism() {
 
     check(cmd.contains("--target app"), "build cmd: target emitted");
     check(!cmd.contains("--parallel 1"), "build cmd: wasm keeps default parallelism");
+}
+
+void test_stale_self_host_bootstrap_message_for_macos_exon_repo() {
+    TmpProject proj;
+    write_fake_exon_repo(proj);
+
+    auto executable = proj.root / "build" / "exon";
+    auto newest_input = proj.root / "src" / "build.cppm";
+    auto older_input = proj.root / "src" / "toolchain.cppm";
+    auto manifest_path = proj.root / "exon.toml";
+    auto base = std::filesystem::file_time_type::clock::now();
+
+    std::filesystem::last_write_time(executable, base - std::chrono::hours{4});
+    std::filesystem::last_write_time(newest_input, base - std::chrono::hours{1});
+    std::filesystem::last_write_time(older_input, base - std::chrono::hours{2});
+    std::filesystem::last_write_time(manifest_path, base - std::chrono::hours{3});
+
+    manifest::Manifest m;
+    m.name = "exon";
+
+    auto message = build::stale_self_host_bootstrap_message(
+        m, proj.root, executable, {.os = "macos", .arch = "aarch64"});
+
+    check(message.has_value(), "stale bootstrap: macOS exon repo is guarded");
+    check(message && message->contains("src/build.cppm"),
+          "stale bootstrap: newest input called out");
+    check(message && message->contains("cmake --build build --target exon --parallel 1"),
+          "stale bootstrap: rebuild command is documented");
+}
+
+void test_stale_self_host_bootstrap_message_skips_fresh_or_non_macos_cases() {
+    TmpProject proj;
+    write_fake_exon_repo(proj);
+
+    auto executable = proj.root / "build" / "exon";
+    auto base = std::filesystem::file_time_type::clock::now();
+
+    std::filesystem::last_write_time(executable, base);
+    std::filesystem::last_write_time(proj.root / "src" / "build.cppm", base - std::chrono::hours{1});
+    std::filesystem::last_write_time(proj.root / "src" / "toolchain.cppm",
+                                     base - std::chrono::hours{2});
+    std::filesystem::last_write_time(proj.root / "exon.toml", base - std::chrono::hours{3});
+
+    manifest::Manifest exon_repo;
+    exon_repo.name = "exon";
+    auto fresh_message = build::stale_self_host_bootstrap_message(
+        exon_repo, proj.root, executable, {.os = "macos", .arch = "aarch64"});
+    check(!fresh_message.has_value(), "stale bootstrap: fresh bootstrap is allowed");
+
+    std::filesystem::last_write_time(proj.root / "src" / "build.cppm", base + std::chrono::hours{1});
+    auto linux_message = build::stale_self_host_bootstrap_message(
+        exon_repo, proj.root, executable, {.os = "linux", .arch = "x86_64"});
+    check(!linux_message.has_value(), "stale bootstrap: non-macOS host is ignored");
+
+    manifest::Manifest app_repo;
+    app_repo.name = "app";
+    auto app_message = build::stale_self_host_bootstrap_message(
+        app_repo, proj.root, executable, {.os = "macos", .arch = "aarch64"});
+    check(!app_message.has_value(), "stale bootstrap: non-exon project is ignored");
 }
 
 void test_user_cxxflags_env_only() {
@@ -1072,6 +1145,8 @@ int main() {
     test_build_command_macos_import_std_serialized();
     test_build_command_macos_no_std_modules_keeps_default_parallelism();
     test_build_command_wasm_keeps_default_parallelism();
+    test_stale_self_host_bootstrap_message_for_macos_exon_repo();
+    test_stale_self_host_bootstrap_message_skips_fresh_or_non_macos_cases();
     test_user_cxxflags_env_only();
     test_generate_cmake_base_build_flags();
     test_generate_cmake_bin_modules_build_flags_apply_to_exec();
