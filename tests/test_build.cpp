@@ -601,6 +601,265 @@ void test_generate_cmake_no_build_flags_skipped() {
     std::filesystem::remove_all(temp);
 }
 
+// test: cmake_deps from a git dep are collected at root level and linked transitively
+void test_transitive_cmake_deps_from_git() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}");
+
+    auto dep_path = std::filesystem::temp_directory_path() / "exon_test_trans_cmake_git";
+    std::filesystem::remove_all(dep_path);
+    std::filesystem::create_directories(dep_path / "src");
+    {
+        auto f = std::ofstream{dep_path / "src" / "renderer.cppm"};
+        f << "export module renderer;";
+    }
+    {
+        auto f = std::ofstream{dep_path / "exon.toml"};
+        f << R"([package]
+name = "renderer"
+version = "0.1.0"
+type = "lib"
+standard = 23
+
+[dependencies.cmake.glfw]
+git = "https://github.com/glfw/glfw.git"
+tag = "3.4"
+targets = "glfw"
+)";
+    }
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    std::vector<fetch::FetchedDep> deps = {{
+        .key = "github.com/user/renderer",
+        .name = "renderer",
+        .version = "0.1.0",
+        .commit = "abc123",
+        .path = dep_path,
+    }};
+
+    auto cmake = build::generate_cmake(m, proj.root, deps, make_tc());
+
+    check(cmake.contains("FetchContent_Declare(glfw"),
+          "trans cmake git: glfw FetchContent emitted");
+    check(cmake.contains("target_link_libraries(renderer PUBLIC"),
+          "trans cmake git: renderer links transitively");
+    check(cmake.contains("glfw"),
+          "trans cmake git: glfw target linked");
+
+    std::filesystem::remove_all(dep_path);
+}
+
+// test: cmake_deps from a path dep are collected at root level
+void test_transitive_cmake_deps_from_path() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}");
+
+    auto dep_path = std::filesystem::temp_directory_path() / "exon_test_trans_cmake_path";
+    std::filesystem::remove_all(dep_path);
+    std::filesystem::create_directories(dep_path / "src");
+    {
+        auto f = std::ofstream{dep_path / "src" / "ui.cppm"};
+        f << "export module ui;";
+    }
+    {
+        auto f = std::ofstream{dep_path / "exon.toml"};
+        f << R"([package]
+name = "ui"
+version = "0.1.0"
+type = "lib"
+standard = 23
+
+[dependencies.cmake.glfw]
+git = "https://github.com/glfw/glfw.git"
+tag = "3.4"
+targets = "glfw"
+)";
+    }
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    std::vector<fetch::FetchedDep> deps = {{
+        .key = "ui",
+        .name = "ui",
+        .path = dep_path,
+        .is_path = true,
+    }};
+
+    auto cmake = build::generate_cmake(m, proj.root, deps, make_tc());
+
+    check(cmake.contains("FetchContent_Declare(glfw"),
+          "trans cmake path: glfw FetchContent emitted");
+    check(cmake.contains("target_link_libraries(ui PUBLIC"),
+          "trans cmake path: ui links transitively");
+
+    std::filesystem::remove_all(dep_path);
+}
+
+// test: git dep's own git dependencies are linked transitively via target_link_libraries
+void test_transitive_git_deps_linked() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}");
+
+    // dep A depends on dep B
+    auto dep_a_path = std::filesystem::temp_directory_path() / "exon_test_trans_git_a";
+    auto dep_b_path = std::filesystem::temp_directory_path() / "exon_test_trans_git_b";
+    std::filesystem::remove_all(dep_a_path);
+    std::filesystem::remove_all(dep_b_path);
+    std::filesystem::create_directories(dep_a_path / "src");
+    std::filesystem::create_directories(dep_b_path / "src");
+    {
+        auto f = std::ofstream{dep_a_path / "src" / "A.cppm"};
+        f << "export module A;";
+    }
+    {
+        auto f = std::ofstream{dep_a_path / "exon.toml"};
+        f << R"([package]
+name = "A"
+version = "0.1.0"
+type = "lib"
+standard = 23
+
+[dependencies]
+"github.com/user/B" = "0.1.0"
+)";
+    }
+    {
+        auto f = std::ofstream{dep_b_path / "src" / "B.cppm"};
+        f << "export module B;";
+    }
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    // topological order: B first, then A
+    std::vector<fetch::FetchedDep> deps = {
+        {.key = "github.com/user/B", .name = "B", .version = "0.1.0",
+         .commit = "bbb", .path = dep_b_path},
+        {.key = "github.com/user/A", .name = "A", .version = "0.1.0",
+         .commit = "aaa", .path = dep_a_path},
+    };
+
+    auto cmake = build::generate_cmake(m, proj.root, deps, make_tc());
+
+    check(cmake.contains("add_library(B)"), "trans git link: B built");
+    check(cmake.contains("add_library(A)"), "trans git link: A built");
+    check(cmake.contains("target_link_libraries(A PUBLIC\n    B\n)"),
+          "trans git link: A links B");
+
+    std::filesystem::remove_all(dep_a_path);
+    std::filesystem::remove_all(dep_b_path);
+}
+
+// test: vcpkg_deps from a dependency are NOT propagated to root
+void test_transitive_vcpkg_deps_not_propagated() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}");
+
+    auto dep_path = std::filesystem::temp_directory_path() / "exon_test_trans_pkgdep";
+    std::filesystem::remove_all(dep_path);
+    std::filesystem::create_directories(dep_path / "src");
+    {
+        auto f = std::ofstream{dep_path / "src" / "dep.cppm"};
+        f << "export module dep;";
+    }
+    {
+        auto f = std::ofstream{dep_path / "exon.toml"};
+        f << R"([package]
+name = "dep"
+version = "0.1.0"
+type = "lib"
+standard = 23
+
+[dependencies.vcpkg]
+fmt = "11.0.0"
+)";
+    }
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    std::vector<fetch::FetchedDep> deps = {{
+        .key = "github.com/user/dep",
+        .name = "dep",
+        .version = "0.1.0",
+        .commit = "abc",
+        .path = dep_path,
+    }};
+
+    auto cmake = build::generate_cmake(m, proj.root, deps, make_tc());
+
+    // vcpkg deps from sub-dependency should NOT appear as find_package or
+    // FetchContent in generated cmake (vcpkg setup happens outside generate_cmake)
+    check(!cmake.contains("find_package(fmt"), "trans vcpkg: no find_package(fmt) in root cmake");
+    check(!cmake.contains("FetchContent_Declare(fmt"),
+          "trans vcpkg: no FetchContent(fmt) in root cmake");
+
+    std::filesystem::remove_all(dep_path);
+}
+
+// test: find_deps from a dependency are NOT propagated to root
+void test_transitive_find_deps_not_propagated() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}");
+
+    auto dep_path = std::filesystem::temp_directory_path() / "exon_test_trans_find";
+    std::filesystem::remove_all(dep_path);
+    std::filesystem::create_directories(dep_path / "src");
+    {
+        auto f = std::ofstream{dep_path / "src" / "dep.cppm"};
+        f << "export module dep;";
+    }
+    {
+        auto f = std::ofstream{dep_path / "exon.toml"};
+        f << R"([package]
+name = "dep"
+version = "0.1.0"
+type = "lib"
+standard = 23
+
+[dependencies.find]
+Threads = "Threads::Threads"
+)";
+    }
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    std::vector<fetch::FetchedDep> deps = {{
+        .key = "github.com/user/dep",
+        .name = "dep",
+        .version = "0.1.0",
+        .commit = "abc",
+        .path = dep_path,
+    }};
+
+    auto cmake = build::generate_cmake(m, proj.root, deps, make_tc());
+
+    // find_deps from sub-dependency should NOT appear as find_package in root
+    check(!cmake.contains("find_package(Threads"),
+          "trans find: no find_package(Threads) in root cmake");
+
+    std::filesystem::remove_all(dep_path);
+}
+
 int main() {
     test_basic_bin();
     test_lib_with_modules();
@@ -619,6 +878,11 @@ int main() {
     test_generate_cmake_target_section_build();
     test_generate_cmake_target_section_build_profiles();
     test_generate_cmake_no_build_flags_skipped();
+    test_transitive_cmake_deps_from_git();
+    test_transitive_cmake_deps_from_path();
+    test_transitive_git_deps_linked();
+    test_transitive_vcpkg_deps_not_propagated();
+    test_transitive_find_deps_not_propagated();
 
     if (failures > 0) {
         std::println("{} test(s) failed", failures);

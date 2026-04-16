@@ -507,6 +507,317 @@ missing = true
     fs::current_path(saved_cwd);
 }
 
+// helper: create a local git repo under a parent dir so that
+// extract_repo_name (last path component) returns the desired name
+struct TmpGitRepo {
+    fs::path root;
+    fs::path parent;
+    bool owns_parent;
+
+    // create at parent_dir/name so extract_repo_name returns "name"
+    TmpGitRepo(fs::path const& parent_dir, std::string const& name)
+        : parent(parent_dir), owns_parent(false) {
+        root = parent_dir / name;
+        fs::remove_all(root);
+        fs::create_directories(root / "src");
+    }
+    ~TmpGitRepo() { fs::remove_all(root); }
+
+    void write(std::string const& rel, std::string const& content) {
+        auto p = root / rel;
+        fs::create_directories(p.parent_path());
+        auto f = std::ofstream{p};
+        f << content;
+    }
+
+    void init_and_tag(std::string const& tag) {
+        auto git = [&](std::string const& cmd) {
+            auto full = std::format("git -C \"{}\" {} {}", root.generic_string(), cmd, null_redirect);
+            return std::system(full.c_str());
+        };
+        git("init -q");
+        git("config user.email test@example.com");
+        git("config user.name Test");
+        git("add .");
+        git("commit -q -m init");
+        git(std::format("tag {}", tag));
+    }
+
+    std::string key() const { return root.generic_string(); }
+};
+
+// test: path dep with a transitive git dependency
+void test_fetch_path_with_git_dep() {
+    TmpWorkspace ws{"exon_test_fetch_path_git"};
+    auto cache = ws.root / "cache";
+    setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
+
+    // create a git repo; last path component = package name for extract_repo_name
+    auto repos = ws.root / "repos";
+    fs::create_directories(repos);
+    TmpGitRepo leaf_repo{repos, "leaf"};
+    leaf_repo.write("exon.toml", R"([package]
+name = "leaf"
+version = "0.1.0"
+type = "lib"
+standard = 23
+)");
+    leaf_repo.write("src/leaf.cppm", "export module leaf;");
+    leaf_repo.init_and_tag("v0.1.0");
+
+    // path dep that depends on the git repo
+    ws.write("middle/exon.toml", std::format(R"([package]
+name = "middle"
+version = "0.1.0"
+type = "lib"
+standard = 23
+
+[dependencies]
+"{}" = "0.1.0"
+)", leaf_repo.key()));
+    ws.write("middle/src/middle.cppm", "export module middle;");
+
+    // app that depends on middle via path
+    ws.write("app/exon.toml", R"([package]
+name = "app"
+version = "0.1.0"
+
+[dependencies.path]
+middle = "../middle"
+)");
+    ws.write("app/src/main.cpp", "int main() {}");
+
+    auto saved_cwd = fs::current_path();
+    fs::current_path(ws.root / "app");
+
+    try {
+        auto m = manifest::load("exon.toml");
+        auto lock_path = (ws.root / "app" / "exon.lock").string();
+        auto result = fetch::fetch_all(m, lock_path);
+
+        check(result.deps.size() == 2, "path->git: 2 deps");
+        if (result.deps.size() == 2) {
+            // topological: git dep (leaf) first, then path dep (middle)
+            check(result.deps[0].name == "leaf", "path->git: leaf first");
+            check(!result.deps[0].is_path, "path->git: leaf is git dep");
+            check(result.deps[1].name == "middle", "path->git: middle second");
+            check(result.deps[1].is_path, "path->git: middle is path dep");
+        }
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "  exception: {}", e.what());
+        ++failures;
+    }
+
+    fs::current_path(saved_cwd);
+    unsetenv("EXON_CACHE_DIR");
+}
+
+// test: git dep -> git dep transitive resolution
+void test_fetch_git_transitive() {
+    TmpWorkspace ws{"exon_test_fetch_git_trans"};
+    auto cache = ws.root / "cache";
+    setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
+
+    // leaf git repo (no deps); last path component = package name
+    auto repos = ws.root / "repos";
+    fs::create_directories(repos);
+    TmpGitRepo leaf_repo{repos, "leaf"};
+    leaf_repo.write("exon.toml", R"([package]
+name = "leaf"
+version = "0.1.0"
+type = "lib"
+standard = 23
+)");
+    leaf_repo.write("src/leaf.cppm", "export module leaf;");
+    leaf_repo.init_and_tag("v0.1.0");
+
+    // middle git repo depends on leaf
+    TmpGitRepo middle_repo{repos, "middle"};
+    middle_repo.write("exon.toml", std::format(R"([package]
+name = "middle"
+version = "0.1.0"
+type = "lib"
+standard = 23
+
+[dependencies]
+"{}" = "0.1.0"
+)", leaf_repo.key()));
+    middle_repo.write("src/middle.cppm", "export module middle;");
+    middle_repo.init_and_tag("v0.1.0");
+
+    // app depends on middle via git
+    ws.write("app/exon.toml", std::format(R"([package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+"{}" = "0.1.0"
+)", middle_repo.key()));
+    ws.write("app/src/main.cpp", "int main() {}");
+
+    auto saved_cwd = fs::current_path();
+    fs::current_path(ws.root / "app");
+
+    try {
+        auto m = manifest::load("exon.toml");
+        auto lock_path = (ws.root / "app" / "exon.lock").string();
+        auto result = fetch::fetch_all(m, lock_path);
+
+        check(result.deps.size() == 2, "git->git: 2 deps");
+        if (result.deps.size() == 2) {
+            // topological: leaf first, middle second
+            check(result.deps[0].name == "leaf", "git->git: leaf first");
+            check(result.deps[1].name == "middle", "git->git: middle second");
+            check(!result.deps[0].commit.empty(), "git->git: leaf has commit");
+            check(!result.deps[1].commit.empty(), "git->git: middle has commit");
+        }
+
+        // lock file should have both entries
+        check(result.lock_file.find(leaf_repo.key(), "0.1.0") != nullptr,
+              "git->git: leaf in lock file");
+        check(result.lock_file.find(middle_repo.key(), "0.1.0") != nullptr,
+              "git->git: middle in lock file");
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "  exception: {}", e.what());
+        ++failures;
+    }
+
+    fs::current_path(saved_cwd);
+    unsetenv("EXON_CACHE_DIR");
+}
+
+// test: path dep with a transitive subdir dep (currently not recursed by fetch_path_recursive)
+void test_fetch_path_with_subdir_dep() {
+    TmpWorkspace ws{"exon_test_fetch_path_subdir"};
+    auto cache = ws.root / "cache";
+    setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
+
+    // git repo with a workspace member "refl"
+    auto repos = ws.root / "repos";
+    fs::create_directories(repos);
+    TmpGitRepo repo{repos, "subrepo"};
+    repo.write("exon.toml", "[workspace]\nmembers = [\"refl\"]\n");
+    repo.write("refl/exon.toml", R"([package]
+name = "refl"
+version = "0.1.0"
+type = "lib"
+standard = 23
+)");
+    repo.write("refl/src/refl.cppm", "export module refl;");
+    repo.write("refl/CMakeLists.txt", "add_library(refl INTERFACE)\n");
+    repo.init_and_tag("v0.1.0");
+
+    // path dep that depends on the repo via subdir
+    ws.write("middle/exon.toml", std::format(R"([package]
+name = "middle"
+version = "0.1.0"
+type = "lib"
+standard = 23
+
+[dependencies]
+refl = {{ git = "{}", version = "0.1.0", subdir = "refl" }}
+)", repo.key()));
+    ws.write("middle/src/middle.cppm", "export module middle;");
+
+    // app depends on middle via path
+    ws.write("app/exon.toml", R"([package]
+name = "app"
+version = "0.1.0"
+
+[dependencies.path]
+middle = "../middle"
+)");
+    ws.write("app/src/main.cpp", "int main() {}");
+
+    auto saved_cwd = fs::current_path();
+    fs::current_path(ws.root / "app");
+
+    try {
+        auto m = manifest::load("exon.toml");
+        auto lock_path = (ws.root / "app" / "exon.lock").string();
+        auto result = fetch::fetch_all(m, lock_path);
+
+        // fetch_path_recursive does NOT recurse into subdir_deps,
+        // so only middle is fetched (refl is not)
+        check(result.deps.size() == 1, "path->subdir: only 1 dep (subdir not recursed)");
+        if (!result.deps.empty())
+            check(result.deps[0].name == "middle", "path->subdir: middle only");
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "  exception: {}", e.what());
+        ++failures;
+    }
+
+    fs::current_path(saved_cwd);
+    unsetenv("EXON_CACHE_DIR");
+}
+
+// test: path dep with featured dep (currently not recursed by fetch_path_recursive)
+void test_fetch_path_with_featured_dep() {
+    TmpWorkspace ws{"exon_test_fetch_path_feat"};
+    auto cache = ws.root / "cache";
+    setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
+
+    // git repo with features
+    auto repos = ws.root / "repos";
+    fs::create_directories(repos);
+    TmpGitRepo feat_repo{repos, "featlib"};
+    feat_repo.write("exon.toml", R"([package]
+name = "featlib"
+version = "0.1.0"
+type = "lib"
+standard = 23
+
+[features]
+x = ["x"]
+)");
+    feat_repo.write("src/featlib.cppm", "export module featlib;");
+    feat_repo.write("src/x.cppm", "export module featlib.x;");
+    feat_repo.init_and_tag("v0.1.0");
+
+    // path dep with featured dep
+    ws.write("middle/exon.toml", std::format(R"([package]
+name = "middle"
+version = "0.1.0"
+type = "lib"
+standard = 23
+
+[dependencies]
+"{}" = {{ version = "0.1.0", features = ["x"] }}
+)", feat_repo.key()));
+    ws.write("middle/src/middle.cppm", "export module middle;");
+
+    // app depends on middle via path
+    ws.write("app/exon.toml", R"([package]
+name = "app"
+version = "0.1.0"
+
+[dependencies.path]
+middle = "../middle"
+)");
+    ws.write("app/src/main.cpp", "int main() {}");
+
+    auto saved_cwd = fs::current_path();
+    fs::current_path(ws.root / "app");
+
+    try {
+        auto m = manifest::load("exon.toml");
+        auto lock_path = (ws.root / "app" / "exon.lock").string();
+        auto result = fetch::fetch_all(m, lock_path);
+
+        // fetch_path_recursive does NOT recurse into featured_deps,
+        // so only middle is fetched (featlib is not)
+        check(result.deps.size() == 1, "path->featured: only 1 dep (featured not recursed)");
+        if (!result.deps.empty())
+            check(result.deps[0].name == "middle", "path->featured: middle only");
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "  exception: {}", e.what());
+        ++failures;
+    }
+
+    fs::current_path(saved_cwd);
+    unsetenv("EXON_CACHE_DIR");
+}
+
 int main() {
     test_fetch_path_dep();
     test_fetch_workspace_dep();
@@ -516,6 +827,10 @@ int main() {
     test_fetch_subdir_dep();
     test_fetch_subdir_dedup_clone();
     test_fetch_subdir_missing();
+    test_fetch_path_with_git_dep();
+    test_fetch_git_transitive();
+    test_fetch_path_with_subdir_dep();
+    test_fetch_path_with_featured_dep();
 
     if (failures > 0) {
         std::println("{} test(s) failed", failures);
