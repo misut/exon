@@ -1,16 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "*.md"
-      - "LICENSE"
-      - ".editorconfig"
-      - ".gitignore"
-      - ".intron.toml"
-      - ".claude/**"
   pull_request:
     branches: [main]
     paths-ignore:
