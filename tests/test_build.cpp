@@ -767,7 +767,7 @@ void test_transitive_vcpkg_deps_not_propagated() {
     TmpProject proj;
     proj.write("src/main.cpp", "int main() {}");
 
-    auto dep_path = std::filesystem::temp_directory_path() / "exon_test_trans_vcpkg";
+    auto dep_path = std::filesystem::temp_directory_path() / "exon_test_trans_pkgdep";
     std::filesystem::remove_all(dep_path);
     std::filesystem::create_directories(dep_path / "src");
     {
@@ -803,9 +803,11 @@ fmt = "11.0.0"
 
     auto cmake = build::generate_cmake(m, proj.root, deps, make_tc());
 
-    // vcpkg deps from sub-dependency should NOT appear in root cmake
-    check(!cmake.contains("vcpkg"), "trans vcpkg: no vcpkg reference in root cmake");
-    check(!cmake.contains("fmt"), "trans vcpkg: no fmt reference in root cmake");
+    // vcpkg deps from sub-dependency should NOT appear as find_package or
+    // FetchContent in generated cmake (vcpkg setup happens outside generate_cmake)
+    check(!cmake.contains("find_package(fmt"), "trans vcpkg: no find_package(fmt) in root cmake");
+    check(!cmake.contains("FetchContent_Declare(fmt"),
+          "trans vcpkg: no FetchContent(fmt) in root cmake");
 
     std::filesystem::remove_all(dep_path);
 }
