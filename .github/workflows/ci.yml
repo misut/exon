@@ -179,17 +179,18 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $smoke "src") | Out-Null
           New-Item -ItemType Directory -Force -Path (Join-Path $smoke "tests") | Out-Null
 
-          @'
-[package]
-name = "asan-smoke"
-version = "0.1.0"
-type = "bin"
-standard = 23
-
-[target.'cfg(os = "windows")'.build]
-cxxflags = ["/fsanitize=address"]
-ldflags = ["/fsanitize=address"]
-'@ | Set-Content -LiteralPath (Join-Path $smoke "exon.toml") -Encoding utf8NoBOM
+          $manifest = @(
+            '[package]'
+            'name = "asan-smoke"'
+            'version = "0.1.0"'
+            'type = "bin"'
+            'standard = 23'
+            ''
+            '[target.''cfg(os = "windows")''.build]'
+            'cxxflags = ["/fsanitize=address"]'
+            'ldflags = ["/fsanitize=address"]'
+          ) -join "`n"
+          $manifest | Set-Content -LiteralPath (Join-Path $smoke "exon.toml") -Encoding utf8NoBOM
 
           'int main() { return 0; }' | Set-Content -LiteralPath (Join-Path $smoke "src\\main.cpp") -Encoding utf8NoBOM
           'int main() { return 0; }' | Set-Content -LiteralPath (Join-Path $smoke "tests\\smoke.cpp") -Encoding utf8NoBOM
