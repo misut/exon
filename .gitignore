@@ -46,7 +46,6 @@
 # Build
 build/
 .exon/
-exon.lock
 
 # Generated
 CMakeLists.txt
