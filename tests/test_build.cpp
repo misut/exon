@@ -552,6 +552,73 @@ void test_generate_cmake_base_build_flags() {
     std::filesystem::remove_all(temp);
 }
 
+void test_generate_cmake_bin_modules_build_flags_apply_to_exec() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() { return 0; }\n");
+    proj.write("src/app.cppm", "export module app;\n");
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "0.1.0";
+    m.standard = 23;
+    m.type = "bin";
+    m.build.cxxflags = {"-Wall"};
+    m.build.ldflags = {"-Wl,--gc-sections"};
+
+    auto cmake = build::generate_cmake(m, proj.root, {}, make_tc());
+
+    check(cmake.contains("target_compile_options(app-modules PRIVATE"),
+          "modules lib gets compile flags");
+    check(cmake.contains("target_compile_options(app PRIVATE"),
+          "bin target gets compile flags");
+    check(cmake.contains("target_link_options(app-modules PRIVATE"),
+          "modules lib gets link flags");
+    check(cmake.contains("target_link_options(app PRIVATE"),
+          "bin target gets link flags");
+}
+
+void test_generate_portable_cmake_bin_modules_build_flags_apply_to_exec() {
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "0.1.0";
+    m.standard = 23;
+    m.type = "bin";
+    m.build.cxxflags = {"-Wall"};
+    m.build.ldflags = {"-Wl,--gc-sections"};
+
+    auto temp = std::filesystem::temp_directory_path() / "exon_test_bin_modules_build";
+    std::filesystem::create_directories(temp / "src");
+    {
+        auto f = std::ofstream(temp / "src" / "main.cpp");
+        f << "int main() { return 0; }\n";
+    }
+    {
+        auto f = std::ofstream(temp / "src" / "app.cppm");
+        f << "export module app;\n";
+    }
+    auto saved_cwd = std::filesystem::current_path();
+    std::filesystem::current_path(temp);
+
+    try {
+        auto cmake = build::generate_portable_cmake(m, {});
+
+        check(cmake.contains("target_compile_options(app-modules PRIVATE"),
+              "portable modules lib gets compile flags");
+        check(cmake.contains("target_compile_options(app PRIVATE"),
+              "portable bin target gets compile flags");
+        check(cmake.contains("target_link_options(app-modules PRIVATE"),
+              "portable modules lib gets link flags");
+        check(cmake.contains("target_link_options(app PRIVATE"),
+              "portable bin target gets link flags");
+    } catch (...) {
+        std::filesystem::current_path(saved_cwd);
+        std::filesystem::remove_all(temp);
+        throw;
+    }
+    std::filesystem::current_path(saved_cwd);
+    std::filesystem::remove_all(temp);
+}
+
 void test_generate_cmake_target_section_build() {
     // Per-target build flags should appear inside an if(<cmake-cond>)
     // block emitted from the existing target_sections loop.
@@ -1007,6 +1074,8 @@ int main() {
     test_build_command_wasm_keeps_default_parallelism();
     test_user_cxxflags_env_only();
     test_generate_cmake_base_build_flags();
+    test_generate_cmake_bin_modules_build_flags_apply_to_exec();
+    test_generate_portable_cmake_bin_modules_build_flags_apply_to_exec();
     test_generate_cmake_target_section_build();
     test_generate_cmake_windows_asan_runtime_copy_for_exec_and_tests();
     test_generate_cmake_target_section_build_profiles();
