@@ -137,3 +137,19 @@ jobs:
             exon-*.tar.gz
             exon-*.zip
           generate_release_notes: true
+
+  notify:
+    needs: [release]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        repo: [intron, txn, phenotype]
+    steps:
+      - name: Dispatch bump to ${{ matrix.repo }}
+        run: |
+          gh api repos/misut/${{ matrix.repo }}/dispatches \
+            -f event_type=bump-tool \
+            -f 'client_payload[tool]=exon' \
+            -f "client_payload[version]=${GITHUB_REF_NAME#v}"
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
