@@ -492,6 +492,22 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             return;
         }
 
+        // build-system = "cmake": use existing CMakeLists.txt directly
+        {
+            auto cached_it = resolved_dep_manifests.find(dep.path.string());
+            if (cached_it != resolved_dep_manifests.end() &&
+                cached_it->second.build_system == "cmake") {
+                auto dep_cmake = dep.path / "CMakeLists.txt";
+                if (!std::filesystem::exists(dep_cmake))
+                    throw std::runtime_error(std::format(
+                        "dependency '{}': build-system = \"cmake\" but no CMakeLists.txt found",
+                        dep.name));
+                out << std::format("add_subdirectory({} {})\n\n",
+                    std::filesystem::canonical(dep.path).generic_string(), dep.name);
+                return;
+            }
+        }
+
         auto dep_src = dep.path / "src";
         auto dep_sf = detail::collect_sources(dep_src);
 
@@ -1134,6 +1150,7 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
 }
 
 bool sync_root_cmake(manifest::Manifest const& m, std::vector<fetch::FetchedDep> const& deps) {
+    if (!m.sync_cmake_in_root) return false;
     auto content = generate_portable_cmake(m, deps);
     auto cmake_path = std::filesystem::current_path() / "CMakeLists.txt";
 

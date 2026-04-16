@@ -162,6 +162,8 @@ struct Manifest {
     Build build_debug;                                   // [build.debug]
     Build build_release;                                 // [build.release]
     std::vector<std::string> workspace_members; // workspace member paths
+    std::string build_system;                    // [package] build-system = "exon"|"cmake"
+    bool sync_cmake_in_root = true;              // [sync] cmake-in-root = true
 };
 
 bool is_workspace(Manifest const& m) { return !m.workspace_members.empty(); }
@@ -193,6 +195,13 @@ Manifest from_toml(toml::Table const& table) {
             m.license = pkg.at("license").as_string();
         if (pkg.contains("type"))
             m.type = pkg.at("type").as_string();
+        if (pkg.contains("build-system")) {
+            m.build_system = pkg.at("build-system").as_string();
+            if (m.build_system != "exon" && m.build_system != "cmake")
+                throw std::runtime_error(
+                    std::format("build-system must be \"exon\" or \"cmake\", got \"{}\"",
+                                m.build_system));
+        }
         if (pkg.contains("standard"))
             m.standard = static_cast<int>(pkg.at("standard").as_integer());
         if (pkg.contains("authors")) {
@@ -425,6 +434,12 @@ Manifest from_toml(toml::Table const& table) {
             parse_build_table(bt.at("debug").as_table(), m.build_debug);
         if (bt.contains("release") && bt.at("release").is_table())
             parse_build_table(bt.at("release").as_table(), m.build_release);
+    }
+
+    if (table.contains("sync") && table.at("sync").is_table()) {
+        auto const& sync = table.at("sync").as_table();
+        if (sync.contains("cmake-in-root") && sync.at("cmake-in-root").is_bool())
+            m.sync_cmake_in_root = sync.at("cmake-in-root").as_bool();
     }
 
     // parse [target.'predicate'.dependencies/dev-dependencies/defines]
