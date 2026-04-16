@@ -1408,8 +1408,8 @@ bool sync_root_cmake(manifest::Manifest const& m, std::vector<fetch::FetchedDep>
     return true;
 }
 
-export int run_process(std::string_view command,
-                       std::optional<std::chrono::milliseconds> timeout = {}) {
+int run_process(std::string_view command,
+                std::optional<std::chrono::milliseconds> timeout = {}) {
     return detail::run_command(command, timeout).exit_code;
 }
 
