@@ -2,6 +2,7 @@ import std;
 import toml;
 import toolchain;
 import manifest;
+import manifest.system;
 
 #if defined(_WIN32)
 // Disable Windows crash dialogs so failures surface as exit codes instead of blocking UI.
@@ -70,6 +71,66 @@ version = "0.1.0"
     check(m.type == "bin", "default type is bin");
     check(m.standard == 23, "default standard is 23");
     check(m.dependencies.empty(), "no deps");
+}
+
+void test_parse_manifest_content() {
+    auto m = manifest::parse(R"(
+[package]
+name = "parsed"
+version = "0.2.0"
+
+[dependencies]
+"github.com/user/repo" = "1.2.3"
+)");
+
+    check(m.name == "parsed", "parse(): name");
+    check(m.version == "0.2.0", "parse(): version");
+    check(m.dependencies.contains("github.com/user/repo"), "parse(): dependency key");
+    check(m.dependencies.at("github.com/user/repo") == "1.2.3", "parse(): dependency version");
+}
+
+void test_insert_into_section() {
+    auto content = std::string{R"([package]
+name = "hello"
+version = "0.1.0"
+)"};
+
+    manifest::insert_into_section(content, "dependencies", "\"github.com/user/repo\" = \"1.2.3\"\n");
+    auto parsed = manifest::parse(content);
+
+    check(parsed.dependencies.contains("github.com/user/repo"),
+          "insert_into_section(): dependency key");
+    check(parsed.dependencies.at("github.com/user/repo") == "1.2.3",
+          "insert_into_section(): dependency value");
+    check(manifest::dependency_exists(parsed, "github.com/user/repo"),
+          "dependency_exists(): sees inserted dependency");
+}
+
+void test_remove_dependency_entry_and_cleanup_empty_subsections() {
+    auto content = std::string{R"([package]
+name = "hello"
+version = "0.1.0"
+
+[dependencies]
+"github.com/user/repo" = "1.2.3"
+
+[dependencies.vcpkg]
+fmt = "10.2.1"
+)"};
+
+    auto removed_git = manifest::remove_dependency_entry(content, "github.com/user/repo");
+    auto removed_vcpkg = manifest::remove_dependency_entry(content, "fmt");
+    manifest::cleanup_empty_subsections(content);
+    auto parsed = manifest::parse(content);
+
+    check(removed_git, "remove_dependency_entry(): removes quoted dependency");
+    check(removed_vcpkg, "remove_dependency_entry(): removes bare dependency");
+    check(!parsed.dependencies.contains("github.com/user/repo"),
+          "remove_dependency_entry(): quoted dependency removed");
+    check(!parsed.vcpkg_deps.contains("fmt"),
+          "remove_dependency_entry(): bare dependency removed");
+    check(!content.contains("[dependencies.vcpkg]"),
+          "cleanup_empty_subsections(): removes empty subsection header");
 }
 
 void test_lib_type() {
@@ -350,7 +411,7 @@ void test_find_workspace_root() {
         f << "[package]\nname = \"app\"\nversion = \"0.1.0\"\n";
     }
 
-    auto root = manifest::find_workspace_root(tmp / "packages" / "app");
+    auto root = manifest::system::find_workspace_root(tmp / "packages" / "app");
     check(root.has_value(), "find_workspace_root: found");
     if (root)
         check(fs::weakly_canonical(*root) == fs::weakly_canonical(tmp),
@@ -360,7 +421,7 @@ void test_find_workspace_root() {
     auto other = fs::temp_directory_path() / "exon_test_no_ws";
     fs::remove_all(other);
     fs::create_directories(other);
-    auto no_root = manifest::find_workspace_root(other);
+    auto no_root = manifest::system::find_workspace_root(other);
     check(!no_root.has_value(), "find_workspace_root: no ws");
 
     fs::remove_all(tmp);
@@ -388,13 +449,13 @@ void test_resolve_workspace_member() {
         f << "[package]\nname = \"beta\"\nversion = \"0.1.0\"\n";
     }
 
-    auto alpha = manifest::resolve_workspace_member(tmp, ws, "alpha");
+    auto alpha = manifest::system::resolve_workspace_member(tmp, ws, "alpha");
     check(alpha.has_value() && alpha->filename() == "pkg-a", "resolve: alpha -> pkg-a");
 
-    auto beta = manifest::resolve_workspace_member(tmp, ws, "beta");
+    auto beta = manifest::system::resolve_workspace_member(tmp, ws, "beta");
     check(beta.has_value() && beta->filename() == "pkg-b", "resolve: beta -> pkg-b");
 
-    auto missing = manifest::resolve_workspace_member(tmp, ws, "gamma");
+    auto missing = manifest::system::resolve_workspace_member(tmp, ws, "gamma");
     check(!missing.has_value(), "resolve: missing returns nullopt");
 
     fs::remove_all(tmp);
@@ -861,6 +922,9 @@ version = "0.1.0"
 int main() {
     test_basic_manifest();
     test_minimal_manifest();
+    test_parse_manifest_content();
+    test_insert_into_section();
+    test_remove_dependency_entry_and_cleanup_empty_subsections();
     test_lib_type();
     test_workspace();
     test_non_workspace();

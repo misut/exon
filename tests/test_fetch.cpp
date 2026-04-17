@@ -1,7 +1,8 @@
 import std;
 import fetch;
+import fetch.system;
 import manifest;
-import toml;
+import manifest.system;
 
 #if defined(_WIN32)
 extern "C" int _putenv_s(char const* name, char const* value);
@@ -54,7 +55,17 @@ struct TmpWorkspace {
     }
 };
 
-// test: resolve path deps relative to cwd
+manifest::Manifest load_project_manifest(fs::path const& project_root) {
+    return manifest::system::load((project_root / "exon.toml").string());
+}
+
+fetch::FetchResult fetch_project(fs::path const& project_root, bool include_dev = false) {
+    auto manifest = load_project_manifest(project_root);
+    return fetch::system::fetch_all(project_root, manifest, project_root / "exon.lock",
+                                    include_dev);
+}
+
+// test: resolve path deps relative to project_root
 void test_fetch_path_dep() {
     TmpWorkspace ws{"exon_test_fetch_path"};
     ws.write("app/exon.toml", R"(
@@ -74,13 +85,8 @@ type = "lib"
 )");
     ws.write("mylib/src/mylib.cppm", "export module mylib;");
 
-    auto saved_cwd = fs::current_path();
-    fs::current_path(ws.root / "app");
-
     try {
-        auto m = manifest::load("exon.toml");
-        auto lock_path = (ws.root / "app" / "exon.lock").string();
-        auto result = fetch::fetch_all(m, lock_path);
+        auto result = fetch_project(ws.root / "app");
 
         check(result.deps.size() == 1, "fetch_path: 1 dep");
         if (!result.deps.empty()) {
@@ -94,8 +100,6 @@ type = "lib"
         std::println(std::cerr, "  exception: {}", e.what());
         ++failures;
     }
-
-    fs::current_path(saved_cwd);
 }
 
 // test: workspace dep resolves via workspace root
@@ -122,13 +126,8 @@ core = true
 )");
     ws.write("app/src/main.cpp", "int main() {}");
 
-    auto saved_cwd = fs::current_path();
-    fs::current_path(ws.root / "app");
-
     try {
-        auto m = manifest::load("exon.toml");
-        auto lock_path = (ws.root / "app" / "exon.lock").string();
-        auto result = fetch::fetch_all(m, lock_path);
+        auto result = fetch_project(ws.root / "app");
 
         check(result.deps.size() == 1, "fetch_ws: 1 dep");
         if (!result.deps.empty()) {
@@ -142,8 +141,6 @@ core = true
         std::println(std::cerr, "  exception: {}", e.what());
         ++failures;
     }
-
-    fs::current_path(saved_cwd);
 }
 
 // test: transitive path deps
@@ -176,13 +173,8 @@ type = "lib"
 )");
     ws.write("leaf/src/leaf.cppm", "export module leaf;");
 
-    auto saved_cwd = fs::current_path();
-    fs::current_path(ws.root / "app");
-
     try {
-        auto m = manifest::load("exon.toml");
-        auto lock_path = (ws.root / "app" / "exon.lock").string();
-        auto result = fetch::fetch_all(m, lock_path);
+        auto result = fetch_project(ws.root / "app");
 
         check(result.deps.size() == 2, "transitive: 2 deps");
         // topological: leaf before middle
@@ -194,8 +186,6 @@ type = "lib"
         std::println(std::cerr, "  exception: {}", e.what());
         ++failures;
     }
-
-    fs::current_path(saved_cwd);
 }
 
 // test: dev-dependencies.path only included with include_dev=true
@@ -218,19 +208,17 @@ type = "lib"
 )");
     ws.write("testlib/src/testlib.cppm", "export module testlib;");
 
-    auto saved_cwd = fs::current_path();
-    fs::current_path(ws.root / "app");
-
     try {
-        auto m = manifest::load("exon.toml");
-        auto lock_path = (ws.root / "app" / "exon.lock").string();
+        auto app_root = ws.root / "app";
+        auto m = load_project_manifest(app_root);
+        auto lock_path = app_root / "exon.lock";
 
         // without dev: empty
-        auto r1 = fetch::fetch_all(m, lock_path, false);
+        auto r1 = fetch::system::fetch_all(app_root, m, lock_path, false);
         check(r1.deps.empty(), "dev_path: empty without include_dev");
 
         // with dev: 1 dep
-        auto r2 = fetch::fetch_all(m, lock_path, true);
+        auto r2 = fetch::system::fetch_all(app_root, m, lock_path, true);
         check(r2.deps.size() == 1, "dev_path: 1 dep with include_dev");
         if (!r2.deps.empty())
             check(r2.deps[0].is_dev, "dev_path: is_dev=true");
@@ -238,8 +226,6 @@ type = "lib"
         std::println(std::cerr, "  exception: {}", e.what());
         ++failures;
     }
-
-    fs::current_path(saved_cwd);
 }
 
 // test: fetch a git+subdir dep from a local bare repo via file:// URL
@@ -296,13 +282,8 @@ refl = {{ git = "{}", version = "0.1.0", subdir = "refl" }}
 )", repo.generic_string());
     }
 
-    auto saved_cwd = fs::current_path();
-    fs::current_path(ws.root / "app");
-
     try {
-        auto m = manifest::load("exon.toml");
-        auto lock_path = (ws.root / "app" / "exon.lock").string();
-        auto result = fetch::fetch_all(m, lock_path);
+        auto result = fetch_project(ws.root / "app");
 
         check(result.deps.size() == 1, "subdir fetch: 1 dep");
         if (!result.deps.empty()) {
@@ -337,8 +318,6 @@ refl = {{ git = "{}", version = "0.1.0", subdir = "refl" }}
         std::println(std::cerr, "  exception: {}", e.what());
         ++failures;
     }
-
-    fs::current_path(saved_cwd);
     unsetenv("EXON_CACHE_DIR");
 }
 
@@ -388,13 +367,8 @@ b = {{ git = "{0}", version = "0.1.0", subdir = "b" }}
 )", repo.generic_string());
     }
 
-    auto saved_cwd = fs::current_path();
-    fs::current_path(ws.root / "app");
-
     try {
-        auto m = manifest::load("exon.toml");
-        auto lock_path = (ws.root / "app" / "exon.lock").string();
-        auto result = fetch::fetch_all(m, lock_path);
+        auto result = fetch_project(ws.root / "app");
 
         check(result.deps.size() == 2, "subdir dedup: 2 deps");
 
@@ -416,8 +390,6 @@ b = {{ git = "{0}", version = "0.1.0", subdir = "b" }}
         std::println(std::cerr, "  exception: {}", e.what());
         ++failures;
     }
-
-    fs::current_path(saved_cwd);
     unsetenv("EXON_CACHE_DIR");
 }
 
@@ -457,20 +429,13 @@ nope = {{ git = "{}", version = "0.1.0", subdir = "does-not-exist" }}
 )", repo.generic_string());
     }
 
-    auto saved_cwd = fs::current_path();
-    fs::current_path(ws.root / "app");
-
     bool threw = false;
     try {
-        auto m = manifest::load("exon.toml");
-        auto lock_path = (ws.root / "app" / "exon.lock").string();
-        fetch::fetch_all(m, lock_path);
+        fetch_project(ws.root / "app");
     } catch (std::exception const&) {
         threw = true;
     }
     check(threw, "subdir missing: throws");
-
-    fs::current_path(saved_cwd);
     unsetenv("EXON_CACHE_DIR");
 }
 
@@ -491,20 +456,13 @@ missing = true
 )");
     ws.write("app/src/main.cpp", "int main() {}");
 
-    auto saved_cwd = fs::current_path();
-    fs::current_path(ws.root / "app");
-
     bool threw = false;
     try {
-        auto m = manifest::load("exon.toml");
-        auto lock_path = (ws.root / "app" / "exon.lock").string();
-        fetch::fetch_all(m, lock_path);
+        fetch_project(ws.root / "app");
     } catch (std::exception const&) {
         threw = true;
     }
     check(threw, "missing ws member: throws");
-
-    fs::current_path(saved_cwd);
 }
 
 // helper: create a local git repo under a parent dir so that
@@ -587,13 +545,8 @@ middle = "../middle"
 )");
     ws.write("app/src/main.cpp", "int main() {}");
 
-    auto saved_cwd = fs::current_path();
-    fs::current_path(ws.root / "app");
-
     try {
-        auto m = manifest::load("exon.toml");
-        auto lock_path = (ws.root / "app" / "exon.lock").string();
-        auto result = fetch::fetch_all(m, lock_path);
+        auto result = fetch_project(ws.root / "app");
 
         check(result.deps.size() == 2, "path->git: 2 deps");
         if (result.deps.size() == 2) {
@@ -607,8 +560,6 @@ middle = "../middle"
         std::println(std::cerr, "  exception: {}", e.what());
         ++failures;
     }
-
-    fs::current_path(saved_cwd);
     unsetenv("EXON_CACHE_DIR");
 }
 
@@ -655,13 +606,8 @@ version = "0.1.0"
 )", middle_repo.key()));
     ws.write("app/src/main.cpp", "int main() {}");
 
-    auto saved_cwd = fs::current_path();
-    fs::current_path(ws.root / "app");
-
     try {
-        auto m = manifest::load("exon.toml");
-        auto lock_path = (ws.root / "app" / "exon.lock").string();
-        auto result = fetch::fetch_all(m, lock_path);
+        auto result = fetch_project(ws.root / "app");
 
         check(result.deps.size() == 2, "git->git: 2 deps");
         if (result.deps.size() == 2) {
@@ -681,8 +627,6 @@ version = "0.1.0"
         std::println(std::cerr, "  exception: {}", e.what());
         ++failures;
     }
-
-    fs::current_path(saved_cwd);
     unsetenv("EXON_CACHE_DIR");
 }
 
@@ -729,13 +673,8 @@ middle = "../middle"
 )");
     ws.write("app/src/main.cpp", "int main() {}");
 
-    auto saved_cwd = fs::current_path();
-    fs::current_path(ws.root / "app");
-
     try {
-        auto m = manifest::load("exon.toml");
-        auto lock_path = (ws.root / "app" / "exon.lock").string();
-        auto result = fetch::fetch_all(m, lock_path);
+        auto result = fetch_project(ws.root / "app");
 
         // fetch_path_recursive does NOT recurse into subdir_deps,
         // so only middle is fetched (refl is not)
@@ -746,8 +685,6 @@ middle = "../middle"
         std::println(std::cerr, "  exception: {}", e.what());
         ++failures;
     }
-
-    fs::current_path(saved_cwd);
     unsetenv("EXON_CACHE_DIR");
 }
 
@@ -796,13 +733,8 @@ middle = "../middle"
 )");
     ws.write("app/src/main.cpp", "int main() {}");
 
-    auto saved_cwd = fs::current_path();
-    fs::current_path(ws.root / "app");
-
     try {
-        auto m = manifest::load("exon.toml");
-        auto lock_path = (ws.root / "app" / "exon.lock").string();
-        auto result = fetch::fetch_all(m, lock_path);
+        auto result = fetch_project(ws.root / "app");
 
         // fetch_path_recursive does NOT recurse into featured_deps,
         // so only middle is fetched (featlib is not)
@@ -813,8 +745,6 @@ middle = "../middle"
         std::println(std::cerr, "  exception: {}", e.what());
         ++failures;
     }
-
-    fs::current_path(saved_cwd);
     unsetenv("EXON_CACHE_DIR");
 }
 

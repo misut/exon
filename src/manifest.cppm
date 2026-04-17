@@ -539,6 +539,138 @@ Manifest resolve_all_targets(Manifest m) {
     return m;
 }
 
+bool dependency_exists(Manifest const& m, std::string const& name) {
+    return m.dependencies.contains(name) || m.dev_dependencies.contains(name) ||
+           m.path_deps.contains(name) || m.dev_path_deps.contains(name) ||
+           m.workspace_deps.contains(name) || m.dev_workspace_deps.contains(name) ||
+           m.vcpkg_deps.contains(name) || m.dev_vcpkg_deps.contains(name) ||
+           m.subdir_deps.contains(name) || m.dev_subdir_deps.contains(name) ||
+           m.featured_deps.contains(name) || m.dev_featured_deps.contains(name);
+}
+
+// insert `line` into [section] block; create section at EOF if missing
+void insert_into_section(std::string& content, std::string const& section,
+                         std::string const& line) {
+    auto header = std::format("[{}]", section);
+    auto pos = content.find(header);
+    if (pos == std::string::npos) {
+        if (!content.empty() && content.back() != '\n')
+            content += '\n';
+        content += std::format("\n{}\n{}", header, line);
+        return;
+    }
+    // verify this is an exact section header (preceded by start/newline, followed by newline)
+    // simple check: header should start at column 0
+    bool at_line_start = (pos == 0) || (content[pos - 1] == '\n');
+    if (!at_line_start) {
+        // header substring found mid-line; append as new section
+        if (!content.empty() && content.back() != '\n')
+            content += '\n';
+        content += std::format("\n{}\n{}", header, line);
+        return;
+    }
+    auto insert_pos = content.find('\n', pos);
+    if (insert_pos != std::string::npos)
+        content.insert(insert_pos + 1, line);
+    else
+        content += std::format("\n{}", line);
+}
+
+bool remove_dependency_entry(std::string& content, std::string_view name) {
+    std::vector<std::string> candidates = {
+        std::format("\"{}\"", name),
+        std::format("{} =", name),
+    };
+
+    for (auto const& search : candidates) {
+        auto pos = content.find(search);
+        while (pos != std::string::npos) {
+            auto line_start = content.rfind('\n', pos);
+            line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
+            auto prefix = content.substr(line_start, pos - line_start);
+            auto only_ws = std::ranges::all_of(prefix, [](char c) {
+                return c == ' ' || c == '\t';
+            });
+            if (only_ws) {
+                auto line_end = content.find('\n', pos);
+                if (line_end != std::string::npos)
+                    ++line_end;
+                else
+                    line_end = content.size();
+                content.erase(line_start, line_end - line_start);
+                return true;
+            }
+            pos = content.find(search, pos + 1);
+        }
+    }
+
+    return false;
+}
+
+void cleanup_empty_subsections(std::string& content) {
+    auto cleaned = std::string{};
+    cleaned.reserve(content.size());
+
+    std::size_t i = 0;
+    while (i < content.size()) {
+        auto line_end = content.find('\n', i);
+        auto next = (line_end == std::string::npos) ? content.size() : line_end + 1;
+        auto line = std::string_view{content}.substr(i, next - i);
+        auto trimmed = line;
+        while (!trimmed.empty() &&
+               (trimmed.back() == '\n' || trimmed.back() == '\r' ||
+                trimmed.back() == ' ' || trimmed.back() == '\t')) {
+            trimmed.remove_suffix(1);
+        }
+        while (!trimmed.empty() && (trimmed.front() == ' ' || trimmed.front() == '\t'))
+            trimmed.remove_prefix(1);
+
+        bool is_subsection = trimmed.starts_with("[") &&
+                             trimmed.ends_with("]") &&
+                             trimmed.find('.') != std::string_view::npos;
+        if (is_subsection) {
+            std::size_t j = next;
+            bool empty_section = true;
+            while (j < content.size()) {
+                auto peek_end = content.find('\n', j);
+                auto peek_next =
+                    (peek_end == std::string::npos) ? content.size() : peek_end + 1;
+                auto peek = std::string_view{content}.substr(j, peek_next - j);
+                auto peek_trimmed = peek;
+                while (!peek_trimmed.empty() &&
+                       (peek_trimmed.back() == '\n' || peek_trimmed.back() == '\r' ||
+                        peek_trimmed.back() == ' ' || peek_trimmed.back() == '\t')) {
+                    peek_trimmed.remove_suffix(1);
+                }
+                while (!peek_trimmed.empty() &&
+                       (peek_trimmed.front() == ' ' || peek_trimmed.front() == '\t')) {
+                    peek_trimmed.remove_prefix(1);
+                }
+                if (peek_trimmed.empty() || peek_trimmed.starts_with("#")) {
+                    j = peek_next;
+                    continue;
+                }
+                if (peek_trimmed.starts_with("["))
+                    break;
+                empty_section = false;
+                break;
+            }
+
+            if (empty_section) {
+                i = next;
+                if (i < content.size() && content[i] == '\n')
+                    ++i;
+                continue;
+            }
+        }
+
+        cleaned.append(line);
+        i = next;
+    }
+
+    content = std::move(cleaned);
+}
+
 // resolve consumer-selected features into a set of .cppm module basenames
 // provider_features: the [features] table from the dep's exon.toml
 // selected: features requested by the consumer
@@ -630,53 +762,9 @@ std::string predicate_to_cmake(std::string_view pred) {
     return result;
 }
 
-Manifest load(std::string_view path) {
-    auto table = toml::parse_file(path);
+Manifest parse(std::string_view content) {
+    auto table = toml::parse(std::string{content});
     return from_toml(table);
-}
-
-// walk up from `start` looking for a workspace exon.toml; stop at HOME or filesystem root
-std::optional<std::filesystem::path> find_workspace_root(std::filesystem::path start) {
-    auto home = toolchain::home_dir();
-    start = std::filesystem::weakly_canonical(start);
-    while (true) {
-        auto toml_path = start / "exon.toml";
-        if (std::filesystem::exists(toml_path)) {
-            try {
-                auto m = load(toml_path.string());
-                if (is_workspace(m))
-                    return start;
-            } catch (...) {
-                // unreadable manifest: ignore and keep walking up
-            }
-        }
-        if (!home.empty() && start == home)
-            return std::nullopt;
-        auto parent = start.parent_path();
-        if (parent == start)
-            return std::nullopt;
-        start = parent;
-    }
-}
-
-// resolve a workspace dep name (matches member's package.name) to absolute path
-std::optional<std::filesystem::path> resolve_workspace_member(
-    std::filesystem::path const& workspace_root, Manifest const& ws_manifest,
-    std::string_view name) {
-    for (auto const& member : ws_manifest.workspace_members) {
-        auto member_path = workspace_root / member;
-        auto member_toml = member_path / "exon.toml";
-        if (!std::filesystem::exists(member_toml))
-            continue;
-        try {
-            auto mm = load(member_toml.string());
-            if (mm.name == name)
-                return member_path;
-        } catch (...) {
-            // skip malformed
-        }
-    }
-    return std::nullopt;
 }
 
 } // namespace manifest

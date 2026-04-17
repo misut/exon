@@ -1,5 +1,6 @@
 import std;
 import lock;
+import lock.system;
 
 #if defined(_WIN32)
 // Disable Windows crash dialogs so failures surface as exit codes instead of blocking UI.
@@ -58,10 +59,10 @@ void test_save_and_load() {
     lock::LockFile lf;
     lf.add_or_update({.name = "github.com/user/repo", .version = "1.0.0", .commit = "abc123"});
     lf.add_or_update({.name = "github.com/other/lib", .version = "0.2.0", .commit = "def456"});
-    lock::save(lf, tmp.string());
+    lock::system::save(lf, tmp.string());
 
     // load back
-    auto loaded = lock::load(tmp.string());
+    auto loaded = lock::system::load(tmp.string());
     check(loaded.packages.size() == 2, "loaded 2 packages");
     check(loaded.contains("github.com/user/repo", "1.0.0"), "loaded contains repo");
     check(loaded.find("github.com/user/repo", "1.0.0")->commit == "abc123", "loaded commit");
@@ -69,6 +70,29 @@ void test_save_and_load() {
     check(loaded.find("github.com/other/lib", "0.2.0")->commit == "def456", "loaded lib commit");
 
     std::filesystem::remove(tmp);
+}
+
+void test_render_and_parse_roundtrip() {
+    lock::LockFile lf;
+    lf.add_or_update({.name = "github.com/user/repo", .version = "1.0.0", .commit = "abc123"});
+    lf.add_or_update({
+        .name = "github.com/misut/txn#refl",
+        .version = "0.1.0",
+        .commit = "deadbeef",
+        .subdir = "refl",
+        .features = {"json", "yaml"},
+    });
+
+    auto rendered = lock::render(lf);
+    auto parsed = lock::parse(rendered);
+
+    check(parsed.packages.size() == 2, "render/parse roundtrip keeps package count");
+    check(parsed.find("github.com/user/repo", "1.0.0") != nullptr,
+          "render/parse roundtrip keeps git package");
+    auto const* refl = parsed.find("github.com/misut/txn#refl", "0.1.0");
+    check(refl != nullptr, "render/parse roundtrip keeps subdir package");
+    check(refl && refl->subdir == "refl", "render/parse roundtrip keeps subdir");
+    check(refl && refl->features.size() == 2, "render/parse roundtrip keeps features");
 }
 
 void test_subdir_field_roundtrip() {
@@ -87,9 +111,9 @@ void test_subdir_field_roundtrip() {
         .commit = "xyz789",
         // no subdir: plain git dep
     });
-    lock::save(lf, tmp.string());
+    lock::system::save(lf, tmp.string());
 
-    auto loaded = lock::load(tmp.string());
+    auto loaded = lock::system::load(tmp.string());
     check(loaded.packages.size() == 2, "subdir: two entries loaded");
     auto const* refl = loaded.find("github.com/misut/txn#refl", "0.1.0");
     check(refl != nullptr, "subdir: composite-name entry found");
@@ -103,7 +127,7 @@ void test_subdir_field_roundtrip() {
 }
 
 void test_load_nonexistent() {
-    auto lf = lock::load("/tmp/exon_nonexistent_lock.toml");
+    auto lf = lock::system::load("/tmp/exon_nonexistent_lock.toml");
     check(lf.packages.empty(), "loading nonexistent file returns empty");
 }
 
@@ -111,6 +135,7 @@ int main() {
     test_empty_lockfile();
     test_add_or_update();
     test_save_and_load();
+    test_render_and_parse_roundtrip();
     test_subdir_field_roundtrip();
     test_load_nonexistent();
 
