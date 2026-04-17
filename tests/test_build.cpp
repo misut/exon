@@ -500,7 +500,14 @@ void test_plan_build_emits_write_and_steps() {
 
     auto plan = build::plan_build(request);
 
-    check(plan.writes.size() == 1, "plan build: emits exon cmake write");
+    check(std::ranges::any_of(plan.writes, [&](auto const& write) {
+              return write.path == request.project.exon_dir / "CMakeLists.txt";
+          }),
+          "plan build: emits exon cmake write");
+    check(std::ranges::any_of(plan.writes, [&](auto const& write) {
+              return write.path == proj.root / "CMakeLists.txt";
+          }),
+          "plan build: emits root cmake sync when enabled");
     check(plan.configure_steps.size() == 1, "plan build: emits configure step");
     check(plan.configure_steps.front().cwd == proj.root, "plan build: configure cwd");
     check(plan.build_steps.size() == 1, "plan build: emits build step");
@@ -534,7 +541,14 @@ void test_plan_test_emits_filtered_targets_and_run_steps() {
 
     auto plan = build::plan_test(request);
 
-    check(plan.writes.size() == 1, "plan test: emits exon cmake write");
+    check(std::ranges::any_of(plan.writes, [&](auto const& write) {
+              return write.path == request.project.exon_dir / "CMakeLists.txt";
+          }),
+          "plan test: emits exon cmake write");
+    check(std::ranges::any_of(plan.writes, [&](auto const& write) {
+              return write.path == proj.root / "CMakeLists.txt";
+          }),
+          "plan test: emits root cmake sync when enabled");
     check(plan.build_steps.size() == 1, "plan test: emits filtered build target");
     check(plan.build_steps.front().command.contains("--target test-alpha"),
           "plan test: build target is preserved");
