@@ -1,8 +1,13 @@
 export module toolchain;
 import std;
 import cppx.env;
+import cppx.platform;
 
 export namespace toolchain {
+
+using OS = cppx::platform::OS;
+using Arch = cppx::platform::Arch;
+using Platform = cppx::platform::Platform;
 
 // platform-specific executable suffix (".exe" on Windows, empty otherwise).
 // Delegated to cppx::env::EXE_SUFFIX so the constant lives in one place.
@@ -14,46 +19,44 @@ inline std::string shell_quote(std::string_view s) {
     return cppx::env::shell_quote(s);
 }
 
-struct Platform {
-    std::string os;   // "linux", "macos", "windows"
-    std::string arch; // "x86_64", "aarch64"
+inline auto parse_os(std::string_view value) -> OS {
+    return cppx::platform::parse_os(value);
+}
 
-    // match: empty field = wildcard (matches any value)
-    bool matches(Platform const& target) const {
-        if (!os.empty() && !target.os.empty() && os != target.os)
-            return false;
-        if (!arch.empty() && !target.arch.empty() && arch != target.arch)
-            return false;
-        return true;
-    }
+inline auto parse_arch(std::string_view value) -> Arch {
+    return cppx::platform::parse_arch(value);
+}
 
-    std::string to_string() const {
-        if (!os.empty() && !arch.empty())
-            return std::format("{}-{}", os, arch);
-        if (!os.empty())
-            return os;
-        if (!arch.empty())
-            return arch;
-        return "any";
-    }
-};
+inline auto parse_platform(std::string_view value) -> Platform {
+    return cppx::platform::parse_platform(value);
+}
 
-Platform detect_host_platform() {
-    Platform p;
-#if defined(__APPLE__)
-    p.os = "macos";
-#elif defined(__linux__)
-    p.os = "linux";
-#elif defined(_WIN32)
-    p.os = "windows";
-#endif
+inline auto make_platform(std::string_view os = {}, std::string_view arch = {}) -> Platform {
+    return Platform{parse_os(os), parse_arch(arch)};
+}
 
-#if defined(__aarch64__) || defined(_M_ARM64)
-    p.arch = "aarch64";
-#elif defined(__x86_64__) || defined(_M_X64)
-    p.arch = "x86_64";
-#endif
-    return p;
+inline auto platform_has_os(Platform const& platform) -> bool {
+    return platform.os != OS::Unknown;
+}
+
+inline auto platform_has_arch(Platform const& platform) -> bool {
+    return platform.arch != Arch::Unknown;
+}
+
+inline auto platform_os_name(Platform const& platform) -> std::string_view {
+    return platform_has_os(platform)
+        ? cppx::platform::os_name(platform.os)
+        : std::string_view{};
+}
+
+inline auto platform_arch_name(Platform const& platform) -> std::string_view {
+    return platform_has_arch(platform)
+        ? cppx::platform::arch_name(platform.arch)
+        : std::string_view{};
+}
+
+inline auto detect_host_platform() -> Platform {
+    return cppx::platform::host();
 }
 
 struct Toolchain {
@@ -77,10 +80,8 @@ struct WasmToolchain {
     std::string scan_deps;       // host clang-scan-deps (wasi-sdk lacks it)
 };
 
-std::optional<Platform> platform_from_target(std::string_view triple) {
-    if (triple.starts_with("wasm32-wasi"))
-        return Platform{.os = "wasi", .arch = "wasm32"};
-    return std::nullopt;
+inline auto platform_from_target(std::string_view triple) -> std::optional<Platform> {
+    return cppx::platform::platform_from_target_triple(triple);
 }
 
 } // namespace toolchain

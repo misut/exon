@@ -37,9 +37,9 @@ struct BuildRequest {
 struct BuildPlan {
     core::ProjectContext project;
     std::vector<core::FileWrite> writes;
-    std::vector<core::ProcessSpec> configure_steps;
-    std::vector<core::ProcessSpec> build_steps;
-    std::vector<core::ProcessSpec> run_steps;
+    std::vector<core::ProcessStep> configure_steps;
+    std::vector<core::ProcessStep> build_steps;
+    std::vector<core::ProcessStep> run_steps;
     bool configured = false;
     std::string success_message;
     std::vector<std::string> test_names;
@@ -66,11 +66,6 @@ std::string user_ldflags() {
 }
 
 namespace detail {
-
-struct CommandResult {
-    int exit_code = 0;
-    bool timed_out = false;
-};
 
 std::optional<std::filesystem::path> current_executable_path() {
     std::error_code ec;
@@ -186,7 +181,7 @@ bool build_has_windows_asan(manifest::Manifest const& m) {
         return true;
     }
 
-    toolchain::Platform windows_x64{.os = "windows", .arch = "x86_64"};
+    auto windows_x64 = toolchain::make_platform("windows", "x86_64");
     for (auto const& ts : m.target_sections) {
         if (!manifest::eval_predicate(ts.predicate, windows_x64))
             continue;
@@ -240,130 +235,6 @@ void emit_windows_asan_runtime_support(std::ostringstream& out,
 endfunction()
 
 )";
-}
-
-#if defined(_WIN32)
-std::wstring widen_command(std::string_view command) {
-    if (command.empty())
-        return {};
-    auto size = MultiByteToWideChar(CP_ACP, 0, command.data(),
-                                    static_cast<int>(command.size()), nullptr, 0);
-    if (size <= 0)
-        throw std::runtime_error("failed to convert command line to UTF-16");
-    std::wstring wide(static_cast<std::size_t>(size), L'\0');
-    MultiByteToWideChar(CP_ACP, 0, command.data(), static_cast<int>(command.size()),
-                        wide.data(), size);
-    return wide;
-}
-
-CommandResult run_command_windows(std::string_view command,
-                                  std::optional<std::chrono::milliseconds> timeout = {}) {
-    auto wide = widen_command(command);
-    std::vector<wchar_t> mutable_cmd(wide.begin(), wide.end());
-    mutable_cmd.push_back(L'\0');
-
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
-
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    if (job != nullptr) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info,
-                                     sizeof(info))) {
-            CloseHandle(job);
-            job = nullptr;
-        }
-    }
-
-    auto old_error_mode =
-        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
-    auto restore_error_mode = [&] { SetErrorMode(old_error_mode); };
-
-    if (!CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
-                        &si, &pi)) {
-        auto error = GetLastError();
-        if (job != nullptr)
-            CloseHandle(job);
-        restore_error_mode();
-        throw std::runtime_error(
-            std::format("failed to start process (GetLastError={})", error));
-    }
-
-    if (job != nullptr && !AssignProcessToJobObject(job, pi.hProcess)) {
-        CloseHandle(job);
-        job = nullptr;
-    }
-
-    auto wait_ms = timeout
-        ? static_cast<DWORD>(std::min<std::chrono::milliseconds::rep>(
-              timeout->count(), std::numeric_limits<DWORD>::max()))
-        : INFINITE;
-    auto wait_result = WaitForSingleObject(pi.hProcess, wait_ms);
-
-    CommandResult result;
-    if (wait_result == WAIT_TIMEOUT) {
-        result.timed_out = true;
-        if (job != nullptr) {
-            TerminateJobObject(job, 124);
-        } else {
-            TerminateProcess(pi.hProcess, 124);
-        }
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        result.exit_code = 124;
-    } else if (wait_result != WAIT_OBJECT_0) {
-        auto error = GetLastError();
-        if (job != nullptr)
-            CloseHandle(job);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        restore_error_mode();
-        throw std::runtime_error(
-            std::format("failed while waiting for process (GetLastError={})", error));
-    } else {
-        DWORD exit_code = 0;
-        if (!GetExitCodeProcess(pi.hProcess, &exit_code)) {
-            auto error = GetLastError();
-            if (job != nullptr)
-                CloseHandle(job);
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-            restore_error_mode();
-            throw std::runtime_error(
-                std::format("failed to read process exit code (GetLastError={})", error));
-        }
-        result.exit_code = static_cast<int>(exit_code);
-    }
-
-    if (job != nullptr)
-        CloseHandle(job);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    restore_error_mode();
-    return result;
-}
-#endif
-
-int normalize_unix_exit_status(int status) {
-    if (status == -1)
-        return 1;
-    if ((status & 0x7f) == 0)
-        return (status >> 8) & 0xff;
-    if ((status & 0x7f) != 0x7f)
-        return 128 + (status & 0x7f);
-    return status;
-}
-
-CommandResult run_command(std::string_view command,
-                          std::optional<std::chrono::milliseconds> timeout = {}) {
-#if defined(_WIN32)
-    return run_command_windows(command, timeout);
-#else
-    (void)timeout;
-    auto rc = std::system(std::string{command}.c_str());
-    return CommandResult{.exit_code = normalize_unix_exit_status(rc)};
-#endif
 }
 
 struct SourceFiles {
@@ -450,38 +321,44 @@ BuildFlags resolve_flags(toolchain::Toolchain const& tc, manifest::Manifest cons
     return flags;
 }
 
-std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest const& m,
-                          std::filesystem::path const& build_dir,
-                          std::filesystem::path const& source_dir, bool release,
-                          std::string_view vcpkg_toolchain = {},
-                          std::filesystem::path const& vcpkg_manifest_dir = {},
-                          std::string_view wasm_toolchain = {},
-                          bool any_cmake_deps = false) {
+core::ProcessSpec configure_cmd(toolchain::Toolchain const& tc,
+                                manifest::Manifest const& m,
+                                std::filesystem::path const& build_dir,
+                                std::filesystem::path const& source_dir, bool release,
+                                std::string_view vcpkg_toolchain = {},
+                                std::filesystem::path const& vcpkg_manifest_dir = {},
+                                std::string_view wasm_toolchain = {},
+                                bool any_cmake_deps = false) {
     auto build_type = release ? "Release" : "Debug";
-    auto cmd = std::format("{} -B {} -S {} -G Ninja -DCMAKE_BUILD_TYPE={}",
-                           toolchain::shell_quote(tc.cmake),
-                           toolchain::shell_quote(build_dir.string()),
-                           toolchain::shell_quote(source_dir.string()), build_type);
+    core::ProcessSpec spec{
+        .program = tc.cmake,
+        .args = {
+            "-B", build_dir.string(),
+            "-S", source_dir.string(),
+            "-G", "Ninja",
+            std::format("-DCMAKE_BUILD_TYPE={}", build_type),
+        },
+    };
     if (!tc.ninja.empty())
-        cmd += std::format(" -DCMAKE_MAKE_PROGRAM={}", toolchain::shell_quote(tc.ninja));
+        spec.args.push_back(std::format("-DCMAKE_MAKE_PROGRAM={}", tc.ninja));
 
     if (!wasm_toolchain.empty()) {
         // WASM cross-compilation: toolchain file handles compiler, sysroot, flags.
         // User .cppm modules and `import std;` both work via host clang-scan-deps
         // and the wasi-sdk libc++.modules.json (passed via stdlib_modules_json).
-        cmd += std::format(" -DCMAKE_TOOLCHAIN_FILE={}", wasm_toolchain);
+        spec.args.push_back(std::format("-DCMAKE_TOOLCHAIN_FILE={}", wasm_toolchain));
         // wasi-sdk lacks clang-scan-deps; use the host LLVM's copy
         if (!tc.cxx_compiler.empty())
-            cmd += std::format(" -DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS={}",
-                               toolchain::shell_quote(tc.cxx_compiler));
+            spec.args.push_back(std::format("-DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS={}",
+                                            tc.cxx_compiler));
         // import std; on wasi-sdk pulls in libc++ headers including csetjmp
         // (needs setjmp/longjmp lowering, enabled by -mllvm -wasm-enable-sjlj)
         // and csignal (needs -D_WASI_EMULATED_SIGNAL). Without these flags
         // the std module fails to compile on bare wasm32-wasip1.
         // -fno-exceptions stays so user code remains exception-free.
         if (!tc.stdlib_modules_json.empty() && m.standard >= 23)
-            cmd += std::format(" -DCMAKE_CXX_STDLIB_MODULES_JSON={}",
-                               tc.stdlib_modules_json);
+            spec.args.push_back(std::format("-DCMAKE_CXX_STDLIB_MODULES_JSON={}",
+                                            tc.stdlib_modules_json));
         std::string wasm_cxx =
             "-fno-exceptions -D_LIBCPP_NO_EXCEPTIONS"
             " -mllvm -wasm-enable-sjlj -D_WASI_EMULATED_SIGNAL";
@@ -490,7 +367,7 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
             wasm_cxx += ' ';
             wasm_cxx += wasm_extra_cxx;
         }
-        cmd += std::format(" \"-DCMAKE_CXX_FLAGS={}\"", wasm_cxx);
+        spec.args.push_back(std::format("-DCMAKE_CXX_FLAGS={}", wasm_cxx));
         // Link against wasi-emulated-signal so std::signal stubs resolve.
         std::string wasm_ld = "-lwasi-emulated-signal";
         auto wasm_extra_ld = user_ldflags();
@@ -498,22 +375,24 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
             wasm_ld += ' ';
             wasm_ld += wasm_extra_ld;
         }
-        cmd += std::format(" \"-DCMAKE_EXE_LINKER_FLAGS={}\"", wasm_ld);
+        spec.args.push_back(std::format("-DCMAKE_EXE_LINKER_FLAGS={}", wasm_ld));
         // WASI: let dlmalloc/sbrk manage heap growth via memory.grow.
         // Do NOT use --initial-heap or --initial-memory; these corrupt the
         // allocator's heap metadata and cause abort on the first allocation.
-        return cmd;
+        return spec;
     }
 
     if (!tc.cxx_compiler.empty())
-        cmd += std::format(" -DCMAKE_CXX_COMPILER={}", toolchain::shell_quote(tc.cxx_compiler));
+        spec.args.push_back(std::format("-DCMAKE_CXX_COMPILER={}", tc.cxx_compiler));
     if (!tc.sysroot.empty())
-        cmd += std::format(" -DCMAKE_OSX_SYSROOT={}", tc.sysroot);
+        spec.args.push_back(std::format("-DCMAKE_OSX_SYSROOT={}", tc.sysroot));
     if (!tc.stdlib_modules_json.empty() && m.standard >= 23)
-        cmd += std::format(" -DCMAKE_CXX_STDLIB_MODULES_JSON={}", tc.stdlib_modules_json);
+        spec.args.push_back(std::format("-DCMAKE_CXX_STDLIB_MODULES_JSON={}",
+                                        tc.stdlib_modules_json));
     if (!vcpkg_toolchain.empty()) {
-        cmd += std::format(" -DCMAKE_TOOLCHAIN_FILE={}", vcpkg_toolchain);
-        cmd += std::format(" -DVCPKG_MANIFEST_DIR={}", vcpkg_manifest_dir.string());
+        spec.args.push_back(std::format("-DCMAKE_TOOLCHAIN_FILE={}", vcpkg_toolchain));
+        spec.args.push_back(std::format("-DVCPKG_MANIFEST_DIR={}",
+                                        vcpkg_manifest_dir.string()));
     }
 
     auto flags = resolve_flags(tc, m, release);
@@ -540,13 +419,14 @@ std::string configure_cmd(toolchain::Toolchain const& tc, manifest::Manifest con
     }
 
     if (!cxx.empty())
-        cmd += std::format(" -DCMAKE_CXX_FLAGS=\"{}\"", cxx);
+        spec.args.push_back(std::format("-DCMAKE_CXX_FLAGS={}", cxx));
     if (!ld.empty())
-        cmd += std::format(" -DCMAKE_EXE_LINKER_FLAGS=\"{}\"", ld);
+        spec.args.push_back(std::format("-DCMAKE_EXE_LINKER_FLAGS={}", ld));
     if (!flags.standard_libraries.empty())
-        cmd += std::format(" -DCMAKE_CXX_STANDARD_LIBRARIES=\"{}\"", flags.standard_libraries);
+        spec.args.push_back(std::format("-DCMAKE_CXX_STANDARD_LIBRARIES={}",
+                                        flags.standard_libraries));
 
-    return cmd;
+    return spec;
 }
 
 std::vector<std::string> split_targets(std::string_view s) {
@@ -670,13 +550,14 @@ std::string collect_find_targets(manifest::Manifest const& m, bool dev) {
 
 } // namespace detail
 
-std::string configure_command(toolchain::Toolchain const& tc, manifest::Manifest const& m,
-                              std::filesystem::path const& build_dir,
-                              std::filesystem::path const& source_dir, bool release,
-                              std::string_view vcpkg_toolchain = {},
-                              std::filesystem::path const& vcpkg_manifest_dir = {},
-                              std::string_view wasm_toolchain = {},
-                              bool any_cmake_deps = false) {
+core::ProcessSpec configure_command(toolchain::Toolchain const& tc,
+                                    manifest::Manifest const& m,
+                                    std::filesystem::path const& build_dir,
+                                    std::filesystem::path const& source_dir, bool release,
+                                    std::string_view vcpkg_toolchain = {},
+                                    std::filesystem::path const& vcpkg_manifest_dir = {},
+                                    std::string_view wasm_toolchain = {},
+                                    bool any_cmake_deps = false) {
     return detail::configure_cmd(tc, m, build_dir, source_dir, release, vcpkg_toolchain,
                                  vcpkg_manifest_dir, wasm_toolchain, any_cmake_deps);
 }
@@ -684,7 +565,7 @@ std::string configure_command(toolchain::Toolchain const& tc, manifest::Manifest
 std::optional<std::string> stale_self_host_bootstrap_message(
     manifest::Manifest const& m, std::filesystem::path const& project_root,
     std::filesystem::path const& executable_path, toolchain::Platform const& host) {
-    if (host.os != "macos" || executable_path.empty() ||
+    if (host.os != toolchain::OS::MacOS || executable_path.empty() ||
         !detail::is_exon_self_host_project(m, project_root)) {
         return std::nullopt;
     }
@@ -742,17 +623,24 @@ bool needs_serial_cxx_modules_build(toolchain::Toolchain const& tc, manifest::Ma
            !tc.stdlib_modules_json.empty() && m.standard >= 23;
 }
 
-std::string build_command(toolchain::Toolchain const& tc, manifest::Manifest const& m,
-                          std::filesystem::path const& build_dir,
-                          std::string_view cmake_target = {},
-                          std::string_view target = {}) {
-    auto cmd = std::format("{} --build {}", toolchain::shell_quote(tc.cmake),
-                           toolchain::shell_quote(build_dir.string()));
-    if (!cmake_target.empty())
-        cmd += std::format(" --target {}", cmake_target);
-    if (needs_serial_cxx_modules_build(tc, m, target))
-        cmd += " --parallel 1";
-    return cmd;
+core::ProcessSpec build_command(toolchain::Toolchain const& tc,
+                                manifest::Manifest const& m,
+                                std::filesystem::path const& build_dir,
+                                std::string_view cmake_target = {},
+                                std::string_view target = {}) {
+    core::ProcessSpec spec{
+        .program = tc.cmake,
+        .args = {"--build", build_dir.string()},
+    };
+    if (!cmake_target.empty()) {
+        spec.args.push_back("--target");
+        spec.args.push_back(std::string{cmake_target});
+    }
+    if (needs_serial_cxx_modules_build(tc, m, target)) {
+        spec.args.push_back("--parallel");
+        spec.args.push_back("1");
+    }
+    return spec;
 }
 
 core::ProjectContext project_context(std::filesystem::path const& project_root,
@@ -1559,30 +1447,40 @@ BuildPlan base_plan(BuildRequest const& request, bool with_tests = false) {
     };
 
     plan.writes.push_back({
-        .path = request.project.exon_dir / "CMakeLists.txt",
-        .content = generate_cmake(request.manifest, request.project.root, request.deps,
-                                  request.toolchain, with_tests, request.release,
-                                  request.project.target),
+        .text = {
+            .path = request.project.exon_dir / "CMakeLists.txt",
+            .content = generate_cmake(request.manifest, request.project.root, request.deps,
+                                      request.toolchain, with_tests, request.release,
+                                      request.project.target),
+        },
     });
 
     if (request.manifest.sync_cmake_in_root) {
         plan.writes.push_back({
-            .path = request.project.root / "CMakeLists.txt",
-            .content = generate_portable_cmake(request.manifest, request.project.root,
-                                               request.deps),
+            .text = {
+                .path = request.project.root / "CMakeLists.txt",
+                .content = generate_portable_cmake(request.manifest, request.project.root,
+                                                   request.deps),
+            },
             .success_message = "synced CMakeLists.txt",
         });
     }
 
     plan.configure_steps.push_back({
-        .cwd = request.project.root,
-        .command = configure_command(request.toolchain, request.manifest,
-                                     request.project.build_dir, request.project.exon_dir,
-                                     request.release, request.vcpkg_toolchain.string(),
-                                     request.project.exon_dir, request.wasm_toolchain_file,
-                                     request.any_cmake_deps),
+        .spec = {
+            .program = "",
+            .args = {},
+            .cwd = request.project.root,
+        },
         .label = "configuring...",
     });
+    plan.configure_steps.back().spec =
+        configure_command(request.toolchain, request.manifest,
+                          request.project.build_dir, request.project.exon_dir,
+                          request.release, request.vcpkg_toolchain.string(),
+                          request.project.exon_dir, request.wasm_toolchain_file,
+                          request.any_cmake_deps);
+    plan.configure_steps.back().spec.cwd = request.project.root;
 
     return plan;
 }
@@ -1593,11 +1491,17 @@ BuildPlan plan_build(BuildRequest const& request) {
     auto plan = detail::base_plan(request, false);
 
     plan.build_steps.push_back({
-        .cwd = request.project.root,
-        .command = build_command(request.toolchain, request.manifest,
-                                 request.project.build_dir, {}, request.project.target),
+        .spec = {
+            .program = "",
+            .args = {},
+            .cwd = request.project.root,
+        },
         .label = "building...",
     });
+    plan.build_steps.back().spec =
+        build_command(request.toolchain, request.manifest,
+                      request.project.build_dir, {}, request.project.target);
+    plan.build_steps.back().spec.cwd = request.project.root;
 
     if (request.project.is_wasm) {
         plan.success_message = std::format("build succeeded: .exon/{}/{}/{}",
@@ -1618,12 +1522,18 @@ BuildPlan plan_check(BuildRequest const& request) {
         : request.build_targets.front();
 
     plan.build_steps.push_back({
-        .cwd = request.project.root,
-        .command = build_command(request.toolchain, request.manifest,
-                                 request.project.build_dir, build_target,
-                                 request.project.target),
+        .spec = {
+            .program = "",
+            .args = {},
+            .cwd = request.project.root,
+        },
         .label = "checking...",
     });
+    plan.build_steps.back().spec =
+        build_command(request.toolchain, request.manifest,
+                      request.project.build_dir, build_target,
+                      request.project.target);
+    plan.build_steps.back().spec.cwd = request.project.root;
     plan.success_message = "check succeeded";
 
     return plan;
@@ -1636,40 +1546,40 @@ BuildPlan plan_test(BuildRequest const& request) {
 
     for (std::size_t i = 0; i < request.build_targets.size(); ++i) {
         plan.build_steps.push_back({
-            .cwd = request.project.root,
-            .command = build_command(request.toolchain, request.manifest,
-                                     request.project.build_dir, request.build_targets[i],
-                                     request.project.target),
+            .spec = {
+                .program = "",
+                .args = {},
+                .cwd = request.project.root,
+            },
             .label = i == 0 ? "building tests..." : "",
         });
+        plan.build_steps.back().spec =
+            build_command(request.toolchain, request.manifest,
+                          request.project.build_dir, request.build_targets[i],
+                          request.project.target);
+        plan.build_steps.back().spec.cwd = request.project.root;
     }
 
     auto exe_suffix = std::string{request.project.is_wasm ? "" : toolchain::exe_suffix};
     for (auto const& name : request.test_names) {
         auto exe = request.project.build_dir / (name + exe_suffix);
-        std::string run_cmd;
+        core::ProcessSpec run_spec;
         if (request.project.is_wasm) {
-            run_cmd = std::format("{} -W exceptions=y {}",
-                                  toolchain::shell_quote(request.wasm_runtime),
-                                  toolchain::shell_quote(exe.string()));
+            run_spec.program = request.wasm_runtime;
+            run_spec.args = {"-W", "exceptions=y", exe.string()};
         } else {
-            run_cmd = toolchain::shell_quote(exe.string());
+            run_spec.program = exe.string();
         }
+        run_spec.cwd = request.project.root;
+        run_spec.timeout = request.timeout;
 
         plan.run_steps.push_back({
-            .cwd = request.project.root,
-            .command = std::move(run_cmd),
-            .timeout = request.timeout,
+            .spec = std::move(run_spec),
             .label = name,
         });
     }
 
     return plan;
-}
-
-int run_process(std::string_view command,
-                std::optional<std::chrono::milliseconds> timeout = {}) {
-    return detail::run_command(command, timeout).exit_code;
 }
 
 } // namespace build

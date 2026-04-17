@@ -16,7 +16,7 @@ endif()
 include(FetchContent)
 FetchContent_Declare(cppx
     GIT_REPOSITORY https://github.com/misut/cppx.git
-    GIT_TAG v1.0.3
+    GIT_TAG v1.3.0
     GIT_SHALLOW ON
 )
 FetchContent_Declare(tomlcpp
@@ -79,7 +79,7 @@ set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vcpkg.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
     PROPERTIES COMPILE_DEFINITIONS
-    "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.23.4\""
+    "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.23.5\""
 )
 
 add_executable(test-regressions)

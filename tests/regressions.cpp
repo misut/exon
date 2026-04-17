@@ -115,10 +115,12 @@ void test_portable_windows_asan_helper_configures_on_non_windows() {
         }
 
         auto build_dir = proj.root / "build";
-        auto cmd = std::format("cmake -S {} -B {}",
-                               toolchain::shell_quote(proj.root.string()),
-                               toolchain::shell_quote(build_dir.string()));
-        auto rc = build::run_process(cmd);
+        core::ProcessSpec spec{
+            .program = "cmake",
+            .args = {"-S", proj.root.string(), "-B", build_dir.string()},
+            .cwd = proj.root,
+        };
+        auto rc = build::system::run_process(spec);
         check(rc == 0, "portable Windows ASan helper configures on non-Windows");
     } catch (...) {
         throw;
@@ -128,10 +130,17 @@ void test_portable_windows_asan_helper_configures_on_non_windows() {
 
 void test_run_process_returns_child_exit_code() {
 #if defined(_WIN32)
-    auto rc = build::run_process("cmd /c \"exit 7\"");
+    core::ProcessSpec spec{
+        .program = "cmd",
+        .args = {"/c", "exit 7"},
+    };
 #else
-    auto rc = build::run_process("sh -c 'exit 7'");
+    core::ProcessSpec spec{
+        .program = "sh",
+        .args = {"-c", "exit 7"},
+    };
 #endif
+    auto rc = build::system::run_process(spec);
     check(rc == 7, "run_process returns child exit code");
 }
 
@@ -141,15 +150,15 @@ void test_system_run_process_honors_cwd() {
 
 #if defined(_WIN32)
     core::ProcessSpec spec{
+        .program = "cmd",
+        .args = {"/c", "if exist marker.txt (exit 0) else (exit 1)"},
         .cwd = proj.root,
-        .command = "cmd /c \"if exist marker.txt (exit 0) else (exit 1)\"",
-        .label = "cwd-check",
     };
 #else
     core::ProcessSpec spec{
+        .program = "sh",
+        .args = {"-c", "test -f marker.txt"},
         .cwd = proj.root,
-        .command = "sh -c 'test -f marker.txt'",
-        .label = "cwd-check",
     };
 #endif
 

@@ -1,5 +1,7 @@
 export module core;
 import std;
+import cppx.fs;
+import cppx.process;
 
 export namespace core {
 
@@ -15,17 +17,17 @@ struct Diagnostic {
     std::string hint;
 };
 
-struct ProcessSpec {
-    std::filesystem::path cwd;
-    std::string command;
-    std::optional<std::chrono::milliseconds> timeout = std::nullopt;
+using ProcessSpec = cppx::process::ProcessSpec;
+using ProcessResult = cppx::process::ProcessResult;
+using TextWrite = cppx::fs::TextWrite;
+
+struct ProcessStep {
+    ProcessSpec spec;
     std::string label;
 };
 
 struct FileWrite {
-    std::filesystem::path path;
-    std::string content;
-    bool skip_if_unchanged = true;
+    TextWrite text;
     std::string success_message;
 };
 

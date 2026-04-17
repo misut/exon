@@ -1,14 +1,12 @@
-module;
-#if defined(_WIN32)
-#define NOMINMAX
-#include <windows.h>
-#endif
-
 export module build.system;
 import std;
 import toml;
 import build;
 import core;
+import cppx.fs;
+import cppx.fs.system;
+import cppx.process;
+import cppx.process.system;
 import fetch;
 import fetch.system;
 import manifest;
@@ -34,178 +32,33 @@ int run_test(std::filesystem::path const& project_root,
 
 namespace detail {
 
-struct CurrentPathGuard {
-    std::filesystem::path previous;
-    bool active = false;
-
-    explicit CurrentPathGuard(std::filesystem::path const& next) {
-        if (next.empty())
-            return;
-        previous = std::filesystem::current_path();
-        std::filesystem::current_path(next);
-        active = true;
-    }
-
-    ~CurrentPathGuard() {
-        if (active)
-            std::filesystem::current_path(previous);
-    }
-};
-
-struct CommandResult {
-    int exit_code = 0;
-    bool timed_out = false;
-};
-
-#if defined(_WIN32)
-std::wstring widen_command(std::string_view command) {
-    if (command.empty())
-        return {};
-    auto size = MultiByteToWideChar(CP_ACP, 0, command.data(),
-                                    static_cast<int>(command.size()), nullptr, 0);
-    if (size <= 0)
-        throw std::runtime_error("failed to convert command line to UTF-16");
-    std::wstring wide(static_cast<std::size_t>(size), L'\0');
-    MultiByteToWideChar(CP_ACP, 0, command.data(), static_cast<int>(command.size()),
-                        wide.data(), size);
-    return wide;
+[[noreturn]] void throw_process_error(cppx::process::process_error error,
+                                      core::ProcessSpec const& spec) {
+    throw std::runtime_error(std::format(
+        "failed to run '{}' ({})", spec.program, cppx::process::to_string(error)));
 }
 
-CommandResult run_command_windows(std::string_view command,
-                                  std::optional<std::chrono::milliseconds> timeout = {}) {
-    auto wide = widen_command(command);
-    std::vector<wchar_t> mutable_cmd(wide.begin(), wide.end());
-    mutable_cmd.push_back(L'\0');
-
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
-
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    if (job != nullptr) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info,
-                                     sizeof(info))) {
-            CloseHandle(job);
-            job = nullptr;
-        }
-    }
-
-    auto old_error_mode =
-        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
-    auto restore_error_mode = [&] { SetErrorMode(old_error_mode); };
-
-    if (!CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
-                        &si, &pi)) {
-        auto error = GetLastError();
-        if (job != nullptr)
-            CloseHandle(job);
-        restore_error_mode();
-        throw std::runtime_error(
-            std::format("failed to start process (GetLastError={})", error));
-    }
-
-    if (job != nullptr && !AssignProcessToJobObject(job, pi.hProcess)) {
-        CloseHandle(job);
-        job = nullptr;
-    }
-
-    auto wait_ms = timeout
-        ? static_cast<DWORD>(std::min<std::chrono::milliseconds::rep>(
-              timeout->count(), std::numeric_limits<DWORD>::max()))
-        : INFINITE;
-    auto wait_result = WaitForSingleObject(pi.hProcess, wait_ms);
-
-    CommandResult result;
-    if (wait_result == WAIT_TIMEOUT) {
-        result.timed_out = true;
-        if (job != nullptr) {
-            TerminateJobObject(job, 124);
-        } else {
-            TerminateProcess(pi.hProcess, 124);
-        }
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        result.exit_code = 124;
-    } else if (wait_result != WAIT_OBJECT_0) {
-        auto error = GetLastError();
-        if (job != nullptr)
-            CloseHandle(job);
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        restore_error_mode();
-        throw std::runtime_error(
-            std::format("failed while waiting for process (GetLastError={})", error));
-    } else {
-        DWORD exit_code = 0;
-        if (!GetExitCodeProcess(pi.hProcess, &exit_code)) {
-            auto error = GetLastError();
-            if (job != nullptr)
-                CloseHandle(job);
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-            restore_error_mode();
-            throw std::runtime_error(
-                std::format("failed to read process exit code (GetLastError={})", error));
-        }
-        result.exit_code = static_cast<int>(exit_code);
-    }
-
-    if (job != nullptr)
-        CloseHandle(job);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    restore_error_mode();
-    return result;
-}
-#endif
-
-int normalize_unix_exit_status(int status) {
-    if (status == -1)
-        return 1;
-    if ((status & 0x7f) == 0)
-        return (status >> 8) & 0xff;
-    if ((status & 0x7f) != 0x7f)
-        return 128 + (status & 0x7f);
-    return status;
+[[noreturn]] void throw_fs_error(cppx::fs::fs_error error,
+                                 std::filesystem::path const& path,
+                                 std::string_view action) {
+    throw std::runtime_error(std::format(
+        "failed to {} '{}' ({})", action, path.string(), cppx::fs::to_string(error)));
 }
 
-CommandResult run_command(std::string_view command,
-                          std::optional<std::chrono::milliseconds> timeout = {}) {
-#if defined(_WIN32)
-    return run_command_windows(command, timeout);
-#else
-    (void)timeout;
-    auto rc = std::system(std::string{command}.c_str());
-    return CommandResult{.exit_code = normalize_unix_exit_status(rc)};
-#endif
-}
-
-CommandResult run_process(core::ProcessSpec const& spec) {
-    CurrentPathGuard guard{spec.cwd};
-    return run_command(spec.command, spec.timeout);
-}
-
-std::string read_file(std::filesystem::path const& path) {
-    auto file = std::ifstream(path, std::ios::binary);
-    if (!file)
-        return {};
-    return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+core::ProcessResult run_process(core::ProcessSpec const& spec) {
+    auto result = cppx::process::system::run(spec);
+    if (!result)
+        throw_process_error(result.error(), spec);
+    return *result;
 }
 
 bool write_if_changed(core::FileWrite const& write) {
-    std::filesystem::create_directories(write.path.parent_path());
-    auto existing = read_file(write.path);
-    if (write.skip_if_unchanged && existing == write.content)
-        return false;
-
-    auto file = std::ofstream(write.path, std::ios::binary);
-    if (!file)
-        throw std::runtime_error(std::format("failed to write {}", write.path.string()));
-    file << write.content;
-    if (!write.success_message.empty())
+    auto result = cppx::fs::system::write_if_changed(write.text);
+    if (!result)
+        throw_fs_error(result.error(), write.text.path, "write");
+    if (*result && !write.success_message.empty())
         std::println("{}", write.success_message);
-    return true;
+    return *result;
 }
 
 bool apply_writes(std::vector<core::FileWrite> const& writes) {
@@ -414,23 +267,23 @@ build::BuildRequest prepare_request(std::filesystem::path const& project_root,
     return request;
 }
 
-int run_steps(std::vector<core::ProcessSpec> const& steps) {
+int run_steps(std::vector<core::ProcessStep> const& steps) {
     for (auto const& step : steps) {
         if (!step.label.empty())
             std::println("{}", step.label);
-        auto result = run_process(step);
+        auto result = run_process(step.spec);
         if (result.exit_code != 0)
             return result.exit_code;
     }
     return 0;
 }
 
-int run_tests(std::vector<core::ProcessSpec> const& steps) {
+int run_tests(std::vector<core::ProcessStep> const& steps) {
     std::println("running tests...\n");
     int passed = 0;
     int failed = 0;
     for (auto const& step : steps) {
-        auto result = run_process(step);
+        auto result = run_process(step.spec);
         auto const& name = step.label;
         if (result.timed_out) {
             std::println("  {} ... TIMEOUT", name);
@@ -466,15 +319,12 @@ inline bool sync_root_cmake(std::filesystem::path const& project_root,
     if (!m.sync_cmake_in_root)
         return false;
     return detail::write_if_changed({
-        .path = project_root / "CMakeLists.txt",
-        .content = build::generate_portable_cmake(m, project_root, deps),
+        .text = {
+            .path = project_root / "CMakeLists.txt",
+            .content = build::generate_portable_cmake(m, project_root, deps),
+        },
         .success_message = "synced CMakeLists.txt",
     });
-}
-
-inline int run_process(std::string_view command,
-                       std::optional<std::chrono::milliseconds> timeout = {}) {
-    return detail::run_command(command, timeout).exit_code;
 }
 
 inline int run_process(core::ProcessSpec const& spec) {

@@ -1,5 +1,6 @@
 import std;
 import build;
+import core;
 import manifest;
 import fetch;
 import toolchain;
@@ -29,6 +30,15 @@ void check(bool cond, std::string_view msg) {
         std::println(std::cerr, "  FAIL: {}", msg);
         ++failures;
     }
+}
+
+std::string command_text(core::ProcessSpec const& spec) {
+    auto text = spec.program;
+    for (auto const& arg : spec.args) {
+        text += ' ';
+        text += arg;
+    }
+    return text;
 }
 
 // create a minimal project structure in tmpdir
@@ -412,16 +422,17 @@ void test_configure_command_macos_uses_system_runtime() {
     auto cmd =
         build::configure_command(make_macos_tc(), m, proj.root / "build", proj.root, true,
                                  {}, {}, {}, true);
+    auto text = command_text(cmd);
 
-    check(cmd.contains("-DCMAKE_OSX_SYSROOT=/fake/MacOSX.sdk"), "macos: sysroot emitted");
-    check(cmd.contains("-DCMAKE_CXX_STDLIB_MODULES_JSON=/fake/libc++.modules.json"),
+    check(text.contains("-DCMAKE_OSX_SYSROOT=/fake/MacOSX.sdk"), "macos: sysroot emitted");
+    check(text.contains("-DCMAKE_CXX_STDLIB_MODULES_JSON=/fake/libc++.modules.json"),
           "macos: stdlib modules emitted");
-    check(!cmd.contains("--no-default-config"), "macos: no no-default-config");
-    check(!cmd.contains("-DCMAKE_CXX_FLAGS"), "macos: no manual cxx flags");
-    check(cmd.contains("-DCMAKE_EXE_LINKER_FLAGS=\"-lc++ -lc++abi\""),
+    check(!text.contains("--no-default-config"), "macos: no no-default-config");
+    check(!text.contains("-DCMAKE_CXX_FLAGS"), "macos: no manual cxx flags");
+    check(text.contains("-DCMAKE_EXE_LINKER_FLAGS=-lc++ -lc++abi"),
           "macos: explicit system libc++ link");
-    check(!cmd.contains("-L/fake/lib"), "macos: no llvm lib search path");
-    check(!cmd.contains("-Wl,-rpath,/fake/lib"), "macos: no llvm runtime rpath");
+    check(!text.contains("-L/fake/lib"), "macos: no llvm lib search path");
+    check(!text.contains("-Wl,-rpath,/fake/lib"), "macos: no llvm runtime rpath");
 }
 
 void test_configure_command_linux_cmake_deps_keep_toolchain_runtime() {
@@ -436,10 +447,11 @@ void test_configure_command_linux_cmake_deps_keep_toolchain_runtime() {
     auto cmd =
         build::configure_command(make_linux_tc(), m, proj.root / "build", proj.root, false,
                                  {}, {}, {}, true);
+    auto text = command_text(cmd);
 
-    check(cmd.contains("-DCMAKE_CXX_FLAGS=\"-stdlib=libc++\""),
+    check(text.contains("-DCMAKE_CXX_FLAGS=-stdlib=libc++"),
           "linux: compile uses libc++");
-    check(cmd.contains("-DCMAKE_EXE_LINKER_FLAGS=\"-L/fake/lib -Wl,-rpath,/fake/lib -lc++abi\""),
+    check(text.contains("-DCMAKE_EXE_LINKER_FLAGS=-L/fake/lib -Wl,-rpath,/fake/lib -lc++abi"),
           "linux: cmake deps keep toolchain runtime");
 }
 
@@ -451,9 +463,10 @@ void test_build_command_macos_import_std_serialized() {
     m.standard = 23;
 
     auto cmd = build::build_command(make_macos_tc(), m, "/tmp/exon-build");
+    auto text = command_text(cmd);
 
-    check(cmd.contains("cmake --build /tmp/exon-build"), "build cmd: base build");
-    check(cmd.contains("--parallel 1"), "build cmd: macos import std serialized");
+    check(text.contains("cmake --build /tmp/exon-build"), "build cmd: base build");
+    check(text.contains("--parallel 1"), "build cmd: macos import std serialized");
 }
 
 void test_build_command_macos_no_std_modules_keeps_default_parallelism() {
@@ -464,8 +477,9 @@ void test_build_command_macos_no_std_modules_keeps_default_parallelism() {
     m.standard = 23;
 
     auto cmd = build::build_command(make_macos_tc(false), m, "/tmp/exon-build");
+    auto text = command_text(cmd);
 
-    check(!cmd.contains("--parallel 1"), "build cmd: no std modules keeps default parallelism");
+    check(!text.contains("--parallel 1"), "build cmd: no std modules keeps default parallelism");
 }
 
 void test_build_command_wasm_keeps_default_parallelism() {
@@ -476,9 +490,10 @@ void test_build_command_wasm_keeps_default_parallelism() {
     m.standard = 23;
 
     auto cmd = build::build_command(make_macos_tc(), m, "/tmp/exon-build", "app", "wasm32-wasi");
+    auto text = command_text(cmd);
 
-    check(cmd.contains("--target app"), "build cmd: target emitted");
-    check(!cmd.contains("--parallel 1"), "build cmd: wasm keeps default parallelism");
+    check(text.contains("--target app"), "build cmd: target emitted");
+    check(!text.contains("--parallel 1"), "build cmd: wasm keeps default parallelism");
 }
 
 void test_plan_build_emits_write_and_steps() {
@@ -501,17 +516,20 @@ void test_plan_build_emits_write_and_steps() {
     auto plan = build::plan_build(request);
 
     check(std::ranges::any_of(plan.writes, [&](auto const& write) {
-              return write.path == request.project.exon_dir / "CMakeLists.txt";
+              return write.text.path == request.project.exon_dir / "CMakeLists.txt";
           }),
           "plan build: emits exon cmake write");
     check(std::ranges::any_of(plan.writes, [&](auto const& write) {
-              return write.path == proj.root / "CMakeLists.txt";
+              return write.text.path == proj.root / "CMakeLists.txt";
           }),
           "plan build: emits root cmake sync when enabled");
     check(plan.configure_steps.size() == 1, "plan build: emits configure step");
-    check(plan.configure_steps.front().cwd == proj.root, "plan build: configure cwd");
+    check(plan.configure_steps.front().spec.cwd == proj.root, "plan build: configure cwd");
     check(plan.build_steps.size() == 1, "plan build: emits build step");
-    check(plan.build_steps.front().command.contains("cmake --build"),
+    check(plan.build_steps.front().spec.program == "cmake",
+          "plan build: build command program emitted");
+    check(std::ranges::find(plan.build_steps.front().spec.args, "--build") !=
+              plan.build_steps.front().spec.args.end(),
           "plan build: build command emitted");
     check(plan.success_message == "build succeeded: .exon/release/app",
           "plan build: success message matches profile");
@@ -542,19 +560,23 @@ void test_plan_test_emits_filtered_targets_and_run_steps() {
     auto plan = build::plan_test(request);
 
     check(std::ranges::any_of(plan.writes, [&](auto const& write) {
-              return write.path == request.project.exon_dir / "CMakeLists.txt";
+              return write.text.path == request.project.exon_dir / "CMakeLists.txt";
           }),
           "plan test: emits exon cmake write");
     check(std::ranges::any_of(plan.writes, [&](auto const& write) {
-              return write.path == proj.root / "CMakeLists.txt";
+              return write.text.path == proj.root / "CMakeLists.txt";
           }),
           "plan test: emits root cmake sync when enabled");
     check(plan.build_steps.size() == 1, "plan test: emits filtered build target");
-    check(plan.build_steps.front().command.contains("--target test-alpha"),
+    check(std::ranges::find(plan.build_steps.front().spec.args, "--target") !=
+              plan.build_steps.front().spec.args.end(),
+          "plan test: target flag emitted");
+    check(std::ranges::find(plan.build_steps.front().spec.args, "test-alpha") !=
+              plan.build_steps.front().spec.args.end(),
           "plan test: build target is preserved");
     check(plan.run_steps.size() == 1, "plan test: emits one run step");
     check(plan.run_steps.front().label == "test-alpha", "plan test: label matches test name");
-    check(plan.run_steps.front().timeout == std::chrono::milliseconds{1500},
+    check(plan.run_steps.front().spec.timeout == std::chrono::milliseconds{1500},
           "plan test: timeout propagates");
 }
 
@@ -577,7 +599,7 @@ void test_stale_self_host_bootstrap_message_for_macos_exon_repo() {
     m.name = "exon";
 
     auto message = build::stale_self_host_bootstrap_message(
-        m, proj.root, executable, {.os = "macos", .arch = "aarch64"});
+        m, proj.root, executable, toolchain::make_platform("macos", "aarch64"));
 
     check(message.has_value(), "stale bootstrap: macOS exon repo is guarded");
     check(message && message->contains("src/build.cppm"),
@@ -602,18 +624,18 @@ void test_stale_self_host_bootstrap_message_skips_fresh_or_non_macos_cases() {
     manifest::Manifest exon_repo;
     exon_repo.name = "exon";
     auto fresh_message = build::stale_self_host_bootstrap_message(
-        exon_repo, proj.root, executable, {.os = "macos", .arch = "aarch64"});
+        exon_repo, proj.root, executable, toolchain::make_platform("macos", "aarch64"));
     check(!fresh_message.has_value(), "stale bootstrap: fresh bootstrap is allowed");
 
     std::filesystem::last_write_time(proj.root / "src" / "build.cppm", base + std::chrono::hours{1});
     auto linux_message = build::stale_self_host_bootstrap_message(
-        exon_repo, proj.root, executable, {.os = "linux", .arch = "x86_64"});
+        exon_repo, proj.root, executable, toolchain::make_platform("linux", "x86_64"));
     check(!linux_message.has_value(), "stale bootstrap: non-macOS host is ignored");
 
     manifest::Manifest app_repo;
     app_repo.name = "app";
     auto app_message = build::stale_self_host_bootstrap_message(
-        app_repo, proj.root, executable, {.os = "macos", .arch = "aarch64"});
+        app_repo, proj.root, executable, toolchain::make_platform("macos", "aarch64"));
     check(!app_message.has_value(), "stale bootstrap: non-exon project is ignored");
 }
 
