@@ -1,5 +1,7 @@
 import std;
 import build;
+import build.system;
+import core;
 import manifest;
 import toolchain;
 
@@ -45,11 +47,8 @@ void test_portable_windows_asan_helper_configures_on_non_windows() {
     m.type = "bin";
     m.build.cxxflags = {"/fsanitize=address"};
 
-    auto saved_cwd = std::filesystem::current_path();
-    std::filesystem::current_path(proj.root);
-
     try {
-        auto cmake = build::generate_portable_cmake(m, {});
+        auto cmake = build::generate_portable_cmake(m, proj.root, {});
         check(cmake.contains("function(exon_copy_windows_asan_runtime target)"),
               "portable CMake emits Windows ASan helper");
         check(cmake.contains("if(NOT WIN32)"),
@@ -67,11 +66,8 @@ void test_portable_windows_asan_helper_configures_on_non_windows() {
         auto rc = build::run_process(cmd);
         check(rc == 0, "portable Windows ASan helper configures on non-Windows");
     } catch (...) {
-        std::filesystem::current_path(saved_cwd);
         throw;
     }
-
-    std::filesystem::current_path(saved_cwd);
 }
 #endif
 
@@ -84,11 +80,34 @@ void test_run_process_returns_child_exit_code() {
     check(rc == 7, "run_process returns child exit code");
 }
 
+void test_system_run_process_honors_cwd() {
+    TmpProject proj;
+    proj.write("marker.txt", "ok\n");
+
+#if defined(_WIN32)
+    core::ProcessSpec spec{
+        .cwd = proj.root,
+        .command = "cmd /c \"if exist marker.txt (exit 0) else (exit 1)\"",
+        .label = "cwd-check",
+    };
+#else
+    core::ProcessSpec spec{
+        .cwd = proj.root,
+        .command = "sh -c 'test -f marker.txt'",
+        .label = "cwd-check",
+    };
+#endif
+
+    auto rc = build::system::run_process(spec);
+    check(rc == 0, "build.system::run_process honors ProcessSpec.cwd");
+}
+
 int main() {
 #if !defined(_WIN32)
     test_portable_windows_asan_helper_configures_on_non_windows();
 #endif
     test_run_process_returns_child_exit_code();
+    test_system_run_process_honors_cwd();
 
     if (failures > 0) {
         std::println("{} test(s) failed", failures);

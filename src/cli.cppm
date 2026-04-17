@@ -138,17 +138,4 @@ Args parse(int argc, char* argv[], int from, std::vector<ArgDef> defs) {
     return result;
 }
 
-// --- Error helpers ---
-
-int error(std::string_view msg) {
-    std::println(std::cerr, "error: {}", msg);
-    return 1;
-}
-
-int error(std::string_view msg, std::string_view hint) {
-    std::println(std::cerr, "error: {}", msg);
-    std::println(std::cerr, "hint: {}", hint);
-    return 1;
-}
-
 } // namespace cli

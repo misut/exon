@@ -30,16 +30,23 @@ FetchContent_MakeAvailable(tomlcpp)
 add_library(exon-modules)
 target_sources(exon-modules
     PUBLIC FILE_SET CXX_MODULES BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR} FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/build.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/build.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/cli.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/commands.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/fetch.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/fetch.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/lock.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/lock.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/manifest.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/manifest.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/semver.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/templates.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/toolchain.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/toolchain.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vcpkg.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vcpkg.system.cppm
 )
 target_link_libraries(exon-modules PUBLIC
     cppx
@@ -53,16 +60,23 @@ target_sources(exon PRIVATE
 target_link_libraries(exon PRIVATE exon-modules)
 
 set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/build.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/build.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/cli.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/commands.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/fetch.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/fetch.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/lock.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/lock.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/manifest.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/manifest.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/semver.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/templates.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/toolchain.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/toolchain.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vcpkg.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/vcpkg.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
     PROPERTIES COMPILE_DEFINITIONS
     "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.23.3\""

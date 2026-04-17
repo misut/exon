@@ -481,6 +481,69 @@ void test_build_command_wasm_keeps_default_parallelism() {
     check(!cmd.contains("--parallel 1"), "build cmd: wasm keeps default parallelism");
 }
 
+void test_plan_build_emits_write_and_steps() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() { return 0; }\n");
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    build::BuildRequest request{
+        .project = build::project_context(proj.root, true),
+        .manifest = m,
+        .toolchain = make_tc(),
+        .release = true,
+    };
+
+    auto plan = build::plan_build(request);
+
+    check(plan.writes.size() == 1, "plan build: emits exon cmake write");
+    check(plan.configure_steps.size() == 1, "plan build: emits configure step");
+    check(plan.configure_steps.front().cwd == proj.root, "plan build: configure cwd");
+    check(plan.build_steps.size() == 1, "plan build: emits build step");
+    check(plan.build_steps.front().command.contains("cmake --build"),
+          "plan build: build command emitted");
+    check(plan.success_message == "build succeeded: .exon/release/app",
+          "plan build: success message matches profile");
+}
+
+void test_plan_test_emits_filtered_targets_and_run_steps() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() { return 0; }\n");
+    proj.write("tests/test_alpha.cpp", "int main() { return 0; }\n");
+    proj.write("tests/test_beta.cpp", "int main() { return 0; }\n");
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    build::BuildRequest request{
+        .project = build::project_context(proj.root),
+        .manifest = m,
+        .toolchain = make_tc(),
+        .with_tests = true,
+        .build_targets = {"test-alpha"},
+        .test_names = {"test-alpha"},
+        .timeout = std::chrono::milliseconds{1500},
+    };
+
+    auto plan = build::plan_test(request);
+
+    check(plan.writes.size() == 1, "plan test: emits exon cmake write");
+    check(plan.build_steps.size() == 1, "plan test: emits filtered build target");
+    check(plan.build_steps.front().command.contains("--target test-alpha"),
+          "plan test: build target is preserved");
+    check(plan.run_steps.size() == 1, "plan test: emits one run step");
+    check(plan.run_steps.front().label == "test-alpha", "plan test: label matches test name");
+    check(plan.run_steps.front().timeout == std::chrono::milliseconds{1500},
+          "plan test: timeout propagates");
+}
+
 void test_stale_self_host_bootstrap_message_for_macos_exon_repo() {
     TmpProject proj;
     write_fake_exon_repo(proj);
@@ -599,13 +662,10 @@ void test_generate_cmake_base_build_flags() {
         auto f = std::ofstream(temp / "src" / "myproj.cppm");
         f << "export module myproj;\n";
     }
-    auto saved_cwd = std::filesystem::current_path();
-    std::filesystem::current_path(temp);
-
     try {
         toolchain::Toolchain tc;
         tc.native_import_std = true;
-        auto cmake = build::generate_portable_cmake(m, {});
+        auto cmake = build::generate_portable_cmake(m, temp, {});
 
         check(cmake.contains("if(PROJECT_IS_TOP_LEVEL)"),
               "base build flags wrapped in PROJECT_IS_TOP_LEVEL");
@@ -617,11 +677,9 @@ void test_generate_cmake_base_build_flags() {
               "base build flags emit target_link_options");
         check(cmake.contains("-Wl,--gc-sections"), "base ldflag present");
     } catch (...) {
-        std::filesystem::current_path(saved_cwd);
         std::filesystem::remove_all(temp);
         throw;
     }
-    std::filesystem::current_path(saved_cwd);
     std::filesystem::remove_all(temp);
 }
 
@@ -669,11 +727,8 @@ void test_generate_portable_cmake_bin_modules_build_flags_apply_to_exec() {
         auto f = std::ofstream(temp / "src" / "app.cppm");
         f << "export module app;\n";
     }
-    auto saved_cwd = std::filesystem::current_path();
-    std::filesystem::current_path(temp);
-
     try {
-        auto cmake = build::generate_portable_cmake(m, {});
+        auto cmake = build::generate_portable_cmake(m, temp, {});
 
         check(cmake.contains("target_compile_options(app-modules PRIVATE"),
               "portable modules lib gets compile flags");
@@ -684,11 +739,9 @@ void test_generate_portable_cmake_bin_modules_build_flags_apply_to_exec() {
         check(cmake.contains("target_link_options(app PRIVATE"),
               "portable bin target gets link flags");
     } catch (...) {
-        std::filesystem::current_path(saved_cwd);
         std::filesystem::remove_all(temp);
         throw;
     }
-    std::filesystem::current_path(saved_cwd);
     std::filesystem::remove_all(temp);
 }
 
@@ -719,11 +772,8 @@ void test_generate_cmake_target_section_build() {
         auto f = std::ofstream(temp / "src" / "myproj.cppm");
         f << "export module myproj;\n";
     }
-    auto saved_cwd = std::filesystem::current_path();
-    std::filesystem::current_path(temp);
-
     try {
-        auto cmake = build::generate_portable_cmake(m, {});
+        auto cmake = build::generate_portable_cmake(m, temp, {});
 
         // Outer top-level guard wraps everything
         check(cmake.contains("if(PROJECT_IS_TOP_LEVEL)"),
@@ -757,11 +807,9 @@ void test_generate_cmake_target_section_build() {
                   top_pos < linux_pos,
               "PROJECT_IS_TOP_LEVEL guard precedes per-target if() blocks");
     } catch (...) {
-        std::filesystem::current_path(saved_cwd);
         std::filesystem::remove_all(temp);
         throw;
     }
-    std::filesystem::current_path(saved_cwd);
     std::filesystem::remove_all(temp);
 }
 
@@ -811,11 +859,8 @@ void test_generate_cmake_target_section_build_profiles() {
         auto f = std::ofstream(temp / "src" / "myproj.cppm");
         f << "export module myproj;\n";
     }
-    auto saved_cwd = std::filesystem::current_path();
-    std::filesystem::current_path(temp);
-
     try {
-        auto cmake = build::generate_portable_cmake(m, {});
+        auto cmake = build::generate_portable_cmake(m, temp, {});
         check(cmake.contains("if(PROJECT_IS_TOP_LEVEL)"),
               "profile flags wrapped in PROJECT_IS_TOP_LEVEL");
         check(cmake.contains("$<$<CONFIG:Debug>:-O0>"),
@@ -823,11 +868,9 @@ void test_generate_cmake_target_section_build_profiles() {
         check(cmake.contains("$<$<CONFIG:Release>:-O3>"),
               "release profile uses CONFIG:Release genex");
     } catch (...) {
-        std::filesystem::current_path(saved_cwd);
         std::filesystem::remove_all(temp);
         throw;
     }
-    std::filesystem::current_path(saved_cwd);
     std::filesystem::remove_all(temp);
 }
 
@@ -846,11 +889,8 @@ void test_generate_cmake_no_build_flags_skipped() {
         auto f = std::ofstream(temp / "src" / "myproj.cppm");
         f << "export module myproj;\n";
     }
-    auto saved_cwd = std::filesystem::current_path();
-    std::filesystem::current_path(temp);
-
     try {
-        auto cmake = build::generate_portable_cmake(m, {});
+        auto cmake = build::generate_portable_cmake(m, temp, {});
         check(!cmake.contains("target_compile_options(myproj-modules PRIVATE"),
               "no target_compile_options when no build flags");
         check(!cmake.contains("target_link_options"),
@@ -860,11 +900,9 @@ void test_generate_cmake_no_build_flags_skipped() {
         check(!cmake.contains("exon_copy_windows_asan_runtime"),
               "no Windows ASan helper when ASan is not enabled");
     } catch (...) {
-        std::filesystem::current_path(saved_cwd);
         std::filesystem::remove_all(temp);
         throw;
     }
-    std::filesystem::current_path(saved_cwd);
     std::filesystem::remove_all(temp);
 }
 
@@ -1145,6 +1183,8 @@ int main() {
     test_build_command_macos_import_std_serialized();
     test_build_command_macos_no_std_modules_keeps_default_parallelism();
     test_build_command_wasm_keeps_default_parallelism();
+    test_plan_build_emits_write_and_steps();
+    test_plan_test_emits_filtered_targets_and_run_steps();
     test_stale_self_host_bootstrap_message_for_macos_exon_repo();
     test_stale_self_host_bootstrap_message_skips_fresh_or_non_macos_cases();
     test_user_cxxflags_env_only();

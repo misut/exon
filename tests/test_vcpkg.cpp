@@ -1,5 +1,6 @@
 import std;
 import vcpkg;
+import vcpkg.system;
 import manifest;
 
 #if defined(_WIN32)
@@ -142,7 +143,7 @@ void test_write_manifest() {
     m.vcpkg_deps = {{"fmt", {.version = "*"}}};
 
     auto out = tmp / "sub" / "vcpkg.json";
-    vcpkg::write_manifest(m, out);
+    vcpkg::system::write_manifest(m, out);
 
     check(fs::exists(out), "write: file created");
     std::string content;
@@ -162,13 +163,13 @@ void test_looks_like_root() {
     fs::remove_all(tmp);
     fs::create_directories(tmp / "scripts" / "buildsystems");
 
-    check(!vcpkg::looks_like_vcpkg_root(tmp), "looks: missing cmake file");
+    check(!vcpkg::system::looks_like_vcpkg_root(tmp), "looks: missing cmake file");
 
     {
         auto f = std::ofstream{tmp / "scripts" / "buildsystems" / "vcpkg.cmake"};
         f << "# fake";
     }
-    check(vcpkg::looks_like_vcpkg_root(tmp), "looks: with cmake file");
+    check(vcpkg::system::looks_like_vcpkg_root(tmp), "looks: with cmake file");
 
     fs::remove_all(tmp);
 }
