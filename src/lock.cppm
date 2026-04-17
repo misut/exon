@@ -6,6 +6,7 @@ export namespace lock {
 
 struct LockedDep {
     std::string name; // dep key (e.g. "github.com/user/repo" or "github.com/user/repo#member")
+    std::string package; // canonical package identity from exon.toml
     std::string version;
     std::string commit; // exact git commit hash
     std::string subdir; // non-empty for git+subdir deps
@@ -34,6 +35,7 @@ struct LockFile {
     void add_or_update(LockedDep dep) {
         for (auto& p : packages) {
             if (p.name == dep.name && p.version == dep.version) {
+                p.package = std::move(dep.package);
                 p.commit = std::move(dep.commit);
                 p.subdir = std::move(dep.subdir);
                 p.features = std::move(dep.features);
@@ -55,6 +57,8 @@ LockFile parse(std::string_view content) {
             LockedDep dep;
             if (pkg.contains("name"))
                 dep.name = pkg.at("name").as_string();
+            if (pkg.contains("package"))
+                dep.package = pkg.at("package").as_string();
             if (pkg.contains("version"))
                 dep.version = pkg.at("version").as_string();
             if (pkg.contains("commit"))
@@ -80,6 +84,8 @@ std::string render(LockFile const& lf) {
     for (auto const& pkg : lf.packages) {
         out += "[[package]]\n";
         out += std::format("name = \"{}\"\n", pkg.name);
+        if (!pkg.package.empty())
+            out += std::format("package = \"{}\"\n", pkg.package);
         out += std::format("version = \"{}\"\n", pkg.version);
         out += std::format("commit = \"{}\"\n", pkg.commit);
         if (!pkg.subdir.empty())

@@ -140,19 +140,34 @@ std::string display_path(std::filesystem::path const& path,
 }
 
 std::string upstream_target_name(fetch::FetchedDep const& dep) {
+    if (!dep.name.empty())
+        return dep.name;
     if (!dep.package_name.empty())
         return dep.package_name;
-    return dep.name;
+    return dep.key;
 }
 
-void emit_target_alias(std::ostringstream& out, fetch::FetchedDep const& dep) {
+void reserve_target_name(std::set<std::string>& emitted_targets, std::string const& name) {
+    if (name.empty())
+        throw std::runtime_error("internal error: resolved dependency target name is empty");
+    if (!emitted_targets.insert(name).second) {
+        throw std::runtime_error(
+            std::format("internal error: duplicate resolved dependency target '{}'", name));
+    }
+}
+
+void emit_target_alias(std::ostringstream& out, fetch::FetchedDep const& dep,
+                       std::set<std::string>& emitted_targets) {
     auto actual = upstream_target_name(dep);
-    if (actual.empty() || actual == dep.name)
-        return;
-    out << std::format("if(TARGET {} AND NOT TARGET {})\n", actual, dep.name);
-    out << std::format("    add_library({} INTERFACE)\n", dep.name);
-    out << std::format("    target_link_libraries({} INTERFACE {})\n", dep.name, actual);
-    out << "endif()\n";
+    for (auto const& alias : dep.aliases) {
+        if (alias.empty() || alias == actual)
+            continue;
+        reserve_target_name(emitted_targets, alias);
+        out << std::format("if(TARGET {} AND NOT TARGET {})\n", actual, alias);
+        out << std::format("    add_library({} INTERFACE)\n", alias);
+        out << std::format("    target_link_libraries({} INTERFACE {})\n", alias, actual);
+        out << "endif()\n";
+    }
 }
 
 bool build_has_asan_flag(manifest::Build const& b) {
@@ -549,6 +564,11 @@ std::vector<std::string> split_targets(std::string_view s) {
     return result;
 }
 
+void append_unique(std::vector<std::string>& items, std::string const& value) {
+    if (std::ranges::find(items, value) == items.end())
+        items.push_back(value);
+}
+
 void emit_cmake_preamble(std::ostringstream& out, manifest::Manifest const& m,
                           bool import_std) {
     if (import_std) {
@@ -777,6 +797,7 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         else
             regular_deps.push_back(&dep);
     }
+    std::set<std::string> emitted_dependency_targets;
 
     // Pre-scan path deps: resolve their manifests for the current platform
     // so we can collect cmake deps and reuse them in emit_dep.
@@ -790,7 +811,6 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
     std::map<std::string, manifest::Manifest> resolved_dep_manifests;
 
     for (auto const& dep : deps) {
-        if (!dep.subdir.empty()) continue;
         auto dep_manifest_path = dep.path / "exon.toml";
         if (!std::filesystem::exists(dep_manifest_path)) continue;
         auto dep_m = manifest::system::load(dep_manifest_path.string());
@@ -856,19 +876,8 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
 
     // emit dependency as static library
     auto emit_dep = [&](fetch::FetchedDep const& dep) {
-        // git+subdir deps: always use add_subdirectory on the member's own CMakeLists.txt
-        if (!dep.subdir.empty()) {
-            auto dep_cmake = dep.path / "CMakeLists.txt";
-            if (!std::filesystem::exists(dep_cmake))
-                throw std::runtime_error(std::format(
-                    "git dep '{}': {}/CMakeLists.txt not found (run `exon sync` in the upstream "
-                    "repo, or add a CMakeLists.txt to the subdir)", dep.name, dep.subdir));
-            out << std::format("add_subdirectory({} {})\n",
-                               std::filesystem::canonical(dep.path).generic_string(), dep.name);
-            detail::emit_target_alias(out, dep);
-            out << "\n";
-            return;
-        }
+        auto actual_target = detail::upstream_target_name(dep);
+        detail::reserve_target_name(emitted_dependency_targets, actual_target);
 
         // build-system = "cmake": use existing CMakeLists.txt directly
         {
@@ -879,10 +888,10 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
                 if (!std::filesystem::exists(dep_cmake))
                     throw std::runtime_error(std::format(
                         "dependency '{}': build-system = \"cmake\" but no CMakeLists.txt found",
-                        dep.name));
+                        actual_target));
                 out << std::format("add_subdirectory({} {})\n",
-                    std::filesystem::canonical(dep.path).generic_string(), dep.name);
-                detail::emit_target_alias(out, dep);
+                    std::filesystem::canonical(dep.path).generic_string(), actual_target);
+                detail::emit_target_alias(out, dep, emitted_dependency_targets);
                 out << "\n";
                 return;
             }
@@ -911,25 +920,25 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             auto dep_cmake = dep.path / "CMakeLists.txt";
             if (std::filesystem::exists(dep_cmake)) {
                 out << std::format("add_subdirectory({} {})\n",
-                                   std::filesystem::canonical(dep.path).generic_string(), dep.name);
-                detail::emit_target_alias(out, dep);
+                                   std::filesystem::canonical(dep.path).generic_string(), actual_target);
+                detail::emit_target_alias(out, dep, emitted_dependency_targets);
                 out << "\n";
                 return;
             }
             throw std::runtime_error(std::format(
-                "dependency '{}' has no source files in src/ and no CMakeLists.txt", dep.name));
+                "dependency '{}' has no source files in src/ and no CMakeLists.txt", actual_target));
         }
 
-        out << std::format("add_library({})\n", dep.name);
+        out << std::format("add_library({})\n", actual_target);
         if (!dep_sf.cpp.empty()) {
-            out << std::format("target_sources({} PRIVATE", dep.name);
+            out << std::format("target_sources({} PRIVATE", actual_target);
             for (auto const& src : dep_sf.cpp)
                 out << std::format("\n    {}", src);
             out << "\n)\n";
         }
         if (!dep_sf.cppm.empty()) {
             out << std::format(
-                "target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS {} FILES", dep.name,
+                "target_sources({}\n    PUBLIC FILE_SET CXX_MODULES BASE_DIRS {} FILES", actual_target,
                 std::filesystem::canonical(dep.path).generic_string());
             for (auto const& src : dep_sf.cppm)
                 out << std::format("\n    {}", src);
@@ -938,34 +947,28 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
 
         auto include_dir = dep.path / "include";
         if (std::filesystem::exists(include_dir)) {
-            out << std::format("target_include_directories({} PUBLIC {})\n", dep.name,
+            out << std::format("target_include_directories({} PUBLIC {})\n", actual_target,
                                std::filesystem::canonical(include_dir).generic_string());
         }
 
-        // Link transitive deps: git deps + featured deps + cmake dep targets + path deps
+        // Link the selected canonical dependency graph plus transitive cmake deps.
         if (cached_it != resolved_dep_manifests.end()) {
             auto const& dep_m = cached_it->second;
             std::vector<std::string> link_targets;
-            for (auto const& [sub_key, sub_ver] : dep_m.dependencies) {
-                link_targets.push_back(sub_key.substr(sub_key.rfind('/') + 1));
-            }
-            for (auto const& [sub_key, sub_fdep] : dep_m.featured_deps) {
-                link_targets.push_back(sub_key.substr(sub_key.rfind('/') + 1));
-            }
+            for (auto const& child_name : dep.dependency_names)
+                detail::append_unique(link_targets, child_name);
             for (auto const& [_, cmake_dep] : dep_m.cmake_deps) {
                 for (auto& t : detail::split_targets(cmake_dep.targets))
-                    link_targets.push_back(std::move(t));
-            }
-            for (auto const& [sub_name, _] : dep_m.path_deps) {
-                link_targets.push_back(sub_name);
+                    detail::append_unique(link_targets, t);
             }
             if (!link_targets.empty()) {
-                out << std::format("target_link_libraries({} PUBLIC", dep.name);
+                out << std::format("target_link_libraries({} PUBLIC", actual_target);
                 for (auto const& t : link_targets)
                     out << std::format("\n    {}", t);
                 out << "\n)\n";
             }
         }
+        detail::emit_target_alias(out, dep, emitted_dependency_targets);
         out << "\n";
     };
 
@@ -1179,6 +1182,7 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
                            : (dep.is_path ? p_path_regular : p_git_regular);
         bucket.push_back(&dep);
     }
+    std::set<std::string> emitted_dependency_targets;
 
     // [dependencies.cmake] — raw CMake projects
     if (!m.cmake_deps.empty() || !m.dev_cmake_deps.empty()) {
@@ -1212,10 +1216,12 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
     // git deps via FetchContent
     auto emit_fetch = [&](std::vector<fetch::FetchedDep const*> const& dep_list) {
         for (auto const* dep : dep_list) {
+            auto actual_target = detail::upstream_target_name(*dep);
+            detail::reserve_target_name(emitted_dependency_targets, actual_target);
             auto git_url = std::format("https://{}.git", dep->key);
             auto tag = dep->version.starts_with("v") ? dep->version
                                                       : std::format("v{}", dep->version);
-            out << std::format("FetchContent_Declare({}\n", dep->name);
+            out << std::format("FetchContent_Declare({}\n", actual_target);
             out << std::format("    GIT_REPOSITORY {}\n", git_url);
             out << std::format("    GIT_TAG {}\n", tag);
             out << "    GIT_SHALLOW ON\n";
@@ -1224,8 +1230,9 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             out << ")\n";
         }
         for (auto const* dep : dep_list) {
-            out << std::format("FetchContent_MakeAvailable({})\n", dep->name);
-            detail::emit_target_alias(out, *dep);
+            auto actual_target = detail::upstream_target_name(*dep);
+            out << std::format("FetchContent_MakeAvailable({})\n", actual_target);
+            detail::emit_target_alias(out, *dep, emitted_dependency_targets);
         }
     };
 
@@ -1242,11 +1249,13 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
     // path deps via add_subdirectory (binary_dir required for paths outside source tree)
     auto emit_subdirs = [&](std::vector<fetch::FetchedDep const*> const& dep_list) {
         for (auto const* dep : dep_list) {
+            auto actual_target = detail::upstream_target_name(*dep);
+            detail::reserve_target_name(emitted_dependency_targets, actual_target);
             auto rel = std::filesystem::relative(dep->path, root).generic_string();
             out << std::format("add_subdirectory(${{CMAKE_CURRENT_SOURCE_DIR}}/{} "
                                "${{CMAKE_BINARY_DIR}}/_deps/{}-build)\n",
-                               rel, dep->name);
-            detail::emit_target_alias(out, *dep);
+                               rel, actual_target);
+            detail::emit_target_alias(out, *dep, emitted_dependency_targets);
         }
     };
 

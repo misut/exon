@@ -1,6 +1,8 @@
 import std;
 import fetch;
 import fetch.system;
+import lock;
+import lock.system;
 import manifest;
 import manifest.system;
 
@@ -300,8 +302,10 @@ refl = {{ git = "{}", version = "0.1.0", subdir = "refl" }}
         auto const* locked = result.lock_file.find(
             std::format("{}#{}", repo.generic_string(), "refl"), "0.1.0");
         check(locked != nullptr, "subdir fetch: composite-name lock entry exists");
-        if (locked)
+        if (locked) {
             check(locked->subdir == "refl", "subdir fetch: lock subdir field");
+            check(locked->package == "refl", "subdir fetch: canonical package stored");
+        }
 
         // verify clone happened under EXON_CACHE_DIR (not under HOME/.exon/cache)
         // absolute-path keys have their leading "/" and Windows drive colon stripped
@@ -432,7 +436,7 @@ nope = {{ git = "{}", version = "0.1.0", subdir = "does-not-exist" }}
     bool threw = false;
     try {
         fetch_project(ws.root / "app");
-    } catch (std::exception const&) {
+    } catch (...) {
         threw = true;
     }
     check(threw, "subdir missing: throws");
@@ -459,7 +463,7 @@ missing = true
     bool threw = false;
     try {
         fetch_project(ws.root / "app");
-    } catch (std::exception const&) {
+    } catch (...) {
         threw = true;
     }
     check(threw, "missing ws member: throws");
@@ -488,17 +492,22 @@ struct TmpGitRepo {
         f << content;
     }
 
+    int git(std::string const& cmd) const {
+        auto full = std::format("git -C \"{}\" {} {}", root.generic_string(), cmd, null_redirect);
+        return std::system(full.c_str());
+    }
+
+    void commit_and_tag(std::string const& tag) {
+        git("add .");
+        git(std::format("commit -q -m {}", tag));
+        git(std::format("tag {}", tag));
+    }
+
     void init_and_tag(std::string const& tag) {
-        auto git = [&](std::string const& cmd) {
-            auto full = std::format("git -C \"{}\" {} {}", root.generic_string(), cmd, null_redirect);
-            return std::system(full.c_str());
-        };
         git("init -q");
         git("config user.email test@example.com");
         git("config user.name Test");
-        git("add .");
-        git("commit -q -m init");
-        git(std::format("tag {}", tag));
+        commit_and_tag(tag);
     }
 
     std::string key() const { return root.generic_string(); }
@@ -630,7 +639,7 @@ version = "0.1.0"
     unsetenv("EXON_CACHE_DIR");
 }
 
-// test: path dep with a transitive subdir dep (currently not recursed by fetch_path_recursive)
+// test: path dep with a transitive subdir dep
 void test_fetch_path_with_subdir_dep() {
     TmpWorkspace ws{"exon_test_fetch_path_subdir"};
     auto cache = ws.root / "cache";
@@ -676,11 +685,15 @@ middle = "../middle"
     try {
         auto result = fetch_project(ws.root / "app");
 
-        // fetch_path_recursive does NOT recurse into subdir_deps,
-        // so only middle is fetched (refl is not)
-        check(result.deps.size() == 1, "path->subdir: only 1 dep (subdir not recursed)");
-        if (!result.deps.empty())
-            check(result.deps[0].name == "middle", "path->subdir: middle only");
+        check(result.deps.size() == 2, "path->subdir: refl + middle resolved");
+        if (result.deps.size() == 2) {
+            check(result.deps[0].name == "refl", "path->subdir: refl first");
+            check(result.deps[1].name == "middle", "path->subdir: middle second");
+            check(result.deps[1].dependency_names.size() == 1,
+                  "path->subdir: middle has one child");
+            check(result.deps[1].dependency_names[0] == "refl",
+                  "path->subdir: middle links canonical refl target");
+        }
     } catch (std::exception const& e) {
         std::println(std::cerr, "  exception: {}", e.what());
         ++failures;
@@ -688,7 +701,7 @@ middle = "../middle"
     unsetenv("EXON_CACHE_DIR");
 }
 
-// test: path dep with featured dep (currently not recursed by fetch_path_recursive)
+// test: path dep with featured dep
 void test_fetch_path_with_featured_dep() {
     TmpWorkspace ws{"exon_test_fetch_path_feat"};
     auto cache = ws.root / "cache";
@@ -736,11 +749,17 @@ middle = "../middle"
     try {
         auto result = fetch_project(ws.root / "app");
 
-        // fetch_path_recursive does NOT recurse into featured_deps,
-        // so only middle is fetched (featlib is not)
-        check(result.deps.size() == 1, "path->featured: only 1 dep (featured not recursed)");
-        if (!result.deps.empty())
-            check(result.deps[0].name == "middle", "path->featured: middle only");
+        check(result.deps.size() == 2, "path->featured: featlib + middle resolved");
+        if (result.deps.size() == 2) {
+            check(result.deps[0].name == "featlib", "path->featured: featlib first");
+            check(result.deps[0].features.size() == 1, "path->featured: selected feature kept");
+            check(result.deps[0].features[0] == "x", "path->featured: selected feature name");
+            check(result.deps[1].name == "middle", "path->featured: middle second");
+            check(result.deps[1].dependency_names.size() == 1,
+                  "path->featured: middle has one child");
+            check(result.deps[1].dependency_names[0] == "featlib",
+                  "path->featured: middle links canonical featlib target");
+        }
     } catch (std::exception const& e) {
         std::println(std::cerr, "  exception: {}", e.what());
         ++failures;
@@ -748,19 +767,260 @@ middle = "../middle"
     unsetenv("EXON_CACHE_DIR");
 }
 
+void test_fetch_root_direct_git_overrides_transitive_version() {
+    TmpWorkspace ws{"exon_test_fetch_root_git_override"};
+    auto cache = ws.root / "cache";
+    setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
+
+    auto repos = ws.root / "repos";
+    fs::create_directories(repos);
+
+    TmpGitRepo cppx_repo{repos, "cppx"};
+    cppx_repo.write("exon.toml", R"([package]
+name = "cppx"
+version = "1.0.3"
+type = "lib"
+standard = 23
+)");
+    cppx_repo.write("src/cppx.cppm", "export module cppx;");
+    cppx_repo.init_and_tag("v1.0.3");
+    cppx_repo.write("exon.toml", R"([package]
+name = "cppx"
+version = "1.2.0"
+type = "lib"
+standard = 23
+)");
+    cppx_repo.write("src/cppx.cppm", "export module cppx;\nexport namespace cppx { inline constexpr int version = 120; }\n");
+    cppx_repo.commit_and_tag("v1.2.0");
+
+    TmpGitRepo txn_repo{repos, "txn"};
+    txn_repo.write("exon.toml", std::format(R"([package]
+name = "txn"
+version = "0.6.1"
+type = "lib"
+standard = 23
+
+[dependencies]
+"{}" = "1.0.3"
+)", cppx_repo.key()));
+    txn_repo.write("src/txn.cppm", "export module txn;");
+    txn_repo.init_and_tag("v0.6.1");
+
+    ws.write("app/exon.toml", std::format(R"([package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+"{}" = "0.6.1"
+"{}" = "1.2.0"
+)", txn_repo.key(), cppx_repo.key()));
+    ws.write("app/src/main.cpp", "int main() { return 0; }\n");
+
+    try {
+        auto app_root = ws.root / "app";
+        lock::LockFile stale;
+        stale.packages = {{
+            .name = cppx_repo.key(),
+            .package = "cppx",
+            .version = "1.0.3",
+            .commit = "stale",
+        }};
+        lock::system::save(stale, (app_root / "exon.lock").string());
+
+        auto result = fetch_project(app_root);
+
+        check(result.deps.size() == 2, "root git override: cppx + txn selected");
+        if (result.deps.size() == 2) {
+            check(result.deps[0].name == "cppx", "root git override: cppx first");
+            check(result.deps[0].version == "1.2.0", "root git override: direct version kept");
+            check(result.deps[1].name == "txn", "root git override: txn second");
+            check(result.deps[1].dependency_names.size() == 1,
+                  "root git override: txn has one child");
+            check(result.deps[1].dependency_names[0] == "cppx",
+                  "root git override: txn links selected cppx");
+        }
+
+        check(result.lock_file.find(cppx_repo.key(), "1.2.0") != nullptr,
+              "root git override: selected cppx in lock");
+        check(result.lock_file.find(cppx_repo.key(), "1.0.3") == nullptr,
+              "root git override: stale transitive cppx pruned");
+        check(result.lock_file.find(txn_repo.key(), "0.6.1") != nullptr,
+              "root git override: txn in lock");
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "  exception: {}", e.what());
+        ++failures;
+    }
+    unsetenv("EXON_CACHE_DIR");
+}
+
+void test_fetch_root_path_overrides_transitive_git() {
+    TmpWorkspace ws{"exon_test_fetch_root_path_override"};
+    auto cache = ws.root / "cache";
+    setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
+
+    auto repos = ws.root / "repos";
+    fs::create_directories(repos);
+
+    TmpGitRepo cppx_repo{repos, "cppx"};
+    cppx_repo.write("exon.toml", R"([package]
+name = "cppx"
+version = "1.0.3"
+type = "lib"
+standard = 23
+)");
+    cppx_repo.write("src/cppx.cppm", "export module cppx;");
+    cppx_repo.init_and_tag("v1.0.3");
+
+    ws.write("ui/exon.toml", std::format(R"([package]
+name = "ui"
+version = "0.1.0"
+type = "lib"
+standard = 23
+
+[dependencies]
+"{}" = "1.0.3"
+)", cppx_repo.key()));
+    ws.write("ui/src/ui.cppm", "export module ui;");
+
+    ws.write("cppx-local/exon.toml", R"([package]
+name = "cppx"
+version = "9.9.9"
+type = "lib"
+standard = 23
+)");
+    ws.write("cppx-local/src/cppx.cppm", "export module cppx;");
+
+    ws.write("app/exon.toml", R"([package]
+name = "app"
+version = "0.1.0"
+
+[dependencies.path]
+ui = "../ui"
+cppx = "../cppx-local"
+)");
+    ws.write("app/src/main.cpp", "int main() { return 0; }\n");
+
+    try {
+        auto result = fetch_project(ws.root / "app");
+
+        check(result.deps.size() == 2, "root path override: cppx + ui selected");
+        if (result.deps.size() == 2) {
+            check(result.deps[0].name == "cppx", "root path override: cppx first");
+            check(result.deps[0].is_path, "root path override: cppx selected from path");
+            check(result.deps[1].name == "ui", "root path override: ui second");
+            check(result.deps[1].dependency_names.size() == 1,
+                  "root path override: ui has one child");
+            check(result.deps[1].dependency_names[0] == "cppx",
+                  "root path override: ui links selected cppx");
+        }
+
+        check(result.lock_file.packages.empty(),
+              "root path override: unselected git candidate omitted from lock");
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "  exception: {}", e.what());
+        ++failures;
+    }
+    unsetenv("EXON_CACHE_DIR");
+}
+
+void test_fetch_conflicting_transitive_versions_fail() {
+    TmpWorkspace ws{"exon_test_fetch_transitive_conflict"};
+    auto cache = ws.root / "cache";
+    setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
+
+    auto repos = ws.root / "repos";
+    fs::create_directories(repos);
+
+    TmpGitRepo cppx_repo{repos, "cppx"};
+    cppx_repo.write("exon.toml", R"([package]
+name = "cppx"
+version = "1.0.3"
+type = "lib"
+standard = 23
+)");
+    cppx_repo.write("src/cppx.cppm", "export module cppx;");
+    cppx_repo.init_and_tag("v1.0.3");
+    cppx_repo.write("exon.toml", R"([package]
+name = "cppx"
+version = "1.2.0"
+type = "lib"
+standard = 23
+)");
+    cppx_repo.commit_and_tag("v1.2.0");
+
+    ws.write("left/exon.toml", std::format(R"([package]
+name = "left"
+version = "0.1.0"
+type = "lib"
+standard = 23
+
+[dependencies]
+"{}" = "1.0.3"
+)", cppx_repo.key()));
+    ws.write("left/src/left.cppm", "export module left;");
+
+    ws.write("right/exon.toml", std::format(R"([package]
+name = "right"
+version = "0.1.0"
+type = "lib"
+standard = 23
+
+[dependencies]
+"{}" = "1.2.0"
+)", cppx_repo.key()));
+    ws.write("right/src/right.cppm", "export module right;");
+
+    ws.write("app/exon.toml", R"([package]
+name = "app"
+version = "0.1.0"
+
+[dependencies.path]
+left = "../left"
+right = "../right"
+)");
+    ws.write("app/src/main.cpp", "int main() { return 0; }\n");
+
+    bool threw = false;
+    try {
+        (void)fetch_project(ws.root / "app");
+    } catch (...) {
+        threw = true;
+    }
+    check(threw, "transitive conflict: conflicting versions fail");
+    unsetenv("EXON_CACHE_DIR");
+}
+
 int main() {
-    test_fetch_path_dep();
-    test_fetch_workspace_dep();
-    test_fetch_transitive_path();
-    test_fetch_dev_path_dep();
-    test_fetch_missing_workspace_member();
-    test_fetch_subdir_dep();
-    test_fetch_subdir_dedup_clone();
-    test_fetch_subdir_missing();
-    test_fetch_path_with_git_dep();
-    test_fetch_git_transitive();
-    test_fetch_path_with_subdir_dep();
-    test_fetch_path_with_featured_dep();
+    auto run = [](std::string_view name, auto&& fn) {
+        try {
+            fn();
+        } catch (std::exception const& e) {
+            std::println(std::cerr, "  exception in {}: {}", name, e.what());
+            ++failures;
+        } catch (...) {
+            std::println(std::cerr, "  unknown exception in {}", name);
+            ++failures;
+        }
+    };
+
+    run("test_fetch_path_dep", test_fetch_path_dep);
+    run("test_fetch_workspace_dep", test_fetch_workspace_dep);
+    run("test_fetch_transitive_path", test_fetch_transitive_path);
+    run("test_fetch_dev_path_dep", test_fetch_dev_path_dep);
+    run("test_fetch_missing_workspace_member", test_fetch_missing_workspace_member);
+    run("test_fetch_subdir_dep", test_fetch_subdir_dep);
+    run("test_fetch_subdir_dedup_clone", test_fetch_subdir_dedup_clone);
+    run("test_fetch_subdir_missing", test_fetch_subdir_missing);
+    run("test_fetch_path_with_git_dep", test_fetch_path_with_git_dep);
+    run("test_fetch_git_transitive", test_fetch_git_transitive);
+    run("test_fetch_path_with_subdir_dep", test_fetch_path_with_subdir_dep);
+    run("test_fetch_path_with_featured_dep", test_fetch_path_with_featured_dep);
+    run("test_fetch_root_direct_git_overrides_transitive_version",
+        test_fetch_root_direct_git_overrides_transitive_version);
+    run("test_fetch_root_path_overrides_transitive_git",
+        test_fetch_root_path_overrides_transitive_git);
+    run("test_fetch_conflicting_transitive_versions_fail",
+        test_fetch_conflicting_transitive_versions_fail);
 
     if (failures > 0) {
         std::println("{} test(s) failed", failures);

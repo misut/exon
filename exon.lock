@@ -2,11 +2,13 @@
 
 [[package]]
 name = "github.com/misut/cppx"
+package = "cppx"
 version = "1.0.3"
 commit = "fd77003cb6fb4cabf8b8ccb247fb4f2b8aa256cc"
 
 [[package]]
 name = "github.com/misut/tomlcpp"
+package = "tomlcpp"
 version = "0.3.0"
 commit = "53ddc4c4b3213f5aabc0b08829d8666e6aa86fb3"
 

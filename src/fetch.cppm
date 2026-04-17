@@ -8,8 +8,8 @@ export namespace fetch {
 
 struct FetchedDep {
     std::string key;  // dep key (e.g. "github.com/user/repo")
-    std::string name; // consumer-facing link target (repo short name or TOML key)
-    std::string package_name; // actual upstream package/target name from exon.toml
+    std::string name; // canonical package / target name from exon.toml
+    std::string package_name; // preserved canonical package name for compatibility
     std::string version;
     std::string commit;         // exact git commit hash (empty for path deps)
     std::filesystem::path path; // cached source path
@@ -18,6 +18,8 @@ struct FetchedDep {
     bool is_path = false;       // local path / workspace dep (no git, no lock)
     std::vector<std::string> features; // consumer-selected features (empty = all)
     bool default_features = true;
+    std::vector<std::string> aliases; // compatibility aliases requested by manifests
+    std::vector<std::string> dependency_names; // canonical child package names
 };
 
 struct FetchResult {
