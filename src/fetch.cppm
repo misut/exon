@@ -8,7 +8,8 @@ export namespace fetch {
 
 struct FetchedDep {
     std::string key;  // dep key (e.g. "github.com/user/repo")
-    std::string name; // package name (repo name, or TOML key for subdir deps)
+    std::string name; // consumer-facing link target (repo short name or TOML key)
+    std::string package_name; // actual upstream package/target name from exon.toml
     std::string version;
     std::string commit;         // exact git commit hash (empty for path deps)
     std::filesystem::path path; // cached source path

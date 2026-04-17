@@ -759,6 +759,84 @@ void test_generate_portable_cmake_bin_modules_build_flags_apply_to_exec() {
     std::filesystem::remove_all(temp);
 }
 
+void test_generate_cmake_subdir_dep_aliases_upstream_target() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() { return 0; }\n");
+
+    auto dep_path = std::filesystem::temp_directory_path() / "exon_test_subdir_alias";
+    std::filesystem::remove_all(dep_path);
+    std::filesystem::create_directories(dep_path);
+    {
+        auto f = std::ofstream{dep_path / "CMakeLists.txt"};
+        f << "add_library(member INTERFACE)\n";
+    }
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "0.1.0";
+    m.standard = 23;
+    m.type = "bin";
+
+    std::vector<fetch::FetchedDep> deps = {{
+        .key = "github.com/user/repo",
+        .name = "gitmember",
+        .package_name = "member",
+        .version = "0.1.0",
+        .commit = "abc123",
+        .path = dep_path,
+        .subdir = "member",
+    }};
+
+    auto cmake = build::generate_cmake(m, proj.root, deps, make_tc());
+
+    check(cmake.contains("add_subdirectory("), "subdir alias: add_subdirectory emitted");
+    check(cmake.contains("add_library(gitmember INTERFACE)"),
+          "subdir alias: wrapper target emitted");
+    check(cmake.contains("target_link_libraries(gitmember INTERFACE member)"),
+          "subdir alias: wrapper links upstream target");
+
+    std::filesystem::remove_all(dep_path);
+}
+
+void test_generate_portable_cmake_subdir_dep_aliases_upstream_target() {
+    auto temp = std::filesystem::temp_directory_path() / "exon_test_portable_subdir_alias";
+    std::filesystem::remove_all(temp);
+    std::filesystem::create_directories(temp / "src");
+    {
+        auto f = std::ofstream{temp / "src" / "main.cpp"};
+        f << "int main() { return 0; }\n";
+    }
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "0.1.0";
+    m.standard = 23;
+    m.type = "bin";
+
+    std::vector<fetch::FetchedDep> deps = {{
+        .key = "github.com/user/repo",
+        .name = "gitmember",
+        .package_name = "member",
+        .version = "0.1.0",
+        .commit = "abc123",
+        .path = temp / "_unused",
+        .subdir = "member",
+    }};
+
+    auto cmake = build::generate_portable_cmake(m, temp, deps);
+
+    check(cmake.contains("FetchContent_Declare(gitmember"),
+          "portable subdir alias: FetchContent emitted");
+    check(cmake.contains("SOURCE_SUBDIR member"),
+          "portable subdir alias: SOURCE_SUBDIR emitted");
+    check(cmake.contains("add_library(gitmember INTERFACE)"),
+          "portable subdir alias: wrapper target emitted");
+    check(cmake.contains("target_link_libraries(gitmember INTERFACE member)"),
+          "portable subdir alias: wrapper links upstream target");
+
+    std::filesystem::remove_all(temp);
+}
+
 void test_generate_cmake_target_section_build() {
     // Per-target build flags should appear inside an if(<cmake-cond>)
     // block emitted from the existing target_sections loop.
@@ -1205,6 +1283,8 @@ int main() {
     test_generate_cmake_base_build_flags();
     test_generate_cmake_bin_modules_build_flags_apply_to_exec();
     test_generate_portable_cmake_bin_modules_build_flags_apply_to_exec();
+    test_generate_cmake_subdir_dep_aliases_upstream_target();
+    test_generate_portable_cmake_subdir_dep_aliases_upstream_target();
     test_generate_cmake_target_section_build();
     test_generate_cmake_windows_asan_runtime_copy_for_exec_and_tests();
     test_generate_cmake_target_section_build_profiles();

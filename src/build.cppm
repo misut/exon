@@ -139,6 +139,22 @@ std::string display_path(std::filesystem::path const& path,
     return path.generic_string();
 }
 
+std::string upstream_target_name(fetch::FetchedDep const& dep) {
+    if (!dep.package_name.empty())
+        return dep.package_name;
+    return dep.name;
+}
+
+void emit_target_alias(std::ostringstream& out, fetch::FetchedDep const& dep) {
+    auto actual = upstream_target_name(dep);
+    if (actual.empty() || actual == dep.name)
+        return;
+    out << std::format("if(TARGET {} AND NOT TARGET {})\n", actual, dep.name);
+    out << std::format("    add_library({} INTERFACE)\n", dep.name);
+    out << std::format("    target_link_libraries({} INTERFACE {})\n", dep.name, actual);
+    out << "endif()\n";
+}
+
 bool build_has_asan_flag(manifest::Build const& b) {
     auto has_asan = [](std::vector<std::string> const& flags) {
         return std::ranges::any_of(flags, [](std::string const& flag) {
@@ -847,8 +863,10 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
                 throw std::runtime_error(std::format(
                     "git dep '{}': {}/CMakeLists.txt not found (run `exon sync` in the upstream "
                     "repo, or add a CMakeLists.txt to the subdir)", dep.name, dep.subdir));
-            out << std::format("add_subdirectory({} {})\n\n",
+            out << std::format("add_subdirectory({} {})\n",
                                std::filesystem::canonical(dep.path).generic_string(), dep.name);
+            detail::emit_target_alias(out, dep);
+            out << "\n";
             return;
         }
 
@@ -862,8 +880,10 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
                     throw std::runtime_error(std::format(
                         "dependency '{}': build-system = \"cmake\" but no CMakeLists.txt found",
                         dep.name));
-                out << std::format("add_subdirectory({} {})\n\n",
+                out << std::format("add_subdirectory({} {})\n",
                     std::filesystem::canonical(dep.path).generic_string(), dep.name);
+                detail::emit_target_alias(out, dep);
+                out << "\n";
                 return;
             }
         }
@@ -890,8 +910,10 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         if (dep_sf.cpp.empty() && dep_sf.cppm.empty()) {
             auto dep_cmake = dep.path / "CMakeLists.txt";
             if (std::filesystem::exists(dep_cmake)) {
-                out << std::format("add_subdirectory({} {})\n\n",
+                out << std::format("add_subdirectory({} {})\n",
                                    std::filesystem::canonical(dep.path).generic_string(), dep.name);
+                detail::emit_target_alias(out, dep);
+                out << "\n";
                 return;
             }
             throw std::runtime_error(std::format(
@@ -1201,8 +1223,10 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
                 out << std::format("    SOURCE_SUBDIR {}\n", dep->subdir);
             out << ")\n";
         }
-        for (auto const* dep : dep_list)
+        for (auto const* dep : dep_list) {
             out << std::format("FetchContent_MakeAvailable({})\n", dep->name);
+            detail::emit_target_alias(out, *dep);
+        }
     };
 
     if (!p_git_regular.empty() || !p_git_dev.empty()) {
@@ -1222,6 +1246,7 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             out << std::format("add_subdirectory(${{CMAKE_CURRENT_SOURCE_DIR}}/{} "
                                "${{CMAKE_BINARY_DIR}}/_deps/{}-build)\n",
                                rel, dep->name);
+            detail::emit_target_alias(out, *dep);
         }
     };
 

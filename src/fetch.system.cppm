@@ -169,7 +169,8 @@ void fetch_path_recursive(std::filesystem::path const& abs_dir, std::string name
     std::println("  path: {} -> {}", name, canon.string());
     fetch::FetchedDep d;
     d.key = name;
-    d.name = dep_m.name.empty() ? name : dep_m.name;
+    d.name = name;
+    d.package_name = dep_m.name.empty() ? name : dep_m.name;
     d.path = canon;
     d.is_path = true;
     ctx.result.push_back(std::move(d));
@@ -231,6 +232,7 @@ void fetch_subdir_recursive(std::string const& name, manifest::GitSubdirDep cons
     fetch::FetchedDep d;
     d.key = sdep.repo;
     d.name = name;
+    d.package_name = dep_m.name.empty() ? name : dep_m.name;
     d.version = sdep.version;
     d.commit = clone.commit;
     d.path = subdir_path;
@@ -256,6 +258,7 @@ void fetch_recursive(std::string const& dep_key, std::string const& version, loc
     fetch::FetchedDep dep;
     dep.key = dep_key;
     dep.name = extract_repo_name(dep_key);
+    dep.package_name = dep.name;
     dep.version = version;
 
     // use cache if it exists and matches the lock file commit
@@ -305,6 +308,8 @@ void fetch_recursive(std::string const& dep_key, std::string const& version, loc
     auto dep_manifest_path = dep.path / "exon.toml";
     if (std::filesystem::exists(dep_manifest_path)) {
         auto dep_manifest = manifest::system::load(dep_manifest_path.string());
+        if (!dep_manifest.name.empty())
+            dep.package_name = dep_manifest.name;
         for (auto const& [sub_key, sub_version] : dep_manifest.dependencies) {
             fetch_recursive(sub_key, sub_version, lf, result, visited);
         }
