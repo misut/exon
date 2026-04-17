@@ -779,12 +779,13 @@ void test_generate_cmake_subdir_dep_aliases_upstream_target() {
 
     std::vector<fetch::FetchedDep> deps = {{
         .key = "github.com/user/repo",
-        .name = "gitmember",
+        .name = "member",
         .package_name = "member",
         .version = "0.1.0",
         .commit = "abc123",
         .path = dep_path,
         .subdir = "member",
+        .aliases = {"gitmember"},
     }};
 
     auto cmake = build::generate_cmake(m, proj.root, deps, make_tc());
@@ -815,18 +816,19 @@ void test_generate_portable_cmake_subdir_dep_aliases_upstream_target() {
 
     std::vector<fetch::FetchedDep> deps = {{
         .key = "github.com/user/repo",
-        .name = "gitmember",
+        .name = "member",
         .package_name = "member",
         .version = "0.1.0",
         .commit = "abc123",
         .path = temp / "_unused",
         .subdir = "member",
+        .aliases = {"gitmember"},
     }};
 
     auto cmake = build::generate_portable_cmake(m, temp, deps);
 
-    check(cmake.contains("FetchContent_Declare(gitmember"),
-          "portable subdir alias: FetchContent emitted");
+    check(cmake.contains("FetchContent_Declare(member"),
+          "portable subdir alias: FetchContent emitted for canonical target");
     check(cmake.contains("SOURCE_SUBDIR member"),
           "portable subdir alias: SOURCE_SUBDIR emitted");
     check(cmake.contains("add_library(gitmember INTERFACE)"),
@@ -1145,7 +1147,7 @@ standard = 23
         {.key = "github.com/user/B", .name = "B", .version = "0.1.0",
          .commit = "bbb", .path = dep_b_path},
         {.key = "github.com/user/A", .name = "A", .version = "0.1.0",
-         .commit = "aaa", .path = dep_a_path},
+         .commit = "aaa", .path = dep_a_path, .dependency_names = {"B"}},
     };
 
     auto cmake = build::generate_cmake(m, proj.root, deps, make_tc());
@@ -1154,6 +1156,132 @@ standard = 23
     check(cmake.contains("add_library(A)"), "trans git link: A built");
     check(cmake.contains("target_link_libraries(A PUBLIC\n    B\n)"),
           "trans git link: A links B");
+
+    std::filesystem::remove_all(dep_a_path);
+    std::filesystem::remove_all(dep_b_path);
+}
+
+void test_generate_cmake_uses_canonical_dependency_graph() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() { return 0; }\n");
+
+    auto txn_path = std::filesystem::temp_directory_path() / "exon_test_canonical_txn";
+    auto cppx_path = std::filesystem::temp_directory_path() / "exon_test_canonical_cppx";
+    std::filesystem::remove_all(txn_path);
+    std::filesystem::remove_all(cppx_path);
+    std::filesystem::create_directories(txn_path / "src");
+    std::filesystem::create_directories(cppx_path / "src");
+    {
+        auto f = std::ofstream{txn_path / "src" / "txn.cppm"};
+        f << "export module txn;";
+    }
+    {
+        auto f = std::ofstream{txn_path / "exon.toml"};
+        f << R"([package]
+name = "txn"
+version = "0.6.1"
+type = "lib"
+standard = 23
+)";
+    }
+    {
+        auto f = std::ofstream{cppx_path / "src" / "cppx.cppm"};
+        f << "export module cppx;";
+    }
+    {
+        auto f = std::ofstream{cppx_path / "exon.toml"};
+        f << R"([package]
+name = "cppx"
+version = "1.2.0"
+type = "lib"
+standard = 23
+)";
+    }
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    std::vector<fetch::FetchedDep> deps = {
+        {.key = "github.com/misut/cppx", .name = "cppx", .package_name = "cppx",
+         .version = "1.2.0", .commit = "cppx120", .path = cppx_path},
+        {.key = "github.com/misut/txn", .name = "txn", .package_name = "txn",
+         .version = "0.6.1", .commit = "txn061", .path = txn_path,
+         .dependency_names = {"cppx"}},
+    };
+
+    auto cmake = build::generate_cmake(m, proj.root, deps, make_tc());
+
+    auto first = cmake.find("add_library(cppx)");
+    check(first != std::string::npos, "canonical graph: cppx target emitted");
+    check(cmake.find("add_library(cppx)", first + 1) == std::string::npos,
+          "canonical graph: cppx target emitted once");
+    check(cmake.contains("target_link_libraries(txn PUBLIC\n    cppx\n)"),
+          "canonical graph: txn links canonical cppx target");
+
+    std::filesystem::remove_all(txn_path);
+    std::filesystem::remove_all(cppx_path);
+}
+
+void test_generate_cmake_duplicate_canonical_targets_fail_fast() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() { return 0; }\n");
+
+    auto dep_a_path = std::filesystem::temp_directory_path() / "exon_test_dup_cppx_a";
+    auto dep_b_path = std::filesystem::temp_directory_path() / "exon_test_dup_cppx_b";
+    std::filesystem::remove_all(dep_a_path);
+    std::filesystem::remove_all(dep_b_path);
+    std::filesystem::create_directories(dep_a_path / "src");
+    std::filesystem::create_directories(dep_b_path / "src");
+    {
+        auto f = std::ofstream{dep_a_path / "src" / "cppx.cppm"};
+        f << "export module cppx;";
+    }
+    {
+        auto f = std::ofstream{dep_b_path / "src" / "cppx.cppm"};
+        f << "export module cppx;";
+    }
+    {
+        auto f = std::ofstream{dep_a_path / "exon.toml"};
+        f << R"([package]
+name = "cppx"
+version = "1.0.3"
+type = "lib"
+standard = 23
+)";
+    }
+    {
+        auto f = std::ofstream{dep_b_path / "exon.toml"};
+        f << R"([package]
+name = "cppx"
+version = "1.2.0"
+type = "lib"
+standard = 23
+)";
+    }
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    std::vector<fetch::FetchedDep> deps = {
+        {.key = "github.com/misut/cppx", .name = "cppx", .package_name = "cppx",
+         .version = "1.0.3", .commit = "cppx103", .path = dep_a_path},
+        {.key = "github.com/misut/cppx", .name = "cppx", .package_name = "cppx",
+         .version = "1.2.0", .commit = "cppx120", .path = dep_b_path},
+    };
+
+    bool threw = false;
+    try {
+        (void)build::generate_cmake(m, proj.root, deps, make_tc());
+    } catch (...) {
+        threw = true;
+    }
+    check(threw, "canonical graph: duplicate canonical deps fail fast");
 
     std::filesystem::remove_all(dep_a_path);
     std::filesystem::remove_all(dep_b_path);
@@ -1258,42 +1386,76 @@ Threads = "Threads::Threads"
 }
 
 int main() {
-    test_basic_bin();
-    test_lib_with_modules();
-    test_with_dependencies();
-    test_dev_deps_excluded_from_main();
-    test_with_tests();
-    test_defines();
-    test_find_deps_bin();
-    test_find_deps_with_modules();
-    test_find_deps_multi_targets();
-    test_dev_find_deps();
-    test_path_dep_in_generate_cmake();
-    test_no_import_std_below_23();
-    test_configure_command_macos_uses_system_runtime();
-    test_configure_command_linux_cmake_deps_keep_toolchain_runtime();
-    test_build_command_macos_import_std_serialized();
-    test_build_command_macos_no_std_modules_keeps_default_parallelism();
-    test_build_command_wasm_keeps_default_parallelism();
-    test_plan_build_emits_write_and_steps();
-    test_plan_test_emits_filtered_targets_and_run_steps();
-    test_stale_self_host_bootstrap_message_for_macos_exon_repo();
-    test_stale_self_host_bootstrap_message_skips_fresh_or_non_macos_cases();
-    test_user_cxxflags_env_only();
-    test_generate_cmake_base_build_flags();
-    test_generate_cmake_bin_modules_build_flags_apply_to_exec();
-    test_generate_portable_cmake_bin_modules_build_flags_apply_to_exec();
-    test_generate_cmake_subdir_dep_aliases_upstream_target();
-    test_generate_portable_cmake_subdir_dep_aliases_upstream_target();
-    test_generate_cmake_target_section_build();
-    test_generate_cmake_windows_asan_runtime_copy_for_exec_and_tests();
-    test_generate_cmake_target_section_build_profiles();
-    test_generate_cmake_no_build_flags_skipped();
-    test_transitive_cmake_deps_from_git();
-    test_transitive_cmake_deps_from_path();
-    test_transitive_git_deps_linked();
-    test_transitive_vcpkg_deps_not_propagated();
-    test_transitive_find_deps_not_propagated();
+    auto run = [](std::string_view name, auto&& fn) {
+        try {
+            fn();
+        } catch (std::exception const& e) {
+            std::println(std::cerr, "  exception in {}: {}", name, e.what());
+            ++failures;
+        } catch (...) {
+            std::println(std::cerr, "  unknown exception in {}", name);
+            ++failures;
+        }
+    };
+
+    run("test_basic_bin", test_basic_bin);
+    run("test_lib_with_modules", test_lib_with_modules);
+    run("test_with_dependencies", test_with_dependencies);
+    run("test_dev_deps_excluded_from_main", test_dev_deps_excluded_from_main);
+    run("test_with_tests", test_with_tests);
+    run("test_defines", test_defines);
+    run("test_find_deps_bin", test_find_deps_bin);
+    run("test_find_deps_with_modules", test_find_deps_with_modules);
+    run("test_find_deps_multi_targets", test_find_deps_multi_targets);
+    run("test_dev_find_deps", test_dev_find_deps);
+    run("test_path_dep_in_generate_cmake", test_path_dep_in_generate_cmake);
+    run("test_no_import_std_below_23", test_no_import_std_below_23);
+    run("test_configure_command_macos_uses_system_runtime",
+        test_configure_command_macos_uses_system_runtime);
+    run("test_configure_command_linux_cmake_deps_keep_toolchain_runtime",
+        test_configure_command_linux_cmake_deps_keep_toolchain_runtime);
+    run("test_build_command_macos_import_std_serialized",
+        test_build_command_macos_import_std_serialized);
+    run("test_build_command_macos_no_std_modules_keeps_default_parallelism",
+        test_build_command_macos_no_std_modules_keeps_default_parallelism);
+    run("test_build_command_wasm_keeps_default_parallelism",
+        test_build_command_wasm_keeps_default_parallelism);
+    run("test_plan_build_emits_write_and_steps", test_plan_build_emits_write_and_steps);
+    run("test_plan_test_emits_filtered_targets_and_run_steps",
+        test_plan_test_emits_filtered_targets_and_run_steps);
+    run("test_stale_self_host_bootstrap_message_for_macos_exon_repo",
+        test_stale_self_host_bootstrap_message_for_macos_exon_repo);
+    run("test_stale_self_host_bootstrap_message_skips_fresh_or_non_macos_cases",
+        test_stale_self_host_bootstrap_message_skips_fresh_or_non_macos_cases);
+    run("test_user_cxxflags_env_only", test_user_cxxflags_env_only);
+    run("test_generate_cmake_base_build_flags", test_generate_cmake_base_build_flags);
+    run("test_generate_cmake_bin_modules_build_flags_apply_to_exec",
+        test_generate_cmake_bin_modules_build_flags_apply_to_exec);
+    run("test_generate_portable_cmake_bin_modules_build_flags_apply_to_exec",
+        test_generate_portable_cmake_bin_modules_build_flags_apply_to_exec);
+    run("test_generate_cmake_subdir_dep_aliases_upstream_target",
+        test_generate_cmake_subdir_dep_aliases_upstream_target);
+    run("test_generate_portable_cmake_subdir_dep_aliases_upstream_target",
+        test_generate_portable_cmake_subdir_dep_aliases_upstream_target);
+    run("test_generate_cmake_target_section_build",
+        test_generate_cmake_target_section_build);
+    run("test_generate_cmake_windows_asan_runtime_copy_for_exec_and_tests",
+        test_generate_cmake_windows_asan_runtime_copy_for_exec_and_tests);
+    run("test_generate_cmake_target_section_build_profiles",
+        test_generate_cmake_target_section_build_profiles);
+    run("test_generate_cmake_no_build_flags_skipped",
+        test_generate_cmake_no_build_flags_skipped);
+    run("test_transitive_cmake_deps_from_git", test_transitive_cmake_deps_from_git);
+    run("test_transitive_cmake_deps_from_path", test_transitive_cmake_deps_from_path);
+    run("test_transitive_git_deps_linked", test_transitive_git_deps_linked);
+    run("test_generate_cmake_uses_canonical_dependency_graph",
+        test_generate_cmake_uses_canonical_dependency_graph);
+    run("test_generate_cmake_duplicate_canonical_targets_fail_fast",
+        test_generate_cmake_duplicate_canonical_targets_fail_fast);
+    run("test_transitive_vcpkg_deps_not_propagated",
+        test_transitive_vcpkg_deps_not_propagated);
+    run("test_transitive_find_deps_not_propagated",
+        test_transitive_find_deps_not_propagated);
 
     if (failures > 0) {
         std::println("{} test(s) failed", failures);

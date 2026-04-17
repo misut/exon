@@ -32,15 +32,17 @@ void test_empty_lockfile() {
 void test_add_or_update() {
     lock::LockFile lf;
 
-    lf.add_or_update({.name = "pkg-a", .version = "1.0.0", .commit = "aaa"});
+    lf.add_or_update({.name = "pkg-a", .package = "alpha", .version = "1.0.0", .commit = "aaa"});
     check(lf.packages.size() == 1, "one package after add");
     check(lf.contains("pkg-a", "1.0.0"), "contains pkg-a");
     check(lf.find("pkg-a", "1.0.0")->commit == "aaa", "commit is aaa");
+    check(lf.find("pkg-a", "1.0.0")->package == "alpha", "package is alpha");
 
     // update existing
-    lf.add_or_update({.name = "pkg-a", .version = "1.0.0", .commit = "bbb"});
+    lf.add_or_update({.name = "pkg-a", .package = "alpha2", .version = "1.0.0", .commit = "bbb"});
     check(lf.packages.size() == 1, "still one package after update");
     check(lf.find("pkg-a", "1.0.0")->commit == "bbb", "commit updated to bbb");
+    check(lf.find("pkg-a", "1.0.0")->package == "alpha2", "package updated to alpha2");
 
     // add different version
     lf.add_or_update({.name = "pkg-a", .version = "2.0.0", .commit = "ccc"});
@@ -57,8 +59,18 @@ void test_save_and_load() {
 
     // save
     lock::LockFile lf;
-    lf.add_or_update({.name = "github.com/user/repo", .version = "1.0.0", .commit = "abc123"});
-    lf.add_or_update({.name = "github.com/other/lib", .version = "0.2.0", .commit = "def456"});
+    lf.add_or_update({
+        .name = "github.com/user/repo",
+        .package = "repo",
+        .version = "1.0.0",
+        .commit = "abc123",
+    });
+    lf.add_or_update({
+        .name = "github.com/other/lib",
+        .package = "lib",
+        .version = "0.2.0",
+        .commit = "def456",
+    });
     lock::system::save(lf, tmp.string());
 
     // load back
@@ -66,6 +78,7 @@ void test_save_and_load() {
     check(loaded.packages.size() == 2, "loaded 2 packages");
     check(loaded.contains("github.com/user/repo", "1.0.0"), "loaded contains repo");
     check(loaded.find("github.com/user/repo", "1.0.0")->commit == "abc123", "loaded commit");
+    check(loaded.find("github.com/user/repo", "1.0.0")->package == "repo", "loaded package");
     check(loaded.contains("github.com/other/lib", "0.2.0"), "loaded contains lib");
     check(loaded.find("github.com/other/lib", "0.2.0")->commit == "def456", "loaded lib commit");
 
@@ -74,9 +87,15 @@ void test_save_and_load() {
 
 void test_render_and_parse_roundtrip() {
     lock::LockFile lf;
-    lf.add_or_update({.name = "github.com/user/repo", .version = "1.0.0", .commit = "abc123"});
+    lf.add_or_update({
+        .name = "github.com/user/repo",
+        .package = "repo",
+        .version = "1.0.0",
+        .commit = "abc123",
+    });
     lf.add_or_update({
         .name = "github.com/misut/txn#refl",
+        .package = "refl",
         .version = "0.1.0",
         .commit = "deadbeef",
         .subdir = "refl",
@@ -91,6 +110,7 @@ void test_render_and_parse_roundtrip() {
           "render/parse roundtrip keeps git package");
     auto const* refl = parsed.find("github.com/misut/txn#refl", "0.1.0");
     check(refl != nullptr, "render/parse roundtrip keeps subdir package");
+    check(refl && refl->package == "refl", "render/parse roundtrip keeps canonical package");
     check(refl && refl->subdir == "refl", "render/parse roundtrip keeps subdir");
     check(refl && refl->features.size() == 2, "render/parse roundtrip keeps features");
 }
@@ -101,12 +121,14 @@ void test_subdir_field_roundtrip() {
     lock::LockFile lf;
     lf.add_or_update({
         .name = "github.com/misut/txn#refl",
+        .package = "refl",
         .version = "0.1.0",
         .commit = "abc123",
         .subdir = "refl",
     });
     lf.add_or_update({
         .name = "github.com/user/plain",
+        .package = "plain",
         .version = "2.0.0",
         .commit = "xyz789",
         // no subdir: plain git dep
@@ -117,10 +139,12 @@ void test_subdir_field_roundtrip() {
     check(loaded.packages.size() == 2, "subdir: two entries loaded");
     auto const* refl = loaded.find("github.com/misut/txn#refl", "0.1.0");
     check(refl != nullptr, "subdir: composite-name entry found");
+    check(refl->package == "refl", "subdir: canonical package preserved");
     check(refl->subdir == "refl", "subdir: subdir field preserved");
     check(refl->commit == "abc123", "subdir: commit preserved");
     auto const* plain = loaded.find("github.com/user/plain", "2.0.0");
     check(plain != nullptr, "subdir: plain git entry found");
+    check(plain->package == "plain", "subdir: plain package preserved");
     check(plain->subdir.empty(), "subdir: plain entry subdir empty");
 
     std::filesystem::remove(tmp);
