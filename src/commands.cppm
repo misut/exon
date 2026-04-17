@@ -1,6 +1,9 @@
 export module commands;
 import std;
 import cli;
+import core;
+import cppx.fs;
+import cppx.fs.system;
 import toml;
 import manifest;
 import manifest.system;
@@ -113,12 +116,16 @@ bool check_platform(manifest::Manifest const& m, std::string_view target = {}) {
                      plat.to_string());
         std::println(std::cerr, "  supported platforms:");
         for (auto const& p : m.platforms) {
-            if (!p.os.empty() && !p.arch.empty())
-                std::println(std::cerr, "    {{ os = \"{}\", arch = \"{}\" }}", p.os, p.arch);
-            else if (!p.os.empty())
-                std::println(std::cerr, "    {{ os = \"{}\" }}", p.os);
+            if (toolchain::platform_has_os(p) && toolchain::platform_has_arch(p))
+                std::println(std::cerr, "    {{ os = \"{}\", arch = \"{}\" }}",
+                             toolchain::platform_os_name(p),
+                             toolchain::platform_arch_name(p));
+            else if (toolchain::platform_has_os(p))
+                std::println(std::cerr, "    {{ os = \"{}\" }}",
+                             toolchain::platform_os_name(p));
             else
-                std::println(std::cerr, "    {{ arch = \"{}\" }}", p.arch);
+                std::println(std::cerr, "    {{ arch = \"{}\" }}",
+                             toolchain::platform_arch_name(p));
         }
         return false;
     }
@@ -130,10 +137,24 @@ std::vector<cli::ArgDef> const build_defs = {
     cli::Option{"--target"},
 };
 
-std::string read_file(std::string_view path) {
-    auto file = std::ifstream(std::string{path}, std::ios::binary);
-    if (!file) return {};
-    return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+std::string read_text(std::filesystem::path const& path) {
+    auto text = cppx::fs::system::read_text(path);
+    if (!text)
+        throw std::runtime_error(std::format(
+            "failed to read {} ({})", path.string(), cppx::fs::to_string(text.error())));
+    return *text;
+}
+
+void write_text(std::filesystem::path const& path, std::string const& content) {
+    auto result = cppx::fs::system::write_if_changed({
+        .path = path,
+        .content = content,
+        .skip_if_unchanged = false,
+    });
+    if (!result) {
+        throw std::runtime_error(std::format(
+            "failed to write {} ({})", path.string(), cppx::fs::to_string(result.error())));
+    }
 }
 
 std::optional<std::chrono::milliseconds> parse_timeout(std::string_view value) {
@@ -188,17 +209,17 @@ int cmd_init(int argc, char* argv[]) {
         std::println(std::cerr, "error: {} already exists", manifest_path.string());
         return 1;
     }
-    auto file = std::ofstream(manifest_path);
-    if (!file) {
-        std::println(std::cerr, "error: failed to create {}", manifest_path.string());
-        return 1;
-    }
     auto tmpl = std::string{is_lib ? templates::exon_toml_lib : templates::exon_toml_bin};
     // Fill in the package name (template has `name = ""`).
     auto name_pos = tmpl.find("name = \"\"");
     if (name_pos != std::string::npos)
         tmpl.replace(name_pos, 9, std::format("name = \"{}\"", name));
-    file << tmpl;
+    try {
+        write_text(manifest_path, tmpl);
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
     std::println("created {} ({})", manifest_path.string(), is_lib ? "lib" : "bin");
     return 0;
 }
@@ -228,12 +249,16 @@ int cmd_info() {
         if (!m.platforms.empty()) {
             std::println("platforms:");
             for (auto const& p : m.platforms) {
-                if (!p.os.empty() && !p.arch.empty())
-                    std::println("  {{ os = \"{}\", arch = \"{}\" }}", p.os, p.arch);
-                else if (!p.os.empty())
-                    std::println("  {{ os = \"{}\" }}", p.os);
+                if (toolchain::platform_has_os(p) && toolchain::platform_has_arch(p))
+                    std::println("  {{ os = \"{}\", arch = \"{}\" }}",
+                                 toolchain::platform_os_name(p),
+                                 toolchain::platform_arch_name(p));
+                else if (toolchain::platform_has_os(p))
+                    std::println("  {{ os = \"{}\" }}",
+                                 toolchain::platform_os_name(p));
                 else
-                    std::println("  {{ arch = \"{}\" }}", p.arch);
+                    std::println("  {{ arch = \"{}\" }}",
+                                 toolchain::platform_arch_name(p));
             }
         }
         if (!m.dependencies.empty()) {
@@ -323,24 +348,25 @@ int cmd_run(int argc, char* argv[]) {
             return rc;
 
         auto project = build::project_context(project_root, release, target);
-        std::string run_cmd;
+        core::ProcessSpec spec{
+            .cwd = project_root,
+        };
         if (is_wasm) {
             auto wasm_runtime = toolchain::system::detect_wasm_runtime();
             if (wasm_runtime.empty())
                 throw std::runtime_error(
                     "wasmtime not found on PATH (install: https://wasmtime.dev)");
             auto wasm_file = project.build_dir / m.name;
-            run_cmd = std::format("{} {}", toolchain::shell_quote(wasm_runtime),
-                                  toolchain::shell_quote(wasm_file.string()));
+            spec.program = wasm_runtime;
+            spec.args.push_back(wasm_file.string());
         } else {
             auto exe = project.build_dir / (m.name + std::string{toolchain::exe_suffix});
-            run_cmd = toolchain::shell_quote(exe.string());
+            spec.program = exe.string();
         }
-        for (auto const& a : args.positional()) {
-            run_cmd += std::format(" {}", toolchain::shell_quote(a));
-        }
+        for (auto const& a : args.positional())
+            spec.args.push_back(a);
         std::println("running {}...\n", m.name);
-        return build::system::run_process(run_cmd);
+        return build::system::run_process(spec);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
@@ -413,6 +439,7 @@ int cmd_clean() {
 }
 
 int cmd_add(int argc, char* argv[]) {
+    try {
     auto args = cli::parse(argc, argv, 2, {
         cli::Flag{"--dev"}, cli::Flag{"--path"}, cli::Flag{"--workspace"}, cli::Flag{"--vcpkg"},
         cli::Flag{"--no-default-features"},
@@ -448,7 +475,7 @@ int cmd_add(int argc, char* argv[]) {
 
     auto project_root = std::filesystem::current_path();
     auto manifest_path = project_root / "exon.toml";
-    auto content = read_file(manifest_path.string());
+    auto content = read_text(manifest_path);
     auto m = manifest::system::load(manifest_path.string());
 
     std::string name, value;
@@ -577,13 +604,22 @@ int cmd_add(int argc, char* argv[]) {
 
     manifest::insert_into_section(content, section, dep_line);
 
-    auto file = std::ofstream(manifest_path);
-    file << content;
+    try {
+        write_text(manifest_path, content);
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
     std::println("added {}", display);
     return 0;
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
 }
 
 int cmd_remove(int argc, char* argv[]) {
+    try {
     if (argc < 3) {
         std::println(std::cerr, "usage: exon remove <package>");
         return 1;
@@ -615,12 +651,16 @@ int cmd_remove(int argc, char* argv[]) {
     if (auto const* sdep = find_subdir())
         lock_name_to_erase = std::format("{}#{}", sdep->repo, sdep->subdir);
 
-    auto content = read_file(manifest_path.string());
+    auto content = read_text(manifest_path);
     manifest::remove_dependency_entry(content, pkg);
     manifest::cleanup_empty_subsections(content);
 
-    auto file = std::ofstream(manifest_path);
-    file << content;
+    try {
+        write_text(manifest_path, content);
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
     std::println("removed {}", pkg);
 
     auto lock_path = project_root / "exon.lock";
@@ -631,6 +671,10 @@ int cmd_remove(int argc, char* argv[]) {
         lock::system::save(lf, lock_path.string());
     }
     return 0;
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
 }
 
 int cmd_update() {
@@ -718,12 +762,14 @@ int cmd_fmt() {
     }
 
     std::ranges::sort(files);
-    auto cmd = std::string{"clang-format -i"};
-    for (auto const& f : files) {
-        cmd += std::format(" {}", toolchain::shell_quote(f));
-    }
+    core::ProcessSpec spec{
+        .program = "clang-format",
+        .args = {"-i"},
+        .cwd = project_root,
+    };
+    spec.args.insert(spec.args.end(), files.begin(), files.end());
 
-    int rc = std::system(cmd.c_str());
+    int rc = build::system::run_process(spec);
     if (rc != 0) {
         std::println(std::cerr, "error: clang-format failed (is it installed?)");
         return 1;

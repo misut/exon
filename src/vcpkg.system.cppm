@@ -1,5 +1,7 @@
 export module vcpkg.system;
 import std;
+import cppx.fs;
+import cppx.fs.system;
 import manifest;
 import toolchain.system;
 import vcpkg;
@@ -8,12 +10,14 @@ export namespace vcpkg::system {
 
 // write vcpkg.json to disk (creates parent dir if needed)
 void write_manifest(manifest::Manifest const& m, std::filesystem::path const& out_path) {
-    std::filesystem::create_directories(out_path.parent_path());
-    auto content = vcpkg::render_manifest(m);
-    auto file = std::ofstream(out_path);
-    if (!file)
-        throw std::runtime_error(std::format("failed to write {}", out_path.string()));
-    file << content;
+    auto result = cppx::fs::system::write_if_changed({
+        .path = out_path,
+        .content = vcpkg::render_manifest(m),
+    });
+    if (!result) {
+        throw std::runtime_error(std::format(
+            "failed to write {} ({})", out_path.string(), cppx::fs::to_string(result.error())));
+    }
 }
 
 namespace detail {

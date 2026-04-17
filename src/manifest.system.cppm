@@ -1,5 +1,7 @@
 export module manifest.system;
 import std;
+import cppx.fs;
+import cppx.fs.system;
 import manifest;
 import toolchain.system;
 
@@ -8,10 +10,11 @@ export namespace manifest::system {
 namespace detail {
 
 std::string read_file(std::filesystem::path const& path) {
-    auto file = std::ifstream(path, std::ios::binary);
-    if (!file)
-        throw std::runtime_error(std::format("failed to read {}", path.string()));
-    return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+    auto text = cppx::fs::system::read_text(path);
+    if (!text)
+        throw std::runtime_error(std::format(
+            "failed to read {} ({})", path.string(), cppx::fs::to_string(text.error())));
+    return *text;
 }
 
 } // namespace detail

@@ -91,8 +91,14 @@ bool eval_predicate(std::string_view pred, toolchain::Platform const& target) {
 
     bool match = true;
     for (auto const& f : parsed.fields) {
-        if (f.key == "os" && target.os != f.value) { match = false; break; }
-        if (f.key == "arch" && target.arch != f.value) { match = false; break; }
+        if (f.key == "os" && toolchain::platform_os_name(target) != f.value) {
+            match = false;
+            break;
+        }
+        if (f.key == "arch" && toolchain::platform_arch_name(target) != f.value) {
+            match = false;
+            break;
+        }
     }
     return parsed.negated ? !match : match;
 }
@@ -218,27 +224,25 @@ Manifest from_toml(toml::Table const& table) {
                 if (!entry.is_table())
                     throw std::runtime_error(
                         "[package].platforms entries must be inline tables like { os = \"linux\" }");
-                toolchain::Platform p;
+                toolchain::Platform p{};
                 auto const& t = entry.as_table();
                 if (t.contains("os")) {
-                    p.os = t.at("os").as_string();
-                    static constexpr auto known_os =
-                        std::array{"linux", "macos", "windows", "wasi"};
-                    if (std::ranges::find(known_os, p.os) == known_os.end())
+                    auto const os = toolchain::parse_os(t.at("os").as_string());
+                    if (os == toolchain::OS::Unknown)
                         throw std::runtime_error(std::format(
                             "unknown os '{}' in [package].platforms; known: linux, macos, windows, wasi",
-                            p.os));
+                            t.at("os").as_string()));
+                    p.os = os;
                 }
                 if (t.contains("arch")) {
-                    p.arch = t.at("arch").as_string();
-                    static constexpr auto known_arch =
-                        std::array{"x86_64", "aarch64", "wasm32"};
-                    if (std::ranges::find(known_arch, p.arch) == known_arch.end())
+                    auto const arch = toolchain::parse_arch(t.at("arch").as_string());
+                    if (arch == toolchain::Arch::Unknown)
                         throw std::runtime_error(std::format(
                             "unknown arch '{}' in [package].platforms; known: x86_64, aarch64, wasm32",
-                            p.arch));
+                            t.at("arch").as_string()));
+                    p.arch = arch;
                 }
-                if (p.os.empty() && p.arch.empty())
+                if (!toolchain::platform_has_os(p) && !toolchain::platform_has_arch(p))
                     throw std::runtime_error(
                         "[package].platforms entry must have at least 'os' or 'arch'");
                 m.platforms.push_back(std::move(p));

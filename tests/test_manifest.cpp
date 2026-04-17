@@ -621,12 +621,12 @@ platforms = [
     auto m = manifest::from_toml(table);
 
     check(m.platforms.size() == 3, "platforms: 3 entries");
-    check(m.platforms[0].os == "linux", "platforms[0]: linux");
-    check(m.platforms[0].arch == "x86_64", "platforms[0]: x86_64");
-    check(m.platforms[1].os == "macos", "platforms[1]: macos");
-    check(m.platforms[1].arch == "aarch64", "platforms[1]: aarch64");
-    check(m.platforms[2].os == "windows", "platforms[2]: windows");
-    check(m.platforms[2].arch.empty(), "platforms[2]: arch wildcard");
+    check(toolchain::platform_os_name(m.platforms[0]) == "linux", "platforms[0]: linux");
+    check(toolchain::platform_arch_name(m.platforms[0]) == "x86_64", "platforms[0]: x86_64");
+    check(toolchain::platform_os_name(m.platforms[1]) == "macos", "platforms[1]: macos");
+    check(toolchain::platform_arch_name(m.platforms[1]) == "aarch64", "platforms[1]: aarch64");
+    check(toolchain::platform_os_name(m.platforms[2]) == "windows", "platforms[2]: windows");
+    check(!toolchain::platform_has_arch(m.platforms[2]), "platforms[2]: arch wildcard");
 }
 
 void test_platforms_wildcard_match() {
@@ -643,17 +643,17 @@ platforms = [
     auto m = manifest::from_toml(table);
 
     // { os = "linux" } matches any Linux
-    check(manifest::supports_platform(m, {.os = "linux", .arch = "x86_64"}),
+    check(manifest::supports_platform(m, toolchain::make_platform("linux", "x86_64")),
           "wildcard: linux-x86_64 matches { os = linux }");
-    check(manifest::supports_platform(m, {.os = "linux", .arch = "aarch64"}),
+    check(manifest::supports_platform(m, toolchain::make_platform("linux", "aarch64")),
           "wildcard: linux-aarch64 matches { os = linux }");
     // { arch = "aarch64" } matches any aarch64
-    check(manifest::supports_platform(m, {.os = "macos", .arch = "aarch64"}),
+    check(manifest::supports_platform(m, toolchain::make_platform("macos", "aarch64")),
           "wildcard: macos-aarch64 matches { arch = aarch64 }");
-    check(manifest::supports_platform(m, {.os = "windows", .arch = "aarch64"}),
+    check(manifest::supports_platform(m, toolchain::make_platform("windows", "aarch64")),
           "wildcard: windows-aarch64 matches { arch = aarch64 }");
     // windows-x86_64 doesn't match either entry
-    check(!manifest::supports_platform(m, {.os = "windows", .arch = "x86_64"}),
+    check(!manifest::supports_platform(m, toolchain::make_platform("windows", "x86_64")),
           "wildcard: windows-x86_64 doesn't match");
 }
 
@@ -667,9 +667,9 @@ version = "0.1.0"
     auto m = manifest::from_toml(table);
 
     check(m.platforms.empty(), "omitted: no platforms");
-    check(manifest::supports_platform(m, {.os = "linux", .arch = "x86_64"}),
+    check(manifest::supports_platform(m, toolchain::make_platform("linux", "x86_64")),
           "omitted: supports anything");
-    check(manifest::supports_platform(m, {.os = "windows", .arch = "aarch64"}),
+    check(manifest::supports_platform(m, toolchain::make_platform("windows", "aarch64")),
           "omitted: supports anything 2");
 }
 
@@ -718,9 +718,9 @@ platforms = [{}]
 }
 
 void test_eval_predicate() {
-    toolchain::Platform linux_x64{.os = "linux", .arch = "x86_64"};
-    toolchain::Platform macos_arm{.os = "macos", .arch = "aarch64"};
-    toolchain::Platform win_x64{.os = "windows", .arch = "x86_64"};
+    auto linux_x64 = toolchain::make_platform("linux", "x86_64");
+    auto macos_arm = toolchain::make_platform("macos", "aarch64");
+    auto win_x64 = toolchain::make_platform("windows", "x86_64");
 
     // simple os match
     check(manifest::eval_predicate(R"(cfg(os = "linux"))", linux_x64), "pred: linux matches linux");
@@ -777,19 +777,19 @@ IO_BACKEND = "kqueue"
     check(m.target_sections.size() == 3, "target: 3 target sections parsed");
 
     // resolve for Linux
-    auto linux_m = manifest::resolve_for_platform(m, {.os = "linux", .arch = "x86_64"});
+    auto linux_m = manifest::resolve_for_platform(m, toolchain::make_platform("linux", "x86_64"));
     check(linux_m.find_deps.size() == 2, "target: linux gets Threads + LibUring");
     check(linux_m.find_deps.contains("LibUring"), "target: linux has LibUring");
     check(!linux_m.find_deps.contains("Mswsock"), "target: linux no Mswsock");
     check(linux_m.defines.at("IO_BACKEND") == "io_uring", "target: linux define io_uring");
 
     // resolve for macOS
-    auto macos_m = manifest::resolve_for_platform(m, {.os = "macos", .arch = "aarch64"});
+    auto macos_m = manifest::resolve_for_platform(m, toolchain::make_platform("macos", "aarch64"));
     check(macos_m.find_deps.size() == 1, "target: macos only Threads");
     check(macos_m.defines.at("IO_BACKEND") == "kqueue", "target: macos define kqueue");
 
     // resolve for Windows
-    auto win_m = manifest::resolve_for_platform(m, {.os = "windows", .arch = "x86_64"});
+    auto win_m = manifest::resolve_for_platform(m, toolchain::make_platform("windows", "x86_64"));
     check(win_m.find_deps.size() == 2, "target: windows gets Threads + Mswsock");
     check(win_m.find_deps.contains("Mswsock"), "target: windows has Mswsock");
     check(win_m.defines.empty(), "target: windows no platform defines");
@@ -847,7 +847,7 @@ cxxflags = ["/fsanitize=address"]
           "build: windows MSVC cxxflag parsed");
 
     // After resolve_for_platform(linux), m.build should have base + linux merged
-    auto linux_m = manifest::resolve_for_platform(m, {.os = "linux", .arch = "x86_64"});
+    auto linux_m = manifest::resolve_for_platform(m, toolchain::make_platform("linux", "x86_64"));
     check(linux_m.build.cxxflags.size() == 2, "build: linux merged base + linux cxxflags");
     check(linux_m.build.cxxflags[0] == "-Wall", "build: linux base flag first");
     check(linux_m.build.cxxflags[1] == "-fsanitize=address,undefined",
@@ -860,7 +860,7 @@ cxxflags = ["/fsanitize=address"]
           "build: linux build_debug merged");
 
     // Windows resolve gets base + windows
-    auto win_m = manifest::resolve_for_platform(m, {.os = "windows", .arch = "x86_64"});
+    auto win_m = manifest::resolve_for_platform(m, toolchain::make_platform("windows", "x86_64"));
     check(win_m.build.cxxflags.size() == 2, "build: windows merged base + windows");
     check(win_m.build.cxxflags[1] == "/fsanitize=address",
           "build: windows MSVC flag appended");
@@ -886,10 +886,10 @@ libuv = "*"
     auto table = toml::parse(input);
     auto m = manifest::from_toml(table);
 
-    auto linux_m = manifest::resolve_for_platform(m, {.os = "linux", .arch = "x86_64"});
+    auto linux_m = manifest::resolve_for_platform(m, toolchain::make_platform("linux", "x86_64"));
     check(linux_m.vcpkg_deps.size() == 3, "target vcpkg: linux gets fmt + liburing + libuv");
 
-    auto win_m = manifest::resolve_for_platform(m, {.os = "windows", .arch = "x86_64"});
+    auto win_m = manifest::resolve_for_platform(m, toolchain::make_platform("windows", "x86_64"));
     check(win_m.vcpkg_deps.size() == 1, "target vcpkg: windows only fmt");
 }
 
