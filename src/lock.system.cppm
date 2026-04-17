@@ -1,7 +1,5 @@
 export module lock.system;
 import std;
-import cppx.fs;
-import cppx.fs.system;
 import lock;
 
 export namespace lock::system {
@@ -9,11 +7,20 @@ export namespace lock::system {
 namespace detail {
 
 std::string read_file(std::filesystem::path const& path) {
-    auto text = cppx::fs::system::read_text(path);
-    if (!text)
-        throw std::runtime_error(std::format(
-            "failed to read {} ({})", path.string(), cppx::fs::to_string(text.error())));
-    return *text;
+    auto file = std::ifstream(path, std::ios::binary);
+    if (!file)
+        throw std::runtime_error(std::format("failed to read {}", path.string()));
+    return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+}
+
+void write_file(std::filesystem::path const& path, std::string_view content) {
+    auto file = std::ofstream(path, std::ios::binary);
+    if (!file)
+        throw std::runtime_error(std::format("failed to write {}", path.string()));
+
+    file.write(content.data(), static_cast<std::streamsize>(content.size()));
+    if (!file)
+        throw std::runtime_error(std::format("failed to write {}", path.string()));
 }
 
 } // namespace detail
@@ -26,14 +33,8 @@ LockFile load(std::string_view path) {
 }
 
 void save(LockFile const& lf, std::string_view path) {
-    auto result = cppx::fs::system::write_if_changed({
-        .path = std::filesystem::path{path},
-        .content = lock::render(lf),
-    });
-    if (!result) {
-        throw std::runtime_error(std::format(
-            "failed to write {} ({})", path, cppx::fs::to_string(result.error())));
-    }
+    auto rendered = lock::render(lf);
+    detail::write_file(std::filesystem::path{path}, rendered);
 }
 
 } // namespace lock::system

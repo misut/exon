@@ -22,6 +22,22 @@ void check(bool cond, std::string_view msg) {
     }
 }
 
+std::string read_file_bytes(std::filesystem::path const& path) {
+    auto file = std::ifstream(path, std::ios::binary);
+    if (!file)
+        throw std::runtime_error(std::format("failed to read {}", path.string()));
+    return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+}
+
+void write_file_bytes(std::filesystem::path const& path, std::string_view content) {
+    auto file = std::ofstream(path, std::ios::binary);
+    if (!file)
+        throw std::runtime_error(std::format("failed to write {}", path.string()));
+    file.write(content.data(), static_cast<std::streamsize>(content.size()));
+    if (!file)
+        throw std::runtime_error(std::format("failed to write {}", path.string()));
+}
+
 void test_empty_lockfile() {
     lock::LockFile lf;
     check(lf.packages.empty(), "empty lockfile has no packages");
@@ -54,10 +70,9 @@ void test_add_or_update() {
     check(lf.packages.size() == 3, "three packages total");
 }
 
-void test_save_and_load() {
-    auto tmp = std::filesystem::temp_directory_path() / "exon_test_lock.toml";
+void test_save_writes_canonical_lf_bytes() {
+    auto tmp = std::filesystem::temp_directory_path() / "exon_test_lock_lf.toml";
 
-    // save
     lock::LockFile lf;
     lf.add_or_update({
         .name = "github.com/user/repo",
@@ -71,9 +86,37 @@ void test_save_and_load() {
         .version = "0.2.0",
         .commit = "def456",
     });
-    lock::system::save(lf, tmp.string());
 
-    // load back
+    auto rendered = lock::render(lf);
+    lock::system::save(lf, tmp.string());
+    auto saved = read_file_bytes(tmp);
+
+    check(saved == rendered, "save writes canonical lockfile bytes");
+    check(saved.find('\r') == std::string::npos, "save does not write CRLF line endings");
+
+    std::filesystem::remove(tmp);
+}
+
+void test_load_save_load_roundtrip() {
+    auto tmp = std::filesystem::temp_directory_path() / "exon_test_lock_roundtrip.toml";
+
+    lock::LockFile expected;
+    expected.add_or_update({
+        .name = "github.com/user/repo",
+        .package = "repo",
+        .version = "1.0.0",
+        .commit = "abc123",
+    });
+    expected.add_or_update({
+        .name = "github.com/other/lib",
+        .package = "lib",
+        .version = "0.2.0",
+        .commit = "def456",
+    });
+
+    auto rendered = lock::render(expected);
+    write_file_bytes(tmp, rendered);
+
     auto loaded = lock::system::load(tmp.string());
     check(loaded.packages.size() == 2, "loaded 2 packages");
     check(loaded.contains("github.com/user/repo", "1.0.0"), "loaded contains repo");
@@ -81,6 +124,22 @@ void test_save_and_load() {
     check(loaded.find("github.com/user/repo", "1.0.0")->package == "repo", "loaded package");
     check(loaded.contains("github.com/other/lib", "0.2.0"), "loaded contains lib");
     check(loaded.find("github.com/other/lib", "0.2.0")->commit == "def456", "loaded lib commit");
+
+    lock::system::save(loaded, tmp.string());
+    auto saved = read_file_bytes(tmp);
+    check(saved == rendered, "load/save preserves canonical lockfile bytes");
+    check(saved.find('\r') == std::string::npos, "load/save roundtrip keeps LF bytes");
+
+    auto reloaded = lock::system::load(tmp.string());
+    check(reloaded.packages.size() == 2, "reloaded 2 packages");
+    check(reloaded.contains("github.com/user/repo", "1.0.0"), "reloaded contains repo");
+    check(reloaded.find("github.com/user/repo", "1.0.0")->commit == "abc123",
+          "reloaded repo commit");
+    check(reloaded.find("github.com/user/repo", "1.0.0")->package == "repo",
+          "reloaded repo package");
+    check(reloaded.contains("github.com/other/lib", "0.2.0"), "reloaded contains lib");
+    check(reloaded.find("github.com/other/lib", "0.2.0")->commit == "def456",
+          "reloaded lib commit");
 
     std::filesystem::remove(tmp);
 }
@@ -115,37 +174,56 @@ void test_render_and_parse_roundtrip() {
     check(refl && refl->features.size() == 2, "render/parse roundtrip keeps features");
 }
 
-void test_subdir_field_roundtrip() {
-    auto tmp = std::filesystem::temp_directory_path() / "exon_test_lock_subdir.toml";
+void test_subdir_and_features_roundtrip() {
+    auto tmp = std::filesystem::temp_directory_path() / "exon_test_lock_subdir_features.toml";
 
-    lock::LockFile lf;
-    lf.add_or_update({
+    lock::LockFile expected;
+    expected.add_or_update({
         .name = "github.com/misut/txn#refl",
         .package = "refl",
         .version = "0.1.0",
         .commit = "abc123",
         .subdir = "refl",
+        .features = {"json", "yaml"},
     });
-    lf.add_or_update({
+    expected.add_or_update({
         .name = "github.com/user/plain",
         .package = "plain",
         .version = "2.0.0",
         .commit = "xyz789",
-        // no subdir: plain git dep
     });
-    lock::system::save(lf, tmp.string());
+
+    auto rendered = lock::render(expected);
+    write_file_bytes(tmp, rendered);
 
     auto loaded = lock::system::load(tmp.string());
-    check(loaded.packages.size() == 2, "subdir: two entries loaded");
+    check(loaded.packages.size() == 2, "subdir/features: two entries loaded");
     auto const* refl = loaded.find("github.com/misut/txn#refl", "0.1.0");
-    check(refl != nullptr, "subdir: composite-name entry found");
-    check(refl->package == "refl", "subdir: canonical package preserved");
-    check(refl->subdir == "refl", "subdir: subdir field preserved");
-    check(refl->commit == "abc123", "subdir: commit preserved");
+    check(refl != nullptr, "subdir/features: composite-name entry found");
+    check(refl && refl->package == "refl", "subdir/features: canonical package preserved");
+    check(refl && refl->subdir == "refl", "subdir/features: subdir field preserved");
+    check(refl && refl->commit == "abc123", "subdir/features: commit preserved");
+    check(refl && refl->features.size() == 2, "subdir/features: feature count preserved");
+    check(refl && refl->features[0] == "json", "subdir/features: first feature preserved");
+    check(refl && refl->features[1] == "yaml", "subdir/features: second feature preserved");
     auto const* plain = loaded.find("github.com/user/plain", "2.0.0");
-    check(plain != nullptr, "subdir: plain git entry found");
-    check(plain->package == "plain", "subdir: plain package preserved");
-    check(plain->subdir.empty(), "subdir: plain entry subdir empty");
+    check(plain != nullptr, "subdir/features: plain git entry found");
+    check(plain && plain->package == "plain", "subdir/features: plain package preserved");
+    check(plain && plain->subdir.empty(), "subdir/features: plain entry subdir empty");
+    check(plain && plain->features.empty(), "subdir/features: plain entry features empty");
+
+    lock::system::save(loaded, tmp.string());
+    auto saved = read_file_bytes(tmp);
+    check(saved == rendered, "subdir/features: save preserves canonical lockfile bytes");
+    check(saved.find('\r') == std::string::npos, "subdir/features: save keeps LF bytes");
+
+    auto reloaded = lock::system::load(tmp.string());
+    auto const* refl_roundtrip = reloaded.find("github.com/misut/txn#refl", "0.1.0");
+    check(refl_roundtrip != nullptr, "subdir/features: reloaded composite-name entry found");
+    check(refl_roundtrip && refl_roundtrip->subdir == "refl",
+          "subdir/features: reloaded subdir preserved");
+    check(refl_roundtrip && refl_roundtrip->features.size() == 2,
+          "subdir/features: reloaded features preserved");
 
     std::filesystem::remove(tmp);
 }
@@ -158,9 +236,10 @@ void test_load_nonexistent() {
 int main() {
     test_empty_lockfile();
     test_add_or_update();
-    test_save_and_load();
+    test_save_writes_canonical_lf_bytes();
+    test_load_save_load_roundtrip();
     test_render_and_parse_roundtrip();
-    test_subdir_field_roundtrip();
+    test_subdir_and_features_roundtrip();
     test_load_nonexistent();
 
     if (failures > 0) {
