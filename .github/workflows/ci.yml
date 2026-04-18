@@ -141,43 +141,28 @@ jobs:
 
       - name: Install toolchains
         shell: pwsh
-        run: intron install
+        run: |
+          intron install
+          echo "$env:USERPROFILE\.intron\toolchains\cmake\4.3.1\bin" >> $env:GITHUB_PATH
+          echo "$env:USERPROFILE\.intron\toolchains\ninja\1.13.2" >> $env:GITHUB_PATH
 
       - name: Bootstrap build
         shell: pwsh
         run: |
-          $envLines = intron env
-          if ($envLines) {
-            Invoke-Expression ($envLines -join "`n")
-          }
           cmake -B build -G Ninja
           cmake --build build --target exon
 
       - name: Self-host build
         shell: pwsh
-        run: |
-          $envLines = intron env
-          if ($envLines) {
-            Invoke-Expression ($envLines -join "`n")
-          }
-          .\build\exon.exe build
+        run: .\build\exon.exe build
 
       - name: Self-host test
         shell: pwsh
-        run: |
-          $envLines = intron env
-          if ($envLines) {
-            Invoke-Expression ($envLines -join "`n")
-          }
-          .\.exon\debug\exon.exe test --timeout 60
+        run: .\.exon\debug\exon.exe test --timeout 60
 
       - name: Windows ASan smoke
         shell: pwsh
         run: |
-          $envLines = intron env
-          if ($envLines) {
-            Invoke-Expression ($envLines -join "`n")
-          }
           $smoke = Join-Path $env:RUNNER_TEMP "exon-asan-smoke"
           Remove-Item -LiteralPath $smoke -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path (Join-Path $smoke "src") | Out-Null
@@ -212,9 +197,4 @@ jobs:
 
       - name: Verify
         shell: pwsh
-        run: |
-          $envLines = intron env
-          if ($envLines) {
-            Invoke-Expression ($envLines -join "`n")
-          }
-          .\.exon\debug\exon.exe info
+        run: .\.exon\debug\exon.exe info
