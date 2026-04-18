@@ -203,6 +203,40 @@ When these flags are present, exon now copies `clang_rt.asan_dynamic-x86_64.dll`
 
 `exon test --timeout <sec>` is also available for long-running or hung tests. On Windows, timeout uses a native process runner that terminates the full child process tree instead of leaving stale `cmake`, `ninja`, or test processes behind.
 
+### Windows Toolchain Troubleshooting
+
+If a fresh Windows native configure fails with a CMake modules error such as:
+
+```text
+compiler does not provide a way to discover the import graph dependencies
+```
+
+check which compiler your current shell exported before assuming the repository is misconfigured.
+
+```powershell
+Invoke-Expression ((intron env) -join "`n")
+Write-Host "CC=$env:CC"
+Write-Host "CXX=$env:CXX"
+where.exe cl.exe
+where.exe clang-cl.exe
+```
+
+This often explains why local Windows and GitHub Actions Windows CI differ:
+
+- the repository or CI may expect the MSVC `cl.exe` path
+- your local `intron env` may have selected `clang-cl.exe` instead
+- that mixed setup can surface CMake C++ modules or `import std` errors that do not appear in a `cl.exe`-based CI job
+
+If the project expects MSVC, rerun with `cl` selected explicitly:
+
+```powershell
+$env:CC = "cl"
+$env:CXX = "cl"
+exon build
+```
+
+If `clang-cl` is intentional, verify that your current CMake and toolchain combination supports Windows C++ modules for the project you are building. With `intron 0.19.1`, Windows shells can still end up with an MSVC developer environment plus `CC` / `CXX` set to `clang-cl.exe`; newer `intron` releases prefer `cl.exe` when Windows MSVC is configured.
+
 ## Dependencies
 
 Exon supports five kinds of dependencies, all with `[dev-dependencies.*]` variants that are only pulled in for `exon test`.

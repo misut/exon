@@ -59,16 +59,45 @@ inline auto detect_host_platform() -> Platform {
     return cppx::platform::host();
 }
 
+enum class CompilerKind {
+    unknown,
+    msvc_cl,
+    clang_cl,
+    clang,
+    other,
+};
+
+inline auto compiler_kind_name(CompilerKind kind) -> std::string_view {
+    switch (kind) {
+    case CompilerKind::unknown:
+        return "unknown";
+    case CompilerKind::msvc_cl:
+        return "msvc-cl";
+    case CompilerKind::clang_cl:
+        return "clang-cl";
+    case CompilerKind::clang:
+        return "clang";
+    case CompilerKind::other:
+        return "other";
+    }
+    return "unknown";
+}
+
 struct Toolchain {
     std::string cmake;
     std::string ninja;
     std::string cxx_compiler;
+    std::string env_cc;
+    std::string env_cxx;
     std::string stdlib_modules_json; // libc++.modules.json path (import std support)
     std::string lib_dir;             // libc++ library path (for linker)
     std::string sysroot;             // macOS SDK path
+    CompilerKind compiler_kind = CompilerKind::unknown;
     bool has_clang_config = false;   // if clang config exists, linker flags are unnecessary
     bool needs_stdlib_flag = false;  // if -stdlib=libc++ is needed (Linux)
     bool is_msvc = false;            // compiler is MSVC cl.exe (Windows)
+    bool compiler_from_environment = false;
+    bool has_msvc_developer_env = false;
     bool native_import_std = false;  // compiler has native `import std;` (no modules json needed)
 };
 
