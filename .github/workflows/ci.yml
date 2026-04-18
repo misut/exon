@@ -136,6 +136,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Install toolchains
         shell: pwsh
         run: intron install
@@ -143,26 +146,38 @@ jobs:
       - name: Bootstrap build
         shell: pwsh
         run: |
-          Invoke-Expression ((intron env) -join "`n")
+          $envLines = intron env
+          if ($envLines) {
+            Invoke-Expression ($envLines -join "`n")
+          }
           cmake -B build -G Ninja
           cmake --build build --target exon
 
       - name: Self-host build
         shell: pwsh
         run: |
-          Invoke-Expression ((intron env) -join "`n")
+          $envLines = intron env
+          if ($envLines) {
+            Invoke-Expression ($envLines -join "`n")
+          }
           .\build\exon.exe build
 
       - name: Self-host test
         shell: pwsh
         run: |
-          Invoke-Expression ((intron env) -join "`n")
+          $envLines = intron env
+          if ($envLines) {
+            Invoke-Expression ($envLines -join "`n")
+          }
           .\.exon\debug\exon.exe test --timeout 60
 
       - name: Windows ASan smoke
         shell: pwsh
         run: |
-          Invoke-Expression ((intron env) -join "`n")
+          $envLines = intron env
+          if ($envLines) {
+            Invoke-Expression ($envLines -join "`n")
+          }
           $smoke = Join-Path $env:RUNNER_TEMP "exon-asan-smoke"
           Remove-Item -LiteralPath $smoke -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path (Join-Path $smoke "src") | Out-Null
@@ -198,5 +213,8 @@ jobs:
       - name: Verify
         shell: pwsh
         run: |
-          Invoke-Expression ((intron env) -join "`n")
+          $envLines = intron env
+          if ($envLines) {
+            Invoke-Expression ($envLines -join "`n")
+          }
           .\.exon\debug\exon.exe info

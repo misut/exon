@@ -177,7 +177,10 @@ void test_portable_intron_config_uses_intron_install_from_project_root() {
     check(cwd.has_value(), "portable intron config: intron ran in project root");
     check(args && args->find("install") != std::string::npos,
           "portable intron config: intron install argument passed");
-    check(cwd && std::filesystem::path{*cwd}.lexically_normal() == proj.root.lexically_normal(),
+    auto expected_cwd = std::filesystem::weakly_canonical(proj.root);
+    auto actual_cwd = cwd ? std::filesystem::weakly_canonical(std::filesystem::path{*cwd})
+                          : std::filesystem::path{};
+    check(cwd && actual_cwd == expected_cwd,
           "portable intron config: ProcessSpec.cwd set to project root");
 }
 
