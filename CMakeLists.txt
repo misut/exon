@@ -41,6 +41,8 @@ target_sources(exon-modules
     ${CMAKE_CURRENT_SOURCE_DIR}/src/lock.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/manifest.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/manifest.system.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/reporting.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/reporting.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/semver.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/templates.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/toolchain.cppm
@@ -71,6 +73,8 @@ set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/lock.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/manifest.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/manifest.system.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/reporting.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/reporting.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/semver.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/templates.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/toolchain.cppm
@@ -127,6 +131,14 @@ target_sources(test-test_manifest PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_manifest.cpp
 )
 target_link_libraries(test-test_manifest PRIVATE
+    exon-modules
+)
+
+add_executable(test-test_reporting)
+target_sources(test-test_reporting PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_reporting.cpp
+)
+target_link_libraries(test-test_reporting PRIVATE
     exon-modules
 )
 

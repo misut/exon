@@ -6,6 +6,8 @@ import fetch;
 import fetch.system;
 import manifest;
 import manifest.system;
+import reporting;
+import reporting.system;
 import toolchain;
 
 #if defined(_WIN32)
@@ -527,6 +529,65 @@ void test_system_run_process_honors_cwd() {
     check(rc == 0, "build.system::run_process honors ProcessSpec.cwd");
 }
 
+void test_reporting_capture_collects_stdout_and_stderr() {
+#if defined(_WIN32)
+    core::ProcessSpec spec{
+        .program = "cmd",
+        .args = {"/c", "(echo out & echo err 1>&2 & exit 0)"},
+    };
+#else
+    core::ProcessSpec spec{
+        .program = "sh",
+        .args = {"-c", "printf 'out\\n'; printf 'err\\n' 1>&2"},
+    };
+#endif
+
+    auto result = reporting::system::run_process(spec, reporting::StreamMode::capture);
+    check(result.exit_code == 0, "capture: exit code");
+    check(!result.timed_out, "capture: not timed out");
+    check(result.stdout_text.contains("out"), "capture: stdout captured");
+    check(result.stderr_text.contains("err"), "capture: stderr captured");
+}
+
+void test_reporting_tee_collects_output() {
+#if defined(_WIN32)
+    core::ProcessSpec spec{
+        .program = "cmd",
+        .args = {"/c", "(echo tee-out & echo tee-err 1>&2 & exit 0)"},
+    };
+#else
+    core::ProcessSpec spec{
+        .program = "sh",
+        .args = {"-c", "printf 'tee-out\\n'; printf 'tee-err\\n' 1>&2"},
+    };
+#endif
+
+    auto result = reporting::system::run_process(spec, reporting::StreamMode::tee);
+    check(result.exit_code == 0, "tee: exit code");
+    check(result.stdout_text.contains("tee-out"), "tee: stdout captured");
+    check(result.stderr_text.contains("tee-err"), "tee: stderr captured");
+}
+
+void test_reporting_timeout_marks_result() {
+#if defined(_WIN32)
+    core::ProcessSpec spec{
+        .program = "cmd",
+        .args = {"/c", "ping -n 6 127.0.0.1 > nul"},
+        .timeout = std::chrono::milliseconds{50},
+    };
+#else
+    core::ProcessSpec spec{
+        .program = "sh",
+        .args = {"-c", "sleep 1"},
+        .timeout = std::chrono::milliseconds{50},
+    };
+#endif
+
+    auto result = reporting::system::run_process(spec, reporting::StreamMode::capture);
+    check(result.timed_out, "timeout: result flagged");
+    check(result.exit_code == 124, "timeout: uses 124 exit code");
+}
+
 void test_fetch_and_generate_cmake_root_override_fixture() {
     TmpProject proj;
     proj.write("exon.toml", "");
@@ -605,6 +666,9 @@ int main(int argc, char* argv[]) {
 #endif
     test_run_process_returns_child_exit_code();
     test_system_run_process_honors_cwd();
+    test_reporting_capture_collects_stdout_and_stderr();
+    test_reporting_tee_collects_output();
+    test_reporting_timeout_marks_result();
     test_prepare_request_keeps_portable_root_sync_inputs_unresolved();
     test_fetch_and_generate_cmake_root_override_fixture();
 

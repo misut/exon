@@ -40,10 +40,13 @@ std::string usage_text() {
         cli::Section{"commands", {
             {"init [--lib] [name]",                "create a new exon.toml"},
             {"info",                               "show package information"},
-            {"build [--release] [--target <t>]",   "build the project"},
+            {"build [--release] [--target <t>] [--output raw|wrapped]",
+                                                   "build the project"},
             {"check [--release] [--target <t>]",   "check syntax without linking"},
             {"run [--release] [--target <t>] [args]", "build and run the project"},
-            {"test [--release] [--target <t>] [--timeout <sec>]", "build and run tests"},
+            {"test [--release] [--target <t>] [--timeout <sec>] "
+             "[--output raw|wrapped] [--show-output failed|all|none]",
+                                                   "build and run tests"},
             {"clean",                              "remove build artifacts"},
             {"add [--dev] <pkg> <ver>",            "add a git dependency"},
             {"add [--dev] --path <name> <path>",   "add a local path dependency"},
@@ -309,15 +312,36 @@ int run_build_command(int argc, char* argv[], BuildFn fn) {
 }
 
 int cmd_build(int argc, char* argv[]) {
-    return run_build_command(argc, argv,
-                             [](std::filesystem::path const& project_root,
-                                manifest::Manifest const& raw_m,
-                                manifest::Manifest const& m,
-                                bool release,
-                                std::string_view target) {
-                                 return build::system::run(project_root, m, raw_m, release,
-                                                           target);
-                             });
+    try {
+        auto args = cli::parse(argc, argv, 2, {
+            cli::Flag{"--release"},
+            cli::Option{"--target"},
+            cli::Option{"--output"},
+        });
+        auto release = args.has("--release");
+        auto target = std::string{args.get("--target")};
+        auto project_root = std::filesystem::current_path();
+        auto raw_m = load_manifest(project_root);
+        if (!check_platform(raw_m, target))
+            return 1;
+        auto m = resolve_manifest(raw_m, target);
+        if (manifest::is_workspace(raw_m)) {
+            return run_for_workspace(project_root, raw_m, [&](auto const& member_path) {
+                auto raw_member = load_manifest(member_path);
+                if (!check_platform(raw_member, target))
+                    return 1;
+                auto member_m = resolve_manifest(raw_member, target);
+                return build::system::run(member_path, member_m, raw_member, release, target,
+                                          args.get("--output"));
+            });
+        }
+        if (m.name.empty())
+            return command_error("package name is required in exon.toml");
+        return build::system::run(project_root, m, raw_m, release, target, args.get("--output"));
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
 }
 
 int cmd_check(int argc, char* argv[]) {
@@ -384,6 +408,8 @@ int cmd_test(int argc, char* argv[]) {
             cli::Option{"--target"},
             cli::Option{"--filter"},
             cli::Option{"--timeout"},
+            cli::Option{"--output"},
+            cli::Option{"--show-output"},
         };
         auto args = cli::parse(argc, argv, 2, test_defs);
         auto release = args.has("--release");
@@ -402,13 +428,15 @@ int cmd_test(int argc, char* argv[]) {
                     return 1;
                 auto member_m = resolve_manifest(raw_member, target);
                 return build::system::run_test(member_path, member_m, raw_member, release,
-                                               target, filter, timeout);
+                                               target, filter, timeout, args.get("--output"),
+                                               args.get("--show-output"));
             });
         }
         if (m.name.empty())
             return command_error("package name is required in exon.toml");
         return build::system::run_test(project_root, m, raw_m, release, target, filter,
-                                       timeout);
+                                       timeout, args.get("--output"),
+                                       args.get("--show-output"));
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;

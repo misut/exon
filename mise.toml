@@ -1,6 +1,6 @@
 [tools]
 clang = "latest"
 cmake = "latest"
-"vfox:misut/mise-exon" = "0.22.2"
+"vfox:misut/mise-exon" = "0.23.7"
 "vfox:misut/mise-intron" = "0.19.1"
 ninja = "latest"
