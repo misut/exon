@@ -79,10 +79,10 @@ hello, world!
 |---------|-------------|
 | `exon init [--lib] [name]` | Create a new project (in `name/` if given, else in current dir) |
 | `exon info` | Show package information |
-| `exon build [--release] [--target <t>]` | Build the project |
+| `exon build [--release] [--target <t>] [--output raw|wrapped]` | Build the project |
 | `exon check [--release] [--target <t>]` | Check syntax without linking |
 | `exon run [--release] [--target <t>]` | Build and run |
-| `exon test [--release] [--target <t>] [--timeout <sec>]` | Build and run tests |
+| `exon test [--release] [--target <t>] [--timeout <sec>] [--output raw|wrapped] [--show-output failed|all|none]` | Build and run tests |
 | `exon clean` | Remove build artifacts |
 | `exon add [--dev] <pkg> <ver>` | Add a git dependency |
 | `exon add [--dev] --path <name> <path>` | Add a local path dependency |
@@ -196,6 +196,10 @@ ldflags = ["/fsanitize=address"]
 ```
 
 When these flags are present, exon now copies `clang_rt.asan_dynamic-x86_64.dll` next to each built executable and test binary. This makes direct execution from `.exon/debug/` work without manually editing `PATH`.
+
+`exon build` and `exon test` default to a wrapped console that adds stage headers and final summaries while still showing the underlying CMake/Ninja output. Use `--output raw` to fall back to the underlying tool output with minimal exon wrapping.
+
+`exon test --show-output failed` (default) only shows captured stdout/stderr for failing or timed-out test binaries. Use `--show-output all` to always print captured output, or `--show-output none` to suppress it entirely.
 
 `exon test --timeout <sec>` is also available for long-running or hung tests. On Windows, timeout uses a native process runner that terminates the full child process tree instead of leaving stale `cmake`, `ninja`, or test processes behind.
 
