@@ -1,8 +1,8 @@
 export module build.system;
 import std;
-import toml;
 import build;
 import core;
+import cppx.env.system;
 import cppx.fs;
 import cppx.fs.system;
 import cppx.process;
@@ -73,37 +73,27 @@ void ensure_intron_tools(std::filesystem::path const& project_root) {
     if (!std::filesystem::exists(intron_toml))
         return;
 
-#if defined(_WIN32)
-    constexpr auto null_redirect = "intron help > NUL 2>&1";
-#else
-    constexpr auto null_redirect = "intron help > /dev/null 2>&1";
-#endif
-    if (std::system(null_redirect) != 0)
+    auto intron = cppx::env::system::find_in_path("intron");
+    if (!intron)
         return;
 
-    auto table = toml::parse_file(intron_toml.string());
-    if (!table.contains("toolchain"))
-        return;
+    core::ProcessSpec spec{
+        .program = intron->string(),
+        .args = {"install"},
+        .cwd = project_root,
+    };
 
-    auto home = toolchain::system::home_dir();
-    if (home.empty())
-        return;
-    auto intron_root = home / ".intron" / "toolchains";
-
-    auto const& tools = table.at("toolchain").as_table();
-    for (auto const& [tool, ver_val] : tools) {
-#if defined(_WIN32)
-        if (tool == "llvm")
-            continue;
-#endif
-        auto version = ver_val.as_string();
-        auto tool_path = intron_root / tool / version;
-        if (std::filesystem::exists(tool_path))
-            continue;
-        std::println("installing {} {}...", tool, version);
-        auto cmd = std::format("intron install {} {}", tool, version);
-        if (std::system(cmd.c_str()) != 0)
-            std::println(std::cerr, "warning: failed to install {} {}", tool, version);
+    try {
+        auto result = run_process(spec);
+        if (result.exit_code != 0) {
+            std::println(std::cerr,
+                         "warning: 'intron install' exited with code {} in {}",
+                         result.exit_code, project_root.string());
+        }
+    } catch (std::exception const& e) {
+        std::println(std::cerr,
+                     "warning: failed to run 'intron install' in {}: {}",
+                     project_root.string(), e.what());
     }
 }
 

@@ -29,7 +29,7 @@ mise use "vfox:misut/mise-exon@latest"
 <details>
 <summary>Build from source</summary>
 
-Requires LLVM with libc++ modules: [Homebrew LLVM](https://formulae.brew.sh/formula/llvm) (macOS) or [LLVM 20+](https://apt.llvm.org/) (Linux). Or on **Windows**, Visual Studio 2022 17.5+ with MSVC.
+Requires LLVM with libc++ modules: [Homebrew LLVM](https://formulae.brew.sh/formula/llvm) (macOS) or [LLVM 20+](https://apt.llvm.org/) (Linux). On **Windows**, `intron install` uses this repo's `.intron.toml` to provision MSVC, CMake, and Ninja.
 
 ```sh
 # bootstrap (uses FetchContent for tomlcpp)
@@ -42,7 +42,17 @@ cmake --build build --target exon
 
 On macOS, use `cmake --build build --target exon --parallel 1` for the bootstrap build. Self-hosted `exon build`, `exon check`, and `exon test` serialize the build automatically on macOS when `import std;` is enabled. If you change `src/build.cppm`, `src/toolchain.cppm`, or `exon.toml` in the `exon` repo, rebuild `build/exon` before self-hosting again. If `build/` still points at an older source tree, remove it and rerun the bootstrap commands.
 
-On Windows, run the commands from a **Visual Studio Developer Command Prompt** (or PowerShell for VS 2022) so that `cl.exe` is on PATH. Requires CMake 3.30+ and Ninja.
+On Windows, a regular PowerShell session is enough:
+
+```powershell
+intron install
+Invoke-Expression ((intron env) -join "`n")
+cmake -B build -G Ninja
+cmake --build build --target exon
+.\build\exon.exe build
+```
+
+A Visual Studio Developer Command Prompt also works, but it is no longer required when `intron` is available.
 </details>
 
 ## Quick Start

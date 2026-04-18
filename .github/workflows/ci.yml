@@ -52,12 +52,12 @@ jobs:
 
       - name: Install toolchains
         run: |
-          intron install llvm 22.1.2
-          intron install cmake 4.3.1
           if [ "$(uname -m)" = "aarch64" ] && [ "$RUNNER_OS" = "Linux" ]; then
+            intron install llvm 22.1.2
+            intron install cmake 4.3.1
             sudo apt-get update && sudo apt-get install -y ninja-build
           else
-            intron install ninja 1.13.2
+            intron install
           fi
 
       - name: Bootstrap build
@@ -124,9 +124,6 @@ jobs:
           sed -n 's/^"vfox:misut\/mise-intron"[[:space:]]*=[[:space:]]*"\([^"]*\)"$/intron=\1/p' mise.toml >> "$GITHUB_OUTPUT"
           sed -n 's/^"vfox:misut\/mise-exon"[[:space:]]*=[[:space:]]*"\([^"]*\)"$/exon=\1/p' mise.toml >> "$GITHUB_OUTPUT"
 
-      - name: Setup MSVC
-        uses: ilammy/msvc-dev-cmd@v1
-
       - name: Install intron
         shell: pwsh
         run: |
@@ -139,26 +136,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Install toolchains
         shell: pwsh
         run: |
-          intron install cmake 4.3.1
-          intron install ninja 1.13.2
+          intron install
           echo "$env:USERPROFILE\.intron\toolchains\cmake\4.3.1\bin" >> $env:GITHUB_PATH
           echo "$env:USERPROFILE\.intron\toolchains\ninja\1.13.2" >> $env:GITHUB_PATH
 
       - name: Bootstrap build
-        shell: cmd
+        shell: pwsh
         run: |
           cmake -B build -G Ninja
           cmake --build build --target exon
 
       - name: Self-host build
-        shell: cmd
+        shell: pwsh
         run: .\build\exon.exe build
 
       - name: Self-host test
-        shell: cmd
+        shell: pwsh
         run: .\.exon\debug\exon.exe test --timeout 60
 
       - name: Windows ASan smoke
@@ -197,5 +196,5 @@ jobs:
           }
 
       - name: Verify
-        shell: cmd
+        shell: pwsh
         run: .\.exon\debug\exon.exe info

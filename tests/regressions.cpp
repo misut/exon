@@ -8,7 +8,15 @@ import manifest;
 import manifest.system;
 import toolchain;
 
+#if defined(_WIN32)
+extern "C" int _putenv(char const* envstring);
+#else
+extern "C" int setenv(char const* name, char const* value, int overwrite);
+extern "C" int unsetenv(char const* name);
+#endif
+
 int failures = 0;
+std::filesystem::path self_executable_path;
 
 void check(bool cond, std::string_view msg) {
     if (!cond) {
@@ -36,6 +44,161 @@ struct TmpProject {
         file << content;
     }
 };
+
+std::optional<std::string> read_if_exists(std::filesystem::path const& path) {
+    if (!std::filesystem::exists(path))
+        return std::nullopt;
+    auto file = std::ifstream{path};
+    auto text = std::string{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+    while (!text.empty() && (text.back() == '\r' || text.back() == '\n'))
+        text.pop_back();
+    return text;
+}
+
+void set_env_var(std::string_view name, std::string_view value) {
+#if defined(_WIN32)
+    auto assignment = std::format("{}={}", name, value);
+    _putenv(assignment.c_str());
+#else
+    setenv(name.data(), std::string{value}.c_str(), 1);
+#endif
+}
+
+void unset_env_var(std::string_view name) {
+#if defined(_WIN32)
+    auto assignment = std::format("{}=", name);
+    _putenv(assignment.c_str());
+#else
+    unsetenv(name.data());
+#endif
+}
+
+struct EnvVarGuard {
+    std::string name;
+    std::optional<std::string> original;
+
+    explicit EnvVarGuard(std::string name_)
+        : name(std::move(name_)) {
+        if (auto value = std::getenv(name.c_str()); value)
+            original = value;
+    }
+
+    ~EnvVarGuard() {
+        if (original)
+            set_env_var(name, *original);
+        else
+            unset_env_var(name);
+    }
+};
+
+std::string portable_intron_config() {
+    return R"([toolchain]
+cmake = "4.3.1"
+ninja = "1.13.2"
+
+[toolchain.macos]
+llvm = "22.1.2"
+
+[toolchain.linux]
+llvm = "22.1.2"
+
+[toolchain.windows]
+msvc = "2022"
+)";
+}
+
+int maybe_run_fake_intron(int argc, char* argv[]) {
+    auto exe_name = std::filesystem::path{argv[0]}.stem().string();
+    if (exe_name != "intron")
+        return -1;
+
+    auto args = std::ostringstream{};
+    for (int i = 1; i < argc; ++i) {
+        if (i > 1)
+            args << ' ';
+        args << argv[i];
+    }
+
+    {
+        auto file = std::ofstream{"intron-args.txt"};
+        file << args.str();
+    }
+    {
+        auto file = std::ofstream{"intron-cwd.txt"};
+        file << std::filesystem::current_path().string();
+    }
+    return 0;
+}
+
+void write_fake_intron(TmpProject& proj) {
+    auto bin_dir = proj.root / "bin";
+    std::filesystem::create_directories(bin_dir);
+
+#if defined(_WIN32)
+    auto fake_intron = bin_dir / "intron.exe";
+#else
+    auto fake_intron = bin_dir / "intron";
+#endif
+
+    std::filesystem::copy_file(self_executable_path, fake_intron,
+                               std::filesystem::copy_options::overwrite_existing);
+
+#if !defined(_WIN32)
+    std::filesystem::permissions(
+        fake_intron,
+        std::filesystem::perms::owner_exec | std::filesystem::perms::owner_read |
+            std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::add);
+#endif
+}
+
+void test_portable_intron_config_uses_intron_install_from_project_root() {
+    TmpProject proj;
+    proj.write(".intron.toml", portable_intron_config());
+    write_fake_intron(proj);
+
+    EnvVarGuard path_guard{"PATH"};
+    auto fake_path = (proj.root / "bin").string();
+    if (path_guard.original && !path_guard.original->empty()) {
+#if defined(_WIN32)
+        fake_path += ";";
+#else
+        fake_path += ":";
+#endif
+        fake_path += *path_guard.original;
+    }
+    set_env_var("PATH", fake_path);
+
+    build::system::detail::ensure_intron_tools(proj.root);
+
+    auto args = read_if_exists(proj.root / "intron-args.txt");
+    auto cwd = read_if_exists(proj.root / "intron-cwd.txt");
+    check(args.has_value(), "portable intron config: intron install invoked");
+    check(cwd.has_value(), "portable intron config: intron ran in project root");
+    check(args && args->find("install") != std::string::npos,
+          "portable intron config: intron install argument passed");
+    auto expected_cwd = std::filesystem::weakly_canonical(proj.root);
+    auto actual_cwd = cwd ? std::filesystem::weakly_canonical(std::filesystem::path{*cwd})
+                          : std::filesystem::path{};
+    check(cwd && actual_cwd == expected_cwd,
+          "portable intron config: ProcessSpec.cwd set to project root");
+}
+
+void test_portable_intron_config_skips_when_intron_missing() {
+    TmpProject proj;
+    proj.write(".intron.toml", portable_intron_config());
+    std::filesystem::create_directories(proj.root / "empty-bin");
+
+    EnvVarGuard path_guard{"PATH"};
+    set_env_var("PATH", (proj.root / "empty-bin").string());
+
+    build::system::detail::ensure_intron_tools(proj.root);
+
+    check(!std::filesystem::exists(proj.root / "intron-args.txt"),
+          "portable intron config: missing intron skips install");
+    check(!std::filesystem::exists(proj.root / "intron-cwd.txt"),
+          "portable intron config: missing intron leaves no marker");
+}
 
 struct TmpGitRepo {
     std::filesystem::path root;
@@ -227,10 +390,17 @@ standard = 23
           "override fixture: txn links canonical cppx");
 }
 
-int main() {
+int main(int argc, char* argv[]) {
+    if (auto rc = maybe_run_fake_intron(argc, argv); rc >= 0)
+        return rc;
+
+    self_executable_path = std::filesystem::weakly_canonical(std::filesystem::path{argv[0]});
+
 #if !defined(_WIN32)
     test_portable_windows_asan_helper_configures_on_non_windows();
 #endif
+    test_portable_intron_config_uses_intron_install_from_project_root();
+    test_portable_intron_config_skips_when_intron_missing();
     test_run_process_returns_child_exit_code();
     test_system_run_process_honors_cwd();
     test_fetch_and_generate_cmake_root_override_fixture();
