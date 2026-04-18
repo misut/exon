@@ -1,6 +1,5 @@
 export module build.system;
 import std;
-import toml;
 import build;
 import core;
 import cppx.env.system;
@@ -12,6 +11,7 @@ import fetch;
 import fetch.system;
 import manifest;
 import manifest.system;
+import toml;
 import toolchain;
 import toolchain.system;
 import vcpkg.system;
@@ -23,12 +23,21 @@ bool sync_root_cmake(std::filesystem::path const& project_root,
                      std::vector<fetch::FetchedDep> const& deps);
 int run(std::filesystem::path const& project_root, manifest::Manifest const& m,
         bool release, std::string_view target);
+int run(std::filesystem::path const& project_root, manifest::Manifest const& m,
+        manifest::Manifest const& portable_manifest, bool release, std::string_view target);
 int run_check(std::filesystem::path const& project_root,
               manifest::Manifest const& m, bool release,
               std::string_view target);
+int run_check(std::filesystem::path const& project_root,
+              manifest::Manifest const& m, manifest::Manifest const& portable_manifest,
+              bool release, std::string_view target);
 int run_test(std::filesystem::path const& project_root,
              manifest::Manifest const& m, bool release,
              std::string_view target, std::string_view filter,
+             std::optional<std::chrono::milliseconds> timeout);
+int run_test(std::filesystem::path const& project_root,
+             manifest::Manifest const& m, manifest::Manifest const& portable_manifest,
+             bool release, std::string_view target, std::string_view filter,
              std::optional<std::chrono::milliseconds> timeout);
 
 namespace detail {
@@ -220,19 +229,21 @@ bool has_any_cmake_deps(manifest::Manifest const& m,
     return false;
 }
 
-build::BuildRequest prepare_request(std::filesystem::path const& project_root,
-                                    manifest::Manifest const& m,
-                                    bool release,
-                                    std::string_view target,
-                                    bool with_tests,
-                                    std::string_view filter,
-                                    std::optional<std::chrono::milliseconds> timeout) {
-    build::ensure_fresh_self_host_bootstrap(m, project_root);
+build::BuildRequest do_prepare_request(
+    std::filesystem::path const& project_root,
+    manifest::Manifest const& build_manifest,
+    manifest::Manifest const* portable_manifest,
+    bool release,
+    std::string_view target,
+    bool with_tests,
+    std::string_view filter,
+    std::optional<std::chrono::milliseconds> timeout) {
+    build::ensure_fresh_self_host_bootstrap(build_manifest, project_root);
     ensure_intron_tools(project_root);
 
     bool is_wasm = !target.empty();
     if (is_wasm)
-        validate_wasm_dependencies(m);
+        validate_wasm_dependencies(build_manifest);
 
     auto project = build::project_context(project_root, release, target);
     auto tc = toolchain::system::detect();
@@ -261,21 +272,24 @@ build::BuildRequest prepare_request(std::filesystem::path const& project_root,
         ? toolchain::detect_host_platform()
         : *toolchain::platform_from_target(target);
     auto fetch_result = fetch::system::fetch_all({
-        .manifest = m,
+        .manifest = build_manifest,
         .project_root = project_root,
         .lock_path = project_root / "exon.lock",
         .include_dev = with_tests,
         .platform = platform,
     });
     auto vcpkg_toolchain = is_wasm ? std::filesystem::path{}
-                                   : setup_vcpkg(m, project.exon_dir);
-    auto any_cmake_deps = has_any_cmake_deps(m, fetch_result.deps, platform);
+                                   : setup_vcpkg(build_manifest, project.exon_dir);
+    auto any_cmake_deps = has_any_cmake_deps(build_manifest, fetch_result.deps, platform);
 
     build::BuildRequest request{
         .project = project,
-        .manifest = m,
+        .manifest = build_manifest,
+        .portable_manifest = portable_manifest ? std::optional{*portable_manifest}
+                                               : std::nullopt,
         .toolchain = std::move(tc),
         .deps = std::move(fetch_result.deps),
+        .portable_deps = {},
         .release = release,
         .with_tests = with_tests,
         .configured = std::filesystem::exists(project.build_dir / "build.ninja"),
@@ -286,6 +300,17 @@ build::BuildRequest prepare_request(std::filesystem::path const& project_root,
         .wasm_runtime = std::move(wasm_runtime),
         .timeout = timeout,
     };
+
+    if (portable_manifest && portable_manifest->sync_cmake_in_root) {
+        auto portable_fetch_manifest = manifest::resolve_all_targets(*portable_manifest);
+        auto portable_fetch_result = fetch::system::fetch_all({
+            .manifest = std::move(portable_fetch_manifest),
+            .project_root = project_root,
+            .lock_path = project_root / "exon.lock",
+            .include_dev = with_tests,
+        });
+        request.portable_deps = std::move(portable_fetch_result.deps);
+    }
 
     auto src_files = collect_sources(project_root / "src");
     auto tests_dir = project_root / "tests";
@@ -309,12 +334,35 @@ build::BuildRequest prepare_request(std::filesystem::path const& project_root,
             throw std::runtime_error(
                 std::format("no tests matched filter '{}'", std::string{filter}));
     } else if (!src_files.cppm.empty()) {
-        request.build_targets.push_back(std::format("{}-modules", m.name));
+        request.build_targets.push_back(std::format("{}-modules", build_manifest.name));
     } else {
-        request.build_targets.push_back(m.name);
+        request.build_targets.push_back(build_manifest.name);
     }
 
     return request;
+}
+
+build::BuildRequest prepare_request(std::filesystem::path const& project_root,
+                                    manifest::Manifest const& m,
+                                    bool release,
+                                    std::string_view target,
+                                    bool with_tests,
+                                    std::string_view filter,
+                                    std::optional<std::chrono::milliseconds> timeout) {
+    return do_prepare_request(project_root, m, nullptr, release, target, with_tests, filter,
+                              timeout);
+}
+
+build::BuildRequest prepare_request(std::filesystem::path const& project_root,
+                                    manifest::Manifest const& m,
+                                    manifest::Manifest const& portable_manifest,
+                                    bool release,
+                                    std::string_view target,
+                                    bool with_tests,
+                                    std::string_view filter,
+                                    std::optional<std::chrono::milliseconds> timeout) {
+    return do_prepare_request(project_root, m, &portable_manifest, release, target, with_tests,
+                              filter, timeout);
 }
 
 int run_steps(std::vector<core::ProcessStep> const& steps) {
@@ -405,6 +453,28 @@ inline int run(std::filesystem::path const& project_root, manifest::Manifest con
     return 0;
 }
 
+inline int run(std::filesystem::path const& project_root, manifest::Manifest const& m,
+               manifest::Manifest const& portable_manifest, bool release = false,
+               std::string_view target = {}) {
+    auto request = detail::prepare_request(project_root, m, portable_manifest, release, target,
+                                           false, {}, {});
+    auto plan = build::plan_build(request);
+    auto changed = detail::apply_writes(plan.writes);
+    if (changed || !plan.configured) {
+        auto rc = detail::run_steps(plan.configure_steps);
+        if (rc != 0)
+            return rc;
+    }
+
+    auto rc = detail::run_steps(plan.build_steps);
+    if (rc != 0)
+        return rc;
+
+    if (!plan.success_message.empty())
+        std::println("{}", plan.success_message);
+    return 0;
+}
+
 inline int run_check(manifest::Manifest const& m, bool release = false,
                      std::string_view target = {}) {
     return run_check(std::filesystem::current_path(), m, release, target);
@@ -414,6 +484,29 @@ inline int run_check(std::filesystem::path const& project_root,
                      manifest::Manifest const& m, bool release = false,
                      std::string_view target = {}) {
     auto request = detail::prepare_request(project_root, m, release, target, false, {}, {});
+    auto plan = build::plan_check(request);
+    auto changed = detail::apply_writes(plan.writes);
+    if (changed || !plan.configured) {
+        auto rc = detail::run_steps(plan.configure_steps);
+        if (rc != 0)
+            return rc;
+    }
+
+    auto rc = detail::run_steps(plan.build_steps);
+    if (rc != 0)
+        return rc;
+
+    if (!plan.success_message.empty())
+        std::println("{}", plan.success_message);
+    return 0;
+}
+
+inline int run_check(std::filesystem::path const& project_root,
+                     manifest::Manifest const& m,
+                     manifest::Manifest const& portable_manifest, bool release = false,
+                     std::string_view target = {}) {
+    auto request = detail::prepare_request(project_root, m, portable_manifest, release, target,
+                                           false, {}, {});
     auto plan = build::plan_check(request);
     auto changed = detail::apply_writes(plan.writes);
     if (changed || !plan.configured) {
@@ -443,6 +536,28 @@ inline int run_test(std::filesystem::path const& project_root,
                     std::optional<std::chrono::milliseconds> timeout = {}) {
     auto request = detail::prepare_request(project_root, m, release, target, true, filter,
                                            timeout);
+    auto plan = build::plan_test(request);
+    auto changed = detail::apply_writes(plan.writes);
+    if (changed || !plan.configured) {
+        auto rc = detail::run_steps(plan.configure_steps);
+        if (rc != 0)
+            return rc;
+    }
+
+    auto rc = detail::run_steps(plan.build_steps);
+    if (rc != 0)
+        return rc;
+
+    return detail::run_tests(plan.run_steps);
+}
+
+inline int run_test(std::filesystem::path const& project_root,
+                    manifest::Manifest const& m,
+                    manifest::Manifest const& portable_manifest, bool release = false,
+                    std::string_view target = {}, std::string_view filter = {},
+                    std::optional<std::chrono::milliseconds> timeout = {}) {
+    auto request = detail::prepare_request(project_root, m, portable_manifest, release, target,
+                                           true, filter, timeout);
     auto plan = build::plan_test(request);
     auto changed = detail::apply_writes(plan.writes);
     if (changed || !plan.configured) {

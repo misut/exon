@@ -66,7 +66,6 @@ std::vector<std::string> read_lines(std::filesystem::path const& path) {
     }
     return lines;
 }
-
 void set_env_var(std::string_view name, std::string_view value) {
 #if defined(_WIN32)
     auto assignment = std::format("{}={}", name, value);
@@ -326,7 +325,6 @@ void test_windows_explicit_llvm_override_is_installed() {
     check(args.size() == 3, "windows override config: installs explicit host tools");
 }
 #endif
-
 struct TmpGitRepo {
     std::filesystem::path root;
 
@@ -377,6 +375,79 @@ toolchain::Toolchain make_tc() {
     tc.cxx_compiler = "/usr/bin/clang++";
     tc.stdlib_modules_json = "/fake/libc++.modules.json";
     return tc;
+}
+
+void test_prepare_request_keeps_portable_root_sync_inputs_unresolved() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() { return 0; }\n");
+    proj.write("deps/winlib/exon.toml", R"([package]
+name = "winlib"
+version = "0.1.0"
+type = "lib"
+standard = 23
+)");
+    proj.write("deps/winlib/src/winlib.cppm", "export module winlib;\n");
+    proj.write("deps/linuxlib/exon.toml", R"([package]
+name = "linuxlib"
+version = "0.1.0"
+type = "lib"
+standard = 23
+)");
+    proj.write("deps/linuxlib/src/linuxlib.cppm", "export module linuxlib;\n");
+    proj.write("exon.toml", R"([package]
+name = "app"
+version = "0.1.0"
+type = "bin"
+standard = 23
+
+[sync]
+cmake-in-root = true
+
+[target.'cfg(os = "windows")'.dependencies.path]
+winlib = "deps/winlib"
+
+[target.'cfg(os = "linux")'.dependencies.path]
+linuxlib = "deps/linuxlib"
+
+[target.'cfg(os = "windows")'.build]
+cxxflags = ["/fsanitize=address"]
+
+[target.'cfg(os = "linux")'.build]
+cxxflags = ["-fsanitize=address,undefined"]
+)");
+
+    auto raw_m = manifest::system::load((proj.root / "exon.toml").string());
+    auto resolved_m = manifest::resolve_for_platform(
+        raw_m, toolchain::make_platform("windows", "x86_64"));
+
+    auto request = build::system::detail::prepare_request(
+        proj.root, resolved_m, raw_m, false, {}, false, {}, {});
+
+    check(request.manifest.target_sections.empty(),
+          "prepare_request: host manifest is flattened");
+    check(request.manifest.path_deps.contains("winlib"),
+          "prepare_request: host manifest keeps windows path dependency");
+    check(!request.manifest.path_deps.contains("linuxlib"),
+          "prepare_request: host manifest skips linux path dependency");
+    check(request.manifest.build.cxxflags == std::vector<std::string>{"/fsanitize=address"},
+          "prepare_request: host manifest keeps resolved windows build flags");
+
+    check(request.portable_manifest.has_value(),
+          "prepare_request: portable manifest is preserved for root sync");
+    check(request.portable_manifest && request.portable_manifest->target_sections.size() == 2,
+          "prepare_request: portable manifest keeps target sections");
+    check(request.portable_manifest && request.portable_manifest->path_deps.empty(),
+          "prepare_request: portable manifest remains unflattened");
+
+    auto portable_dep_names = std::vector<std::string>{};
+    for (auto const& dep : request.portable_deps)
+        portable_dep_names.push_back(dep.name);
+    check_contains(portable_dep_names, "winlib",
+                   "prepare_request: portable deps include windows dependency");
+    check_contains(portable_dep_names, "linuxlib",
+                   "prepare_request: portable deps include linux dependency");
+    check(request.portable_deps.size() == 2,
+          "prepare_request: portable deps mirror all target sections");
 }
 
 #if !defined(_WIN32)
@@ -534,6 +605,7 @@ int main(int argc, char* argv[]) {
 #endif
     test_run_process_returns_child_exit_code();
     test_system_run_process_honors_cwd();
+    test_prepare_request_keeps_portable_root_sync_inputs_unresolved();
     test_fetch_and_generate_cmake_root_override_fixture();
 
     if (failures > 0) {

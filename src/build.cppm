@@ -19,8 +19,10 @@ export namespace build {
 struct BuildRequest {
     core::ProjectContext project;
     manifest::Manifest manifest;
+    std::optional<manifest::Manifest> portable_manifest;
     toolchain::Toolchain toolchain;
     std::vector<fetch::FetchedDep> deps;
+    std::vector<fetch::FetchedDep> portable_deps;
     bool release = false;
     bool with_tests = false;
     bool configured = false;
@@ -1440,6 +1442,13 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
 namespace detail {
 
 BuildPlan base_plan(BuildRequest const& request, bool with_tests = false) {
+    auto const& portable_manifest = request.portable_manifest
+        ? *request.portable_manifest
+        : request.manifest;
+    auto const& portable_deps = request.portable_manifest
+        ? request.portable_deps
+        : request.deps;
+
     BuildPlan plan{
         .project = request.project,
         .configured = request.configured,
@@ -1455,12 +1464,12 @@ BuildPlan base_plan(BuildRequest const& request, bool with_tests = false) {
         },
     });
 
-    if (request.manifest.sync_cmake_in_root) {
+    if (portable_manifest.sync_cmake_in_root) {
         plan.writes.push_back({
             .text = {
                 .path = request.project.root / "CMakeLists.txt",
-                .content = generate_portable_cmake(request.manifest, request.project.root,
-                                                   request.deps),
+                .content = generate_portable_cmake(portable_manifest, request.project.root,
+                                                   portable_deps),
             },
             .success_message = "synced CMakeLists.txt",
         });
