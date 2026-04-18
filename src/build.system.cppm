@@ -280,6 +280,32 @@ bool has_any_cmake_deps(manifest::Manifest const& m,
     return false;
 }
 
+bool path_uses_modules(std::filesystem::path const& root) {
+    if (!std::filesystem::exists(root))
+        return false;
+    return !collect_sources(root).cppm.empty();
+}
+
+bool dep_uses_modules(fetch::FetchedDep const& dep) {
+    auto source_root = dep.path;
+    if (!dep.subdir.empty())
+        source_root /= dep.subdir;
+    source_root /= "src";
+    return path_uses_modules(source_root);
+}
+
+bool request_uses_cpp_modules(std::filesystem::path const& project_root,
+                              std::vector<fetch::FetchedDep> const& deps,
+                              bool with_tests) {
+    if (path_uses_modules(project_root / "src"))
+        return true;
+    if (with_tests && path_uses_modules(project_root / "tests"))
+        return true;
+    return std::ranges::any_of(deps, [](fetch::FetchedDep const& dep) {
+        return dep_uses_modules(dep);
+    });
+}
+
 build::BuildRequest do_prepare_request(
     std::filesystem::path const& project_root,
     manifest::Manifest const& build_manifest,
@@ -332,6 +358,7 @@ build::BuildRequest do_prepare_request(
     auto vcpkg_toolchain = is_wasm ? std::filesystem::path{}
                                    : setup_vcpkg(build_manifest, project.exon_dir);
     auto any_cmake_deps = has_any_cmake_deps(build_manifest, fetch_result.deps, platform);
+    auto module_aware = request_uses_cpp_modules(project_root, fetch_result.deps, with_tests);
 
     build::BuildRequest request{
         .project = project,
@@ -343,6 +370,7 @@ build::BuildRequest do_prepare_request(
         .portable_deps = {},
         .release = release,
         .with_tests = with_tests,
+        .module_aware = module_aware,
         .configured = std::filesystem::exists(project.build_dir / "build.ninja"),
         .any_cmake_deps = any_cmake_deps,
         .wasm_toolchain_file = std::move(wasm_toolchain_file),
@@ -505,6 +533,83 @@ void print_captured_output(std::string_view name, reporting::ProcessResult const
     }
 }
 
+bool is_windows_native_build(build::BuildRequest const& request) {
+#if defined(_WIN32)
+    return request.project.target.empty() && !request.project.is_wasm;
+#else
+    (void)request;
+    return false;
+#endif
+}
+
+bool is_windows_native_clang_cl_msvc_mix(build::BuildRequest const& request) {
+    return is_windows_native_build(request) &&
+           request.toolchain.compiler_from_environment &&
+           request.toolchain.has_msvc_developer_env &&
+           request.toolchain.compiler_kind == toolchain::CompilerKind::clang_cl;
+}
+
+bool has_windows_native_module_failure_signature(reporting::ProcessResult const& result) {
+    auto combined = result.stdout_text;
+    if (!combined.empty() && !combined.ends_with('\n'))
+        combined.push_back('\n');
+    combined += result.stderr_text;
+    return combined.contains(
+               "compiler does not provide a way to discover the import graph dependencies") ||
+           combined.contains("CMAKE_CXX_SCAN_FOR_MODULES");
+}
+
+bool should_warn_for_windows_native_toolchain(build::BuildRequest const& request) {
+    return request.module_aware && is_windows_native_clang_cl_msvc_mix(request);
+}
+
+bool should_explain_windows_native_toolchain_failure(build::BuildRequest const& request,
+                                                     reporting::ProcessResult const& result) {
+    return is_windows_native_clang_cl_msvc_mix(request) &&
+           has_windows_native_module_failure_signature(result);
+}
+
+std::string windows_native_toolchain_preflight_message() {
+    return std::string{
+        "note: detected a Windows native build using clang-cl from CC/CXX inside an MSVC developer environment\n"
+        "note: this combination can fail during CMake configure for C++ modules or import std on Windows\n"
+    };
+}
+
+std::string windows_native_toolchain_failure_message() {
+    return std::string{
+        "CMake reported that this compiler cannot discover C++ module import dependencies for this project.\n"
+        "This usually means the environment selected clang-cl, while the repository or CI expects the MSVC cl.exe path.\n"
+        "\n"
+        "next steps:\n"
+        "  1. inspect .intron.toml and run intron env to see which compiler was injected\n"
+        "  2. confirm CC/CXX point to clang-cl or cl\n"
+        "  3. if this repository expects MSVC, rerun with a cl-based environment\n"
+        "     for example: $env:CC='cl'; $env:CXX='cl'; exon build\n"
+        "  4. if clang-cl is intentional, verify that the current CMake/toolchain combination supports Windows C++ modules\n"
+    };
+}
+
+void print_multiline_note(FILE* stream, std::string_view text) {
+    write_line(stream);
+    write_stream(stream, text);
+    if (!text.empty() && !text.ends_with('\n'))
+        write_line(stream);
+}
+
+void maybe_print_windows_native_toolchain_warning(build::BuildRequest const& request) {
+    if (!should_warn_for_windows_native_toolchain(request))
+        return;
+    print_multiline_note(stdout, windows_native_toolchain_preflight_message());
+}
+
+void maybe_print_windows_native_toolchain_failure_hint(build::BuildRequest const& request,
+                                                       reporting::ProcessResult const& result) {
+    if (!should_explain_windows_native_toolchain_failure(request, result))
+        return;
+    print_multiline_note(stdout, windows_native_toolchain_failure_message());
+}
+
 #if defined(_WIN32)
 extern "C" int _putenv(char const* envstring);
 #else
@@ -598,6 +703,26 @@ int run_steps_wrapped(std::vector<core::ProcessStep> const& steps, std::string_v
     return 0;
 }
 
+int run_configure_steps(std::vector<core::ProcessStep> const& steps,
+                        build::BuildRequest const& request) {
+    maybe_print_windows_native_toolchain_warning(request);
+    return run_steps(steps);
+}
+
+int run_configure_steps_wrapped(std::vector<core::ProcessStep> const& steps,
+                                build::BuildRequest const& request) {
+    print_stage("configure");
+    maybe_print_windows_native_toolchain_warning(request);
+    for (auto const& step : steps) {
+        auto result = run_step(step, reporting::StreamMode::tee);
+        if (result.exit_code != 0) {
+            maybe_print_windows_native_toolchain_failure_hint(request, result);
+            return result.exit_code;
+        }
+    }
+    return 0;
+}
+
 int run_tests(std::vector<core::ProcessStep> const& steps) {
     std::println("running tests...\n");
     int passed = 0;
@@ -653,7 +778,7 @@ int run_build_wrapped(build::BuildRequest const& request, build::BuildPlan const
     write_formatted_line(stdout, "  {}", changed ? "generated build files" : "build files up to date");
 
     if (changed || !plan.configured) {
-        auto rc = run_steps_wrapped(plan.configure_steps, "configure");
+        auto rc = run_configure_steps_wrapped(plan.configure_steps, request);
         if (rc != 0) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started);
@@ -688,7 +813,7 @@ int run_test_wrapped(build::BuildRequest const& request, build::BuildPlan const&
     write_formatted_line(stdout, "  {}", changed ? "generated build files" : "build files up to date");
 
     if (changed || !plan.configured) {
-        auto rc = run_steps_wrapped(plan.configure_steps, "configure");
+        auto rc = run_configure_steps_wrapped(plan.configure_steps, request);
         if (rc != 0) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started);
@@ -788,7 +913,7 @@ inline int run(std::filesystem::path const& project_root, manifest::Manifest con
     auto plan = build::plan_build(request);
     auto changed = detail::apply_writes(plan.writes);
     if (changed || !plan.configured) {
-        auto rc = detail::run_steps(plan.configure_steps);
+        auto rc = detail::run_configure_steps(plan.configure_steps, request);
         if (rc != 0)
             return rc;
     }
@@ -843,7 +968,7 @@ inline int run(std::filesystem::path const& project_root, manifest::Manifest con
     auto plan = build::plan_build(request);
     auto changed = detail::apply_writes(plan.writes);
     if (changed || !plan.configured) {
-        auto rc = detail::run_steps(plan.configure_steps);
+        auto rc = detail::run_configure_steps(plan.configure_steps, request);
         if (rc != 0)
             return rc;
     }
@@ -869,7 +994,7 @@ inline int run_check(std::filesystem::path const& project_root,
     auto plan = build::plan_check(request);
     auto changed = detail::apply_writes(plan.writes);
     if (changed || !plan.configured) {
-        auto rc = detail::run_steps(plan.configure_steps);
+        auto rc = detail::run_configure_steps(plan.configure_steps, request);
         if (rc != 0)
             return rc;
     }
@@ -892,7 +1017,7 @@ inline int run_check(std::filesystem::path const& project_root,
     auto plan = build::plan_check(request);
     auto changed = detail::apply_writes(plan.writes);
     if (changed || !plan.configured) {
-        auto rc = detail::run_steps(plan.configure_steps);
+        auto rc = detail::run_configure_steps(plan.configure_steps, request);
         if (rc != 0)
             return rc;
     }
@@ -961,7 +1086,7 @@ inline int run_test(std::filesystem::path const& project_root,
     auto plan = build::plan_test(request);
     auto changed = detail::apply_writes(plan.writes);
     if (changed || !plan.configured) {
-        auto rc = detail::run_steps(plan.configure_steps);
+        auto rc = detail::run_configure_steps(plan.configure_steps, request);
         if (rc != 0)
             return rc;
     }
@@ -1026,7 +1151,7 @@ inline int run_test(std::filesystem::path const& project_root,
     auto plan = build::plan_test(request);
     auto changed = detail::apply_writes(plan.writes);
     if (changed || !plan.configured) {
-        auto rc = detail::run_steps(plan.configure_steps);
+        auto rc = detail::run_configure_steps(plan.configure_steps, request);
         if (rc != 0)
             return rc;
     }

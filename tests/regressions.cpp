@@ -588,6 +588,76 @@ void test_reporting_timeout_marks_result() {
     check(result.exit_code == 124, "timeout: uses 124 exit code");
 }
 
+void test_module_detection_includes_dependency_cppm_sources() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() { return 0; }\n");
+    proj.write("deps/phenotype/src/phenotype.cppm", "export module phenotype;\n");
+
+    fetch::FetchedDep dep;
+    dep.name = "phenotype";
+    dep.path = proj.root / "deps" / "phenotype";
+
+    check(build::system::detail::request_uses_cpp_modules(proj.root, {dep}, false),
+          "module detection: dependency cppm sources mark request as module-aware");
+}
+
+#if defined(_WIN32)
+void test_windows_native_toolchain_diagnostic_predicates() {
+    build::BuildRequest request;
+    request.module_aware = true;
+    request.project.root = std::filesystem::temp_directory_path() / "exon_test_windows_diag";
+    request.toolchain.compiler_kind = toolchain::CompilerKind::clang_cl;
+    request.toolchain.compiler_from_environment = true;
+    request.toolchain.has_msvc_developer_env = true;
+
+    reporting::ProcessResult failure;
+    failure.exit_code = 1;
+    failure.stderr_text =
+        "The target named \"phenotype\" has C++ sources that may use modules, but the compiler does not provide a way to discover the import graph dependencies.\nUse the CMAKE_CXX_SCAN_FOR_MODULES variable to enable or disable scanning.\n";
+
+    check(build::system::detail::should_warn_for_windows_native_toolchain(request),
+          "windows diag: mixed clang-cl/msvc env warns before configure");
+    check(build::system::detail::should_explain_windows_native_toolchain_failure(request, failure),
+          "windows diag: mixed clang-cl/msvc env explains matching configure failure");
+
+    auto preflight = build::system::detail::windows_native_toolchain_preflight_message();
+    check(preflight.contains("clang-cl from CC/CXX"),
+          "windows diag: preflight mentions clang-cl from CC/CXX");
+    auto hint = build::system::detail::windows_native_toolchain_failure_message();
+    check(hint.contains(".intron.toml"),
+          "windows diag: failure hint mentions .intron.toml");
+    check(hint.contains("$env:CC='cl'; $env:CXX='cl'; exon build"),
+          "windows diag: failure hint shows cl rerun example");
+
+    request.module_aware = false;
+    check(!build::system::detail::should_warn_for_windows_native_toolchain(request),
+          "windows diag: non-module request skips preflight warning");
+
+    request.module_aware = true;
+    request.project.target = "wasm32-wasi";
+    request.project.is_wasm = true;
+    check(!build::system::detail::should_warn_for_windows_native_toolchain(request),
+          "windows diag: non-native target skips preflight warning");
+
+    request.project.target.clear();
+    request.project.is_wasm = false;
+    request.toolchain.compiler_kind = toolchain::CompilerKind::msvc_cl;
+    check(!build::system::detail::should_warn_for_windows_native_toolchain(request),
+          "windows diag: cl environment skips preflight warning");
+
+    request.toolchain.compiler_kind = toolchain::CompilerKind::clang_cl;
+    request.toolchain.compiler_from_environment = false;
+    check(!build::system::detail::should_warn_for_windows_native_toolchain(request),
+          "windows diag: non-env clang-cl skips preflight warning");
+
+    request.toolchain.compiler_from_environment = true;
+    auto no_signature = reporting::ProcessResult{.exit_code = 1, .stderr_text = "plain failure"};
+    check(!build::system::detail::should_explain_windows_native_toolchain_failure(
+              request, no_signature),
+          "windows diag: unrelated failures skip extra hint");
+}
+#endif
+
 void test_fetch_and_generate_cmake_root_override_fixture() {
     TmpProject proj;
     proj.write("exon.toml", "");
@@ -669,6 +739,10 @@ int main(int argc, char* argv[]) {
     test_reporting_capture_collects_stdout_and_stderr();
     test_reporting_tee_collects_output();
     test_reporting_timeout_marks_result();
+    test_module_detection_includes_dependency_cppm_sources();
+#if defined(_WIN32)
+    test_windows_native_toolchain_diagnostic_predicates();
+#endif
     test_prepare_request_keeps_portable_root_sync_inputs_unresolved();
     test_fetch_and_generate_cmake_root_override_fixture();
 

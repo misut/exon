@@ -97,6 +97,57 @@ std::filesystem::path canonical_bin(std::filesystem::path const& p) {
     return p;
 }
 
+std::string env_value(std::string_view name) {
+    auto key = std::string{name};
+    if (auto const* value = std::getenv(key.c_str()); value && *value)
+        return value;
+    return {};
+}
+
+std::string lowercase_ascii(std::string_view value) {
+    auto text = std::string{value};
+    std::ranges::transform(text, text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return text;
+}
+
+toolchain::CompilerKind classify_compiler(std::string_view candidate) {
+    if (candidate.empty())
+        return toolchain::CompilerKind::unknown;
+
+    auto name = lowercase_ascii(std::filesystem::path{std::string{candidate}}.filename().string());
+    if (name == "clang-cl" || name == "clang-cl.exe")
+        return toolchain::CompilerKind::clang_cl;
+    if (name == "cl" || name == "cl.exe")
+        return toolchain::CompilerKind::msvc_cl;
+    if (name == "clang++" || name == "clang++.exe" ||
+        name == "clang" || name == "clang.exe")
+        return toolchain::CompilerKind::clang;
+    return toolchain::CompilerKind::other;
+}
+
+void capture_compiler_environment(toolchain::Toolchain& tc) {
+    tc.env_cc = env_value("CC");
+    tc.env_cxx = env_value("CXX");
+    auto const& env_compiler = !tc.env_cxx.empty() ? tc.env_cxx : tc.env_cc;
+    if (!env_compiler.empty()) {
+        tc.compiler_from_environment = true;
+        tc.compiler_kind = classify_compiler(env_compiler);
+    }
+}
+
+void finalize_compiler_provenance(toolchain::Toolchain& tc) {
+    if (tc.compiler_from_environment)
+        return;
+    if (!tc.cxx_compiler.empty()) {
+        tc.compiler_kind = classify_compiler(tc.cxx_compiler);
+        return;
+    }
+    if (tc.is_msvc)
+        tc.compiler_kind = toolchain::CompilerKind::msvc_cl;
+}
+
 // detect MSVC cl.exe (Windows). If the developer environment is already
 // loaded (vcvars64.bat), use it directly. Otherwise, locate Visual Studio
 // via vswhere.exe, run vcvars64.bat, capture the resulting environment
@@ -109,6 +160,7 @@ void detect_msvc(toolchain::Toolchain& tc) {
     if (cl != "cl.exe") {
         auto include = std::getenv("INCLUDE");
         if (include && *include) {
+            tc.has_msvc_developer_env = true;
             tc.is_msvc = true;
             tc.native_import_std = true;
             return;
@@ -165,6 +217,7 @@ void detect_msvc(toolchain::Toolchain& tc) {
     env_file.close();
     std::filesystem::remove(tmp_env);
 
+    tc.has_msvc_developer_env = true;
     tc.is_msvc = true;
     tc.native_import_std = true;
 #else
@@ -309,6 +362,7 @@ std::string detect_wasm_runtime() {
 
 toolchain::Toolchain detect() {
     toolchain::Toolchain tc;
+    detail::capture_compiler_environment(tc);
 
     // cmake: intron -> PATH
     auto intron_cmake = detail::find_intron_latest("cmake");
@@ -342,6 +396,7 @@ toolchain::Toolchain detect() {
     detail::detect_msvc(tc);
     if (!tc.is_msvc)
         detail::detect_clang(tc);
+    detail::finalize_compiler_provenance(tc);
 
     // detect macOS sysroot
 #if defined(__APPLE__)

@@ -25,6 +25,7 @@ struct BuildRequest {
     std::vector<fetch::FetchedDep> portable_deps;
     bool release = false;
     bool with_tests = false;
+    bool module_aware = false;
     bool configured = false;
     bool any_cmake_deps = false;
     std::string wasm_toolchain_file;
