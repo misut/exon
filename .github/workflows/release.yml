@@ -157,6 +157,68 @@ jobs:
             exon-*.zip
           generate_release_notes: true
 
+  self-bump:
+    needs: [release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          token: ${{ secrets.BUMP_BOT_TOKEN }}
+
+      - name: Resolve version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Detect current version
+        id: old
+        run: |
+          OLD=$(grep "vfox:misut/mise-exon" mise.toml \
+            | grep -oP '= "\K[0-9]+\.[0-9]+\.[0-9]+')
+          echo "version=$OLD" >> "$GITHUB_OUTPUT"
+
+      - name: Update mise.toml
+        run: |
+          OLD="${{ steps.old.outputs.version }}"
+          sed -i "s|\"vfox:misut/mise-exon\" = \"${OLD}\"|\"vfox:misut/mise-exon\" = \"${VERSION}\"|" mise.toml
+
+      - name: Regenerate CMakeLists.txt
+        run: |
+          gh release download "v${VERSION}" -R misut/exon -p "exon-*-x86_64-linux-gnu.tar.gz"
+          tar xzf exon-*.tar.gz && rm exon-*.tar.gz
+          chmod +x exon && mv exon /usr/local/bin/
+          exon sync
+        env:
+          GH_TOKEN: ${{ secrets.BUMP_BOT_TOKEN }}
+
+      - name: Create and auto-merge PR
+        run: |
+          BRANCH="chore/bump-exon-v${VERSION}"
+          git checkout -b "$BRANCH"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes detected"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --author "misut <pkr5207@gmail.com>" -m "chore: bump exon to v${VERSION}"
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git push --force origin "HEAD:$BRANCH"
+          else
+            git push origin "$BRANCH"
+          fi
+          PR_URL=$(gh pr list --head "$BRANCH" --state open --json url --jq '.[0].url // empty')
+          if [ -z "$PR_URL" ]; then
+            PR_URL=$(gh pr create \
+              --title "chore: bump exon to v${VERSION}" \
+              --body "Automated bump triggered by [exon v${VERSION}](https://github.com/misut/exon/releases/tag/v${VERSION})." \
+              --base main \
+              --head "$BRANCH")
+          fi
+          gh pr merge "$PR_URL" --auto --squash --delete-branch
+        env:
+          GH_TOKEN: ${{ secrets.BUMP_BOT_TOKEN }}
+
   notify:
     needs: [release]
     runs-on: ubuntu-latest
