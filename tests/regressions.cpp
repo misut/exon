@@ -55,6 +55,18 @@ std::optional<std::string> read_if_exists(std::filesystem::path const& path) {
     return text;
 }
 
+std::vector<std::string> read_lines(std::filesystem::path const& path) {
+    auto file = std::ifstream{path};
+    auto lines = std::vector<std::string>{};
+    for (std::string line; std::getline(file, line);) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+            line.pop_back();
+        if (!line.empty())
+            lines.push_back(std::move(line));
+    }
+    return lines;
+}
+
 void set_env_var(std::string_view name, std::string_view value) {
 #if defined(_WIN32)
     auto assignment = std::format("{}={}", name, value);
@@ -93,17 +105,36 @@ struct EnvVarGuard {
 
 std::string portable_intron_config() {
     return R"([toolchain]
-cmake = "4.3.1"
-ninja = "1.13.2"
+cmake = "4.3.1-test"
+ninja = "1.13.2-test"
 
 [toolchain.macos]
-llvm = "22.1.2"
+llvm = "22.1.2-macos-test"
 
 [toolchain.linux]
-llvm = "22.1.2"
+llvm = "22.1.2-linux-test"
 
 [toolchain.windows]
-msvc = "2022"
+msvc = "2022-test"
+)";
+}
+
+std::string legacy_windows_intron_config() {
+    return R"([toolchain]
+llvm = "22.1.2-legacy-test"
+cmake = "4.3.1-test"
+ninja = "1.13.2-test"
+)";
+}
+
+std::string explicit_windows_llvm_config() {
+    return R"([toolchain]
+llvm = "22.1.2-legacy-test"
+cmake = "4.3.1-test"
+ninja = "1.13.2-test"
+
+[toolchain.windows]
+llvm = "22.1.2-windows-test"
 )";
 }
 
@@ -120,12 +151,12 @@ int maybe_run_fake_intron(int argc, char* argv[]) {
     }
 
     {
-        auto file = std::ofstream{"intron-args.txt"};
-        file << args.str();
+        auto file = std::ofstream{"intron-args.txt", std::ios::app};
+        file << args.str() << '\n';
     }
     {
-        auto file = std::ofstream{"intron-cwd.txt"};
-        file << std::filesystem::current_path().string();
+        auto file = std::ofstream{"intron-cwd.txt", std::ios::app};
+        file << std::filesystem::current_path().string() << '\n';
     }
     return 0;
 }
@@ -152,36 +183,82 @@ void write_fake_intron(TmpProject& proj) {
 #endif
 }
 
-void test_portable_intron_config_uses_intron_install_from_project_root() {
-    TmpProject proj;
-    proj.write(".intron.toml", portable_intron_config());
-    write_fake_intron(proj);
-
-    EnvVarGuard path_guard{"PATH"};
+void prepend_fake_intron_to_path(TmpProject& proj) {
     auto fake_path = (proj.root / "bin").string();
-    if (path_guard.original && !path_guard.original->empty()) {
+    if (auto* current = std::getenv("PATH"); current && *current) {
 #if defined(_WIN32)
         fake_path += ";";
 #else
         fake_path += ":";
 #endif
-        fake_path += *path_guard.original;
+        fake_path += current;
     }
     set_env_var("PATH", fake_path);
+}
+
+void isolate_intron_home(TmpProject& proj) {
+    set_env_var("USERPROFILE", proj.root.string());
+    set_env_var("HOME", proj.root.string());
+}
+
+void check_same_cwd(std::vector<std::string> const& actual, std::filesystem::path const& expected,
+                    std::string_view message) {
+    auto expected_cwd = std::filesystem::weakly_canonical(expected);
+    check(!actual.empty(), message);
+    for (auto const& line : actual) {
+        auto actual_cwd = std::filesystem::weakly_canonical(std::filesystem::path{line});
+        check(actual_cwd == expected_cwd, message);
+    }
+}
+
+void check_contains(std::vector<std::string> const& values, std::string_view needle,
+                    std::string_view message) {
+    check(std::ranges::find(values, std::string{needle}) != values.end(), message);
+}
+
+void check_not_contains(std::vector<std::string> const& values, std::string_view needle,
+                        std::string_view message) {
+    check(std::ranges::find(values, std::string{needle}) == values.end(), message);
+}
+
+void test_portable_intron_config_installs_host_tools_from_project_root() {
+    TmpProject proj;
+    proj.write(".intron.toml", portable_intron_config());
+    write_fake_intron(proj);
+
+    EnvVarGuard path_guard{"PATH"};
+    EnvVarGuard home_guard{"USERPROFILE"};
+    EnvVarGuard home_env_guard{"HOME"};
+    prepend_fake_intron_to_path(proj);
+    isolate_intron_home(proj);
 
     build::system::detail::ensure_intron_tools(proj.root);
 
-    auto args = read_if_exists(proj.root / "intron-args.txt");
-    auto cwd = read_if_exists(proj.root / "intron-cwd.txt");
-    check(args.has_value(), "portable intron config: intron install invoked");
-    check(cwd.has_value(), "portable intron config: intron ran in project root");
-    check(args && args->find("install") != std::string::npos,
-          "portable intron config: intron install argument passed");
-    auto expected_cwd = std::filesystem::weakly_canonical(proj.root);
-    auto actual_cwd = cwd ? std::filesystem::weakly_canonical(std::filesystem::path{*cwd})
-                          : std::filesystem::path{};
-    check(cwd && actual_cwd == expected_cwd,
-          "portable intron config: ProcessSpec.cwd set to project root");
+    auto args = read_lines(proj.root / "intron-args.txt");
+    auto cwd = read_lines(proj.root / "intron-cwd.txt");
+    check_same_cwd(cwd, proj.root,
+                   "portable intron config: every intron install runs in project root");
+    check_contains(args, "install cmake 4.3.1-test",
+                   "portable intron config: installs shared cmake");
+    check_contains(args, "install ninja 1.13.2-test",
+                   "portable intron config: installs shared ninja");
+#if defined(_WIN32)
+    check_contains(args, "install msvc 2022-test",
+                   "portable intron config: installs windows msvc");
+    check_not_contains(args, "install llvm 22.1.2-linux-test",
+                       "portable intron config: skips linux llvm on windows");
+    check_not_contains(args, "install llvm 22.1.2-macos-test",
+                       "portable intron config: skips macos llvm on windows");
+    check(args.size() == 3, "portable intron config: installs exactly three windows tools");
+#elif defined(__APPLE__)
+    check_contains(args, "install llvm 22.1.2-macos-test",
+                   "portable intron config: installs macos llvm");
+    check(args.size() == 3, "portable intron config: installs exactly three macos tools");
+#elif defined(__linux__)
+    check_contains(args, "install llvm 22.1.2-linux-test",
+                   "portable intron config: installs linux llvm");
+    check(args.size() == 3, "portable intron config: installs exactly three linux tools");
+#endif
 }
 
 void test_portable_intron_config_skips_when_intron_missing() {
@@ -199,6 +276,56 @@ void test_portable_intron_config_skips_when_intron_missing() {
     check(!std::filesystem::exists(proj.root / "intron-cwd.txt"),
           "portable intron config: missing intron leaves no marker");
 }
+
+#if defined(_WIN32)
+void test_windows_legacy_common_llvm_is_skipped() {
+    TmpProject proj;
+    proj.write(".intron.toml", legacy_windows_intron_config());
+    write_fake_intron(proj);
+
+    EnvVarGuard path_guard{"PATH"};
+    EnvVarGuard home_guard{"USERPROFILE"};
+    EnvVarGuard home_env_guard{"HOME"};
+    prepend_fake_intron_to_path(proj);
+    isolate_intron_home(proj);
+
+    build::system::detail::ensure_intron_tools(proj.root);
+
+    auto args = read_lines(proj.root / "intron-args.txt");
+    check_contains(args, "install cmake 4.3.1-test",
+                   "windows legacy config: installs cmake");
+    check_contains(args, "install ninja 1.13.2-test",
+                   "windows legacy config: installs ninja");
+    check_not_contains(args, "install llvm 22.1.2-legacy-test",
+                       "windows legacy config: skips common llvm");
+    check(args.size() == 2, "windows legacy config: installs exactly non-llvm tools");
+}
+
+void test_windows_explicit_llvm_override_is_installed() {
+    TmpProject proj;
+    proj.write(".intron.toml", explicit_windows_llvm_config());
+    write_fake_intron(proj);
+
+    EnvVarGuard path_guard{"PATH"};
+    EnvVarGuard home_guard{"USERPROFILE"};
+    EnvVarGuard home_env_guard{"HOME"};
+    prepend_fake_intron_to_path(proj);
+    isolate_intron_home(proj);
+
+    build::system::detail::ensure_intron_tools(proj.root);
+
+    auto args = read_lines(proj.root / "intron-args.txt");
+    check_contains(args, "install cmake 4.3.1-test",
+                   "windows override config: installs cmake");
+    check_contains(args, "install ninja 1.13.2-test",
+                   "windows override config: installs ninja");
+    check_contains(args, "install llvm 22.1.2-windows-test",
+                   "windows override config: installs explicit windows llvm");
+    check_not_contains(args, "install llvm 22.1.2-legacy-test",
+                       "windows override config: skips legacy common llvm");
+    check(args.size() == 3, "windows override config: installs explicit host tools");
+}
+#endif
 
 struct TmpGitRepo {
     std::filesystem::path root;
@@ -399,8 +526,12 @@ int main(int argc, char* argv[]) {
 #if !defined(_WIN32)
     test_portable_windows_asan_helper_configures_on_non_windows();
 #endif
-    test_portable_intron_config_uses_intron_install_from_project_root();
+    test_portable_intron_config_installs_host_tools_from_project_root();
     test_portable_intron_config_skips_when_intron_missing();
+#if defined(_WIN32)
+    test_windows_legacy_common_llvm_is_skipped();
+    test_windows_explicit_llvm_override_is_installed();
+#endif
     test_run_process_returns_child_exit_code();
     test_system_run_process_honors_cwd();
     test_fetch_and_generate_cmake_root_override_fixture();
