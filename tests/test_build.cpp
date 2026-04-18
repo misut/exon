@@ -535,6 +535,67 @@ void test_plan_build_emits_write_and_steps() {
           "plan build: success message matches profile");
 }
 
+void test_plan_build_uses_host_manifest_for_exon_and_raw_manifest_for_root_sync() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() { return 0; }\n");
+
+    manifest::Manifest raw_m;
+    raw_m.name = "app";
+    raw_m.version = "1.0.0";
+    raw_m.type = "bin";
+    raw_m.standard = 23;
+
+    manifest::TargetSection ts_linux;
+    ts_linux.predicate = "cfg(os = \"linux\")";
+    ts_linux.build.cxxflags = {"-fsanitize=address,undefined"};
+    raw_m.target_sections.push_back(std::move(ts_linux));
+
+    manifest::TargetSection ts_windows;
+    ts_windows.predicate = "cfg(os = \"windows\")";
+    ts_windows.build.cxxflags = {"/fsanitize=address"};
+    raw_m.target_sections.push_back(std::move(ts_windows));
+
+    auto resolved_m = manifest::resolve_for_platform(
+        raw_m, toolchain::make_platform("windows", "x86_64"));
+
+    build::BuildRequest request{
+        .project = build::project_context(proj.root),
+        .manifest = resolved_m,
+        .portable_manifest = raw_m,
+        .toolchain = make_tc(),
+        .portable_deps = {},
+    };
+
+    auto plan = build::plan_build(request);
+
+    auto write_content = [&](std::filesystem::path const& path) -> std::string {
+        auto it = std::ranges::find_if(plan.writes, [&](auto const& write) {
+            return write.text.path == path;
+        });
+        if (it == plan.writes.end())
+            return {};
+        return it->text.content;
+    };
+
+    auto exon_cmake = write_content(request.project.exon_dir / "CMakeLists.txt");
+    auto root_cmake = write_content(proj.root / "CMakeLists.txt");
+
+    check(exon_cmake.contains("/fsanitize=address"),
+          "plan build: exon cmake keeps host-resolved windows flag");
+    check(!exon_cmake.contains("CMAKE_SYSTEM_NAME STREQUAL \"Linux\""),
+          "plan build: exon cmake skips portable linux block");
+    check(root_cmake.contains("if(CMAKE_SYSTEM_NAME STREQUAL \"Linux\")"),
+          "plan build: root sync keeps linux conditional block");
+    check(root_cmake.contains("if(WIN32)"),
+          "plan build: root sync keeps windows conditional block");
+    check(root_cmake.contains("-fsanitize=address,undefined"),
+          "plan build: root sync keeps linux flag");
+    check(root_cmake.contains("/fsanitize=address"),
+          "plan build: root sync keeps windows flag");
+    check(!root_cmake.contains("target_compile_options(app PRIVATE\n    /fsanitize=address\n)"),
+          "plan build: root sync does not flatten host windows flag");
+}
+
 void test_plan_test_emits_filtered_targets_and_run_steps() {
     TmpProject proj;
     proj.write("src/main.cpp", "int main() { return 0; }\n");
@@ -1443,6 +1504,8 @@ int main() {
     run("test_build_command_wasm_keeps_default_parallelism",
         test_build_command_wasm_keeps_default_parallelism);
     run("test_plan_build_emits_write_and_steps", test_plan_build_emits_write_and_steps);
+    run("test_plan_build_uses_host_manifest_for_exon_and_raw_manifest_for_root_sync",
+        test_plan_build_uses_host_manifest_for_exon_and_raw_manifest_for_root_sync);
     run("test_plan_test_emits_filtered_targets_and_run_steps",
         test_plan_test_emits_filtered_targets_and_run_steps);
     run("test_stale_self_host_bootstrap_message_for_macos_exon_repo",

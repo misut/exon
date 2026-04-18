@@ -276,6 +276,7 @@ int cmd_info() {
 
 using BuildFn = std::function<int(std::filesystem::path const&,
                                   manifest::Manifest const&,
+                                  manifest::Manifest const&,
                                   bool,
                                   std::string_view)>;
 
@@ -285,22 +286,22 @@ int run_build_command(int argc, char* argv[], BuildFn fn) {
         auto release = args.has("--release");
         auto target = std::string{args.get("--target")};
         auto project_root = std::filesystem::current_path();
-        auto m = load_manifest(project_root);
-        if (!check_platform(m, target))
+        auto raw_m = load_manifest(project_root);
+        if (!check_platform(raw_m, target))
             return 1;
-        m = resolve_manifest(std::move(m), target);
-        if (manifest::is_workspace(m)) {
-            return run_for_workspace(project_root, m, [&](auto const& member_path) {
-                auto member_m = load_manifest(member_path);
-                if (!check_platform(member_m, target))
+        auto m = resolve_manifest(raw_m, target);
+        if (manifest::is_workspace(raw_m)) {
+            return run_for_workspace(project_root, raw_m, [&](auto const& member_path) {
+                auto raw_member = load_manifest(member_path);
+                if (!check_platform(raw_member, target))
                     return 1;
-                member_m = resolve_manifest(std::move(member_m), target);
-                return fn(member_path, member_m, release, target);
+                auto member_m = resolve_manifest(raw_member, target);
+                return fn(member_path, raw_member, member_m, release, target);
             });
         }
         if (m.name.empty())
             return command_error("package name is required in exon.toml");
-        return fn(project_root, m, release, target);
+        return fn(project_root, raw_m, m, release, target);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
@@ -310,21 +311,24 @@ int run_build_command(int argc, char* argv[], BuildFn fn) {
 int cmd_build(int argc, char* argv[]) {
     return run_build_command(argc, argv,
                              [](std::filesystem::path const& project_root,
+                                manifest::Manifest const& raw_m,
                                 manifest::Manifest const& m,
                                 bool release,
                                 std::string_view target) {
-                                 return build::system::run(project_root, m, release, target);
+                                 return build::system::run(project_root, m, raw_m, release,
+                                                           target);
                              });
 }
 
 int cmd_check(int argc, char* argv[]) {
     return run_build_command(argc, argv,
                              [](std::filesystem::path const& project_root,
+                                manifest::Manifest const& raw_m,
                                 manifest::Manifest const& m,
                                 bool release,
                                 std::string_view target) {
-                                 return build::system::run_check(project_root, m, release,
-                                                                 target);
+                                 return build::system::run_check(project_root, m, raw_m,
+                                                                 release, target);
                              });
 }
 
@@ -334,16 +338,16 @@ int cmd_run(int argc, char* argv[]) {
         auto release = args.has("--release");
         auto target = std::string{args.get("--target")};
         auto project_root = std::filesystem::current_path();
-        auto m = load_manifest(project_root);
-        if (!check_platform(m, target))
+        auto raw_m = load_manifest(project_root);
+        if (!check_platform(raw_m, target))
             return 1;
-        m = resolve_manifest(std::move(m), target);
+        auto m = resolve_manifest(raw_m, target);
         if (m.name.empty())
             return command_error("package name is required in exon.toml");
         if (m.type == "lib")
             return command_error("cannot run a library package");
         bool is_wasm = !target.empty();
-        int rc = build::system::run(project_root, m, release, target);
+        int rc = build::system::run(project_root, m, raw_m, release, target);
         if (rc != 0)
             return rc;
 
@@ -387,23 +391,24 @@ int cmd_test(int argc, char* argv[]) {
         auto filter = std::string{args.get("--filter")};
         auto timeout = parse_timeout(args.get("--timeout"));
         auto project_root = std::filesystem::current_path();
-        auto m = load_manifest(project_root);
-        if (!check_platform(m, target))
+        auto raw_m = load_manifest(project_root);
+        if (!check_platform(raw_m, target))
             return 1;
-        m = resolve_manifest(std::move(m), target);
-        if (manifest::is_workspace(m)) {
-            return run_for_workspace(project_root, m, [&](auto const& member_path) {
-                auto member_m = load_manifest(member_path);
-                if (!check_platform(member_m, target))
+        auto m = resolve_manifest(raw_m, target);
+        if (manifest::is_workspace(raw_m)) {
+            return run_for_workspace(project_root, raw_m, [&](auto const& member_path) {
+                auto raw_member = load_manifest(member_path);
+                if (!check_platform(raw_member, target))
                     return 1;
-                member_m = resolve_manifest(std::move(member_m), target);
-                return build::system::run_test(member_path, member_m, release, target, filter,
-                                               timeout);
+                auto member_m = resolve_manifest(raw_member, target);
+                return build::system::run_test(member_path, member_m, raw_member, release,
+                                               target, filter, timeout);
             });
         }
         if (m.name.empty())
             return command_error("package name is required in exon.toml");
-        return build::system::run_test(project_root, m, release, target, filter, timeout);
+        return build::system::run_test(project_root, m, raw_m, release, target, filter,
+                                       timeout);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
