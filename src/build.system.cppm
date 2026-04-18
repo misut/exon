@@ -1,5 +1,6 @@
 export module build.system;
 import std;
+import toml;
 import build;
 import core;
 import cppx.env.system;
@@ -68,6 +69,52 @@ bool apply_writes(std::vector<core::FileWrite> const& writes) {
     return changed;
 }
 
+std::optional<std::string_view> host_toolchain_section() {
+#if defined(_WIN32)
+    return "windows";
+#elif defined(__APPLE__)
+    return "macos";
+#elif defined(__linux__)
+    return "linux";
+#else
+    return std::nullopt;
+#endif
+}
+
+void merge_intron_tools(std::map<std::string, std::string>& resolved,
+                        toml::Table const& tools,
+                        bool skip_common_windows_llvm = false) {
+    for (auto const& [tool, value] : tools) {
+        if (!value.is_string())
+            continue;
+#if defined(_WIN32)
+        if (skip_common_windows_llvm && tool == "llvm")
+            continue;
+#else
+        (void)skip_common_windows_llvm;
+#endif
+        resolved[tool] = value.as_string();
+    }
+}
+
+std::map<std::string, std::string> resolve_intron_tools(std::filesystem::path const& intron_toml) {
+    auto table = toml::parse_file(intron_toml.string());
+    if (!table.contains("toolchain") || !table.at("toolchain").is_table())
+        return {};
+
+    auto resolved = std::map<std::string, std::string>{};
+    auto const& root = table.at("toolchain").as_table();
+    merge_intron_tools(resolved, root, true);
+
+    if (auto host = host_toolchain_section()) {
+        auto host_key = std::string{*host};
+        if (root.contains(host_key) && root.at(host_key).is_table())
+            merge_intron_tools(resolved, root.at(host_key).as_table());
+    }
+
+    return resolved;
+}
+
 void ensure_intron_tools(std::filesystem::path const& project_root) {
     auto intron_toml = project_root / ".intron.toml";
     if (!std::filesystem::exists(intron_toml))
@@ -77,23 +124,36 @@ void ensure_intron_tools(std::filesystem::path const& project_root) {
     if (!intron)
         return;
 
-    core::ProcessSpec spec{
-        .program = intron->string(),
-        .args = {"install"},
-        .cwd = project_root,
-    };
+    auto home = toolchain::system::home_dir();
+    if (home.empty())
+        return;
+    auto intron_root = home / ".intron" / "toolchains";
 
-    try {
-        auto result = run_process(spec);
-        if (result.exit_code != 0) {
+    auto tools = resolve_intron_tools(intron_toml);
+    for (auto const& [tool, version] : tools) {
+        auto tool_path = intron_root / tool / version;
+        if (std::filesystem::exists(tool_path))
+            continue;
+
+        std::println("installing {} {}...", tool, version);
+        core::ProcessSpec spec{
+            .program = intron->string(),
+            .args = {"install", tool, version},
+            .cwd = project_root,
+        };
+
+        try {
+            auto result = run_process(spec);
+            if (result.exit_code != 0) {
+                std::println(std::cerr,
+                             "warning: 'intron install {} {}' exited with code {} in {}",
+                             tool, version, result.exit_code, project_root.string());
+            }
+        } catch (std::exception const& e) {
             std::println(std::cerr,
-                         "warning: 'intron install' exited with code {} in {}",
-                         result.exit_code, project_root.string());
+                         "warning: failed to run 'intron install {} {}' in {}: {}",
+                         tool, version, project_root.string(), e.what());
         }
-    } catch (std::exception const& e) {
-        std::println(std::cerr,
-                     "warning: failed to run 'intron install' in {}: {}",
-                     project_root.string(), e.what());
     }
 }
 
