@@ -83,7 +83,7 @@ hello, world!
 | `exon build [--release] [--target <t>] [--member a,b] [--exclude x,y] [--output raw\|wrapped]` | Build the project or selected workspace members |
 | `exon check [--release] [--target <t>] [--member a,b] [--exclude x,y]` | Check syntax without linking |
 | `exon run [--release] [--target <t>] [--member <name>]` | Build and run |
-| `exon debug [--release] [--debugger auto\|lldb\|gdb\|<path>] [--member <name>] [--exclude x,y] [-- <args...>]` | Build and open the selected native executable in LLDB or GDB |
+| `exon debug [--release] [--debugger auto\|lldb\|gdb\|devenv\|cdb\|<path>] [--member <name>] [--exclude x,y] [-- <args...>]` | Build and open the selected native executable in a native debugger |
 | `exon test [--release] [--target <t>] [--member a,b] [--exclude x,y] [--timeout <sec>] [--output raw\|wrapped] [--show-output failed\|all\|none]` | Build and run tests |
 | `exon clean [--member a,b] [--exclude x,y]` | Remove build artifacts |
 | `exon add [--dev] <pkg> <ver>` | Add a git dependency |
@@ -98,7 +98,7 @@ hello, world!
 
 ### Native debugging
 
-`exon debug` is a native-only convenience launcher for CLI debuggers. In v1 it supports host executables only and does not support `--target wasm32-wasi` yet.
+`exon debug` is a native-only convenience launcher for host debuggers. It supports host executables only and does not support `--target wasm32-wasi` yet.
 
 ```sh
 exon debug
@@ -110,12 +110,19 @@ exon debug --debugger gdb -- input.txt
 
 - macOS: `lldb`, then `gdb`
 - Linux: `gdb`, then `lldb`
-- Windows: `lldb`, then `gdb`
+- Windows: `devenv`, then `cdb`, then `lldb`, then `gdb`
 
 Debugger invocation follows the debugger's native CLI syntax:
 
+- Visual Studio: `devenv /debugexe <executable> <args...>`
+- CDB: `cdb <executable> <args...>`
 - LLDB: `lldb -- <executable> <args...>`
 - GDB: `gdb --args <executable> <args...>`
+
+Windows-specific notes:
+
+- `devenv` and `cdb` are only supported on Windows hosts.
+- `devenv /debugexe` can misinterpret program arguments that start with `/` as Visual Studio switches. When that happens, `exon debug --debugger devenv` fails early with a targeted error, and `--debugger auto` skips `devenv` and falls back to the next supported debugger on `PATH`.
 
 ## exon.toml
 
