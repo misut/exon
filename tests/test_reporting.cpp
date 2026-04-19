@@ -11,14 +11,20 @@ void check(bool cond, std::string_view msg) {
 }
 
 void test_parse_output_mode() {
+    check(reporting::parse_output_mode("human") == reporting::OutputMode::human,
+          "parse output human");
     check(reporting::parse_output_mode("raw") == reporting::OutputMode::raw,
           "parse output raw");
     check(reporting::parse_output_mode("wrapped") == reporting::OutputMode::wrapped,
           "parse output wrapped");
-    check(!reporting::parse_output_mode("human").has_value(),
-          "parse output rejects human");
     check(!reporting::parse_output_mode("verbose").has_value(),
           "parse output rejects unknown");
+}
+
+void test_default_output_mode() {
+    reporting::Options options;
+    check(options.output == reporting::OutputMode::human,
+          "default output mode is human");
 }
 
 void test_parse_show_output() {
@@ -33,6 +39,9 @@ void test_parse_show_output() {
 }
 
 void test_stream_mode_for_output_mode() {
+    check(reporting::stream_mode_for(reporting::OutputMode::human) ==
+              reporting::StreamMode::capture,
+          "human uses capture");
     check(reporting::stream_mode_for(reporting::OutputMode::raw) ==
               reporting::StreamMode::passthrough,
           "raw uses passthrough");
@@ -62,6 +71,7 @@ void test_format_duration() {
 int main() {
     std::cout << "test_reporting:\n";
     test_parse_output_mode();
+    test_default_output_mode();
     test_parse_show_output();
     test_stream_mode_for_output_mode();
     test_should_show_output();

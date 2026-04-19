@@ -163,6 +163,15 @@ void test_commands_usage_lists_debug() {
           "usage lists debug command");
 }
 
+void test_commands_usage_lists_human_output_mode() {
+    auto usage = commands::usage_text();
+    check(usage.find("[--output human|wrapped|raw]") != std::string::npos,
+          "usage lists human output mode");
+    check(usage.find("[--output human|wrapped|raw] [--show-output failed|all|none]") !=
+              std::string::npos,
+          "usage lists human output mode for test");
+}
+
 int main() {
     std::println("test_cli:");
 
@@ -179,6 +188,7 @@ int main() {
     test_parse_mixed();
     test_parse_debugger_option_with_separator();
     test_commands_usage_lists_debug();
+    test_commands_usage_lists_human_output_mode();
 
     if (failures > 0) {
         std::println("test_cli: {} FAILED", failures);

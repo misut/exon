@@ -4,6 +4,7 @@ import std;
 export namespace reporting {
 
 enum class OutputMode {
+    human,
     raw,
     wrapped,
 };
@@ -21,7 +22,7 @@ enum class StreamMode {
 };
 
 struct Options {
-    OutputMode output = OutputMode::raw;
+    OutputMode output = OutputMode::human;
     ShowOutput show_output = ShowOutput::failed;
 };
 
@@ -34,6 +35,8 @@ struct ProcessResult {
 };
 
 std::optional<OutputMode> parse_output_mode(std::string_view value) {
+    if (value == "human")
+        return OutputMode::human;
     if (value == "raw")
         return OutputMode::raw;
     if (value == "wrapped")
@@ -53,6 +56,8 @@ std::optional<ShowOutput> parse_show_output(std::string_view value) {
 
 std::string_view to_string(OutputMode mode) {
     switch (mode) {
+    case OutputMode::human:
+        return "human";
     case OutputMode::raw:
         return "raw";
     case OutputMode::wrapped:
@@ -75,6 +80,8 @@ std::string_view to_string(ShowOutput mode) {
 
 StreamMode stream_mode_for(OutputMode mode) {
     switch (mode) {
+    case OutputMode::human:
+        return StreamMode::capture;
     case OutputMode::raw:
         return StreamMode::passthrough;
     case OutputMode::wrapped:

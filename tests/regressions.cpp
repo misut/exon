@@ -1,6 +1,7 @@
 import std;
 import build;
 import build.system;
+import commands;
 import core;
 import fetch;
 import fetch.system;
@@ -42,7 +43,7 @@ struct TmpProject {
     void write(std::string const& rel_path, std::string const& content) {
         auto path = root / rel_path;
         std::filesystem::create_directories(path.parent_path());
-        auto file = std::ofstream{path};
+        auto file = std::ofstream{path, std::ios::binary};
         file << content;
     }
 };
@@ -160,6 +161,304 @@ int maybe_run_fake_intron(int argc, char* argv[]) {
         file << std::filesystem::current_path().string() << '\n';
     }
     return 0;
+}
+
+struct CwdGuard {
+    std::filesystem::path previous;
+
+    explicit CwdGuard(std::filesystem::path const& next)
+        : previous(std::filesystem::current_path()) {
+        std::filesystem::current_path(next);
+    }
+
+    ~CwdGuard() { std::filesystem::current_path(previous); }
+};
+
+int run_command(auto fn, std::vector<std::string> const& args) {
+    auto argv = std::vector<char*>{};
+    argv.reserve(args.size());
+    for (auto const& arg : args)
+        argv.push_back(const_cast<char*>(arg.c_str()));
+    return fn(static_cast<int>(argv.size()), argv.data());
+}
+
+core::ProcessSpec shell_spec(std::filesystem::path const& cwd, std::string body,
+                             std::optional<std::chrono::milliseconds> timeout = {}) {
+#if defined(_WIN32)
+    return {
+        .program = "cmd",
+        .args = {"/c", std::move(body)},
+        .cwd = cwd,
+        .timeout = timeout,
+    };
+#else
+    return {
+        .program = "sh",
+        .args = {"-c", std::move(body)},
+        .cwd = cwd,
+        .timeout = timeout,
+    };
+#endif
+}
+
+build::BuildRequest make_mock_request(std::filesystem::path const& root,
+                                      std::string_view name,
+                                      bool configured = false) {
+    std::filesystem::create_directories(root / ".exon" / "debug");
+    build::BuildRequest request;
+    request.project = {
+        .root = root,
+        .exon_dir = root / ".exon",
+        .build_dir = root / ".exon" / "debug",
+        .profile = "debug",
+        .target = {},
+        .is_wasm = false,
+    };
+    request.manifest.name = std::string{name};
+    request.configured = configured;
+    return request;
+}
+
+reporting::ProcessResult run_self_fixture(std::string_view fixture_name) {
+    auto spec = core::ProcessSpec{
+        .program = self_executable_path.string(),
+        .args = {"--fixture", std::string{fixture_name}},
+        .cwd = std::filesystem::current_path(),
+    };
+    return reporting::system::run_process(spec, reporting::StreamMode::capture);
+}
+
+int run_build_output_fixture(std::string_view scenario) {
+    TmpProject proj;
+    auto request = make_mock_request(proj.root, "app", scenario == "build-cached");
+    auto plan = build::BuildPlan{
+        .project = request.project,
+        .configured = request.configured,
+    };
+
+    auto write_path = proj.root / ".exon" / "CMakeLists.txt";
+    if (scenario == "build-cached")
+        proj.write(".exon/CMakeLists.txt", "generated-build-files\n");
+    plan.writes.push_back({
+        .text = {
+            .path = write_path,
+            .content = "generated-build-files\n",
+        },
+    });
+
+#if defined(_WIN32)
+    auto configure_ok = shell_spec(proj.root,
+                                   "(echo configure-noisy-stdout & echo configure-noisy-stderr 1>&2 & exit 0)");
+    auto build_ok = shell_spec(proj.root,
+                               "(echo build-noisy-stdout & echo build-noisy-stderr 1>&2 & exit 0)");
+    auto build_fail = shell_spec(
+        proj.root,
+        "(echo build-error-prefix & echo build-error-tail 1>&2 & exit 9)");
+#else
+    auto configure_ok = shell_spec(
+        proj.root,
+        "printf 'configure-noisy-stdout\\n'; printf 'configure-noisy-stderr\\n' 1>&2");
+    auto build_ok = shell_spec(
+        proj.root,
+        "printf 'build-noisy-stdout\\n'; printf 'build-noisy-stderr\\n' 1>&2");
+    auto build_fail = shell_spec(
+        proj.root,
+        "printf 'build-error-prefix\\n'; printf 'build-error-tail\\n' 1>&2; exit 9");
+#endif
+
+    if (scenario != "build-cached") {
+        plan.configure_steps.push_back({
+            .spec = std::move(configure_ok),
+            .label = "configuring...",
+        });
+    }
+
+    plan.build_steps.push_back({
+        .spec = std::move(build_ok),
+        .label = "building...",
+    });
+    if (scenario == "build-failure")
+        plan.build_steps.back().spec = std::move(build_fail);
+
+    return build::system::detail::run_build_human(
+        request, plan, "build", std::chrono::steady_clock::now());
+}
+
+int run_test_output_fixture(reporting::ShowOutput show_output) {
+    TmpProject proj;
+    proj.write(".exon/CMakeLists.txt", "generated-build-files\n");
+    auto request = make_mock_request(proj.root, "app", true);
+    auto plan = build::BuildPlan{
+        .project = request.project,
+        .configured = true,
+    };
+    plan.writes.push_back({
+        .text = {
+            .path = proj.root / ".exon" / "CMakeLists.txt",
+            .content = "generated-build-files\n",
+        },
+    });
+
+#if defined(_WIN32)
+    auto build_ok = shell_spec(proj.root, "(echo hidden-build-output & exit 0)");
+    auto pass = shell_spec(proj.root, "(echo pass-output & exit 0)");
+    auto fail = shell_spec(proj.root, "(echo fail-stdout & echo fail-stderr 1>&2 & exit 3)");
+    auto timeout = shell_spec(proj.root, "ping -n 6 127.0.0.1 > nul",
+                              std::chrono::milliseconds{50});
+#else
+    auto build_ok = shell_spec(proj.root, "printf 'hidden-build-output\\n'");
+    auto pass = shell_spec(proj.root, "printf 'pass-output\\n'");
+    auto fail = shell_spec(proj.root,
+                           "printf 'fail-stdout\\n'; printf 'fail-stderr\\n' 1>&2; exit 3");
+    auto timeout = shell_spec(proj.root, "sleep 1", std::chrono::milliseconds{50});
+#endif
+
+    plan.build_steps.push_back({
+        .spec = std::move(build_ok),
+        .label = "building tests...",
+    });
+    plan.run_steps.push_back({
+        .spec = std::move(pass),
+        .label = "test-pass",
+    });
+    plan.run_steps.push_back({
+        .spec = std::move(fail),
+        .label = "test-fail",
+    });
+    plan.run_steps.push_back({
+        .spec = std::move(timeout),
+        .label = "test-timeout",
+    });
+
+    return build::system::detail::run_test_human(
+        request, plan, reporting::Options{.output = reporting::OutputMode::human,
+                                          .show_output = show_output},
+        std::chrono::steady_clock::now());
+}
+
+int run_wrapped_build_output_fixture() {
+    TmpProject proj;
+    auto request = make_mock_request(proj.root, "app", true);
+    auto plan = build::BuildPlan{
+        .project = request.project,
+        .configured = true,
+    };
+    plan.writes.push_back({
+        .text = {
+            .path = proj.root / ".exon" / "CMakeLists.txt",
+            .content = "generated-build-files\n",
+        },
+    });
+#if defined(_WIN32)
+    auto build_step = shell_spec(proj.root, "(echo wrapped-build-output & echo %NINJA_STATUS% & exit 0)");
+#else
+    auto build_step = shell_spec(proj.root, "printf 'wrapped-build-output\\n'; printf '%s\\n' \"$NINJA_STATUS\"");
+#endif
+    plan.build_steps.push_back({
+        .spec = std::move(build_step),
+        .label = "building...",
+    });
+    return build::system::detail::run_build_wrapped(
+        request, plan, "build", std::chrono::steady_clock::now());
+}
+
+int run_wrapped_test_output_fixture() {
+    TmpProject proj;
+    proj.write(".exon/CMakeLists.txt", "generated-build-files\n");
+    auto request = make_mock_request(proj.root, "app", true);
+    auto plan = build::BuildPlan{
+        .project = request.project,
+        .configured = true,
+    };
+    plan.writes.push_back({
+        .text = {
+            .path = proj.root / ".exon" / "CMakeLists.txt",
+            .content = "generated-build-files\n",
+        },
+    });
+#if defined(_WIN32)
+    auto pass = shell_spec(proj.root, "(echo wrapped-pass-output & exit 0)");
+    auto fail = shell_spec(proj.root, "(echo wrapped-fail-output & exit 4)");
+#else
+    auto pass = shell_spec(proj.root, "printf 'wrapped-pass-output\\n'");
+    auto fail = shell_spec(proj.root, "printf 'wrapped-fail-output\\n'; exit 4");
+#endif
+    plan.run_steps.push_back({.spec = std::move(pass), .label = "wrapped-pass"});
+    plan.run_steps.push_back({.spec = std::move(fail), .label = "wrapped-fail"});
+    return build::system::detail::run_test_wrapped(
+        request, plan, reporting::Options{.output = reporting::OutputMode::wrapped,
+                                          .show_output = reporting::ShowOutput::failed},
+        std::chrono::steady_clock::now());
+}
+
+void write_workspace_fixture(TmpProject& proj) {
+    proj.write("exon.toml", R"(
+[workspace]
+members = ["app"]
+)");
+    proj.write("app/exon.toml", R"(
+[package]
+name = "app"
+version = "0.1.0"
+type = "bin"
+standard = 23
+)");
+    proj.write("app/src/main.cpp", R"(import std;
+
+int main() {
+    std::println("hello workspace");
+    return 0;
+}
+)");
+    proj.write("app/tests/test_app.cpp", R"(import std;
+
+int main() {
+    std::println("workspace test");
+    return 0;
+}
+)");
+}
+
+int run_workspace_build_fixture() {
+    TmpProject proj;
+    write_workspace_fixture(proj);
+    auto guard = CwdGuard{proj.root};
+    return run_command(commands::cmd_build, {"exon", "build", "--output", "human"});
+}
+
+int run_workspace_test_fixture() {
+    TmpProject proj;
+    write_workspace_fixture(proj);
+    auto guard = CwdGuard{proj.root};
+    return run_command(commands::cmd_test, {"exon", "test", "--output", "human"});
+}
+
+int maybe_run_output_fixture(int argc, char* argv[]) {
+    if (argc < 3 || std::string_view{argv[1]} != "--fixture")
+        return -1;
+
+    auto fixture = std::string_view{argv[2]};
+    if (fixture == "build-success")
+        return run_build_output_fixture(fixture);
+    if (fixture == "build-cached")
+        return run_build_output_fixture(fixture);
+    if (fixture == "build-failure")
+        return run_build_output_fixture(fixture);
+    if (fixture == "test-show-failed")
+        return run_test_output_fixture(reporting::ShowOutput::failed);
+    if (fixture == "test-show-all")
+        return run_test_output_fixture(reporting::ShowOutput::all);
+    if (fixture == "test-show-none")
+        return run_test_output_fixture(reporting::ShowOutput::none);
+    if (fixture == "wrapped-build")
+        return run_wrapped_build_output_fixture();
+    if (fixture == "wrapped-test")
+        return run_wrapped_test_output_fixture();
+    if (fixture == "workspace-build")
+        return run_workspace_build_fixture();
+    if (fixture == "workspace-test")
+        return run_workspace_test_fixture();
+    return 2;
 }
 
 void write_fake_intron(TmpProject& proj) {
@@ -588,6 +887,139 @@ void test_reporting_timeout_marks_result() {
     check(result.exit_code == 124, "timeout: uses 124 exit code");
 }
 
+void test_human_build_success_output() {
+    auto result = run_self_fixture("build-success");
+    check(result.exit_code == 0, "human build success: exit code");
+    check(result.stdout_text.contains("==> sync"), "human build success: sync stage");
+    check(result.stdout_text.contains("generated build files"),
+          "human build success: sync summary");
+    check(result.stdout_text.contains("==> configure"), "human build success: configure stage");
+    check(!result.stdout_text.contains("configure-noisy-stdout"),
+          "human build success: hides configure chatter");
+    check(result.stdout_text.contains("==> build"), "human build success: build stage");
+    check(!result.stdout_text.contains("build-noisy-stdout"),
+          "human build success: hides build chatter");
+    check(result.stdout_text.contains("==> finish"), "human build success: finish stage");
+    check(result.stdout_text.contains("artifact"), "human build success: artifact reported");
+    check(result.stdout_text.contains(".exon/debug/app"),
+          "human build success: artifact path reported");
+    check(result.stdout_text.contains("elapsed"), "human build success: elapsed reported");
+}
+
+void test_human_build_cached_output() {
+    auto result = run_self_fixture("build-cached");
+    check(result.exit_code == 0, "human build cached: exit code");
+    check(result.stdout_text.contains("build files up to date"),
+          "human build cached: sync says up to date");
+    check(result.stdout_text.contains("==> configure"), "human build cached: configure stage");
+    check(result.stdout_text.contains("cached"), "human build cached: cached configure");
+    check(!result.stdout_text.contains("configure-noisy-stdout"),
+          "human build cached: configure command skipped");
+}
+
+void test_human_build_failure_output() {
+    auto result = run_self_fixture("build-failure");
+    check(result.exit_code == 9, "human build failure: exit code");
+    check(result.stdout_text.contains("exon: build failed"),
+          "human build failure: summary printed");
+    check(result.stdout_text.contains("phase     build"),
+          "human build failure: build phase reported");
+    check(result.stdout_text.contains("Captured output excerpt:"),
+          "human build failure: excerpt heading");
+    check(result.stdout_text.contains("stderr excerpt"),
+          "human build failure: stderr excerpt printed");
+    check(result.stdout_text.contains("build-error-tail"),
+          "human build failure: failure output captured");
+    check(result.stdout_text.contains("hint: rerun with --output wrapped"),
+          "human build failure: wrapped rerun hint");
+}
+
+void test_human_test_failed_output_mode() {
+    auto result = run_self_fixture("test-show-failed");
+    check(result.exit_code == 1, "human test failed mode: exit code");
+    check(result.stdout_text.contains("collected 3 test binaries"),
+          "human test failed mode: collected count");
+    check(result.stdout_text.contains("PASSED  test-pass"),
+          "human test failed mode: pass status shown");
+    check(result.stdout_text.contains("FAILED  test-fail"),
+          "human test failed mode: fail status shown");
+    check(result.stdout_text.contains("TIMEOUT test-timeout"),
+          "human test failed mode: timeout status shown");
+    check(result.stdout_text.contains("Failures:"),
+          "human test failed mode: failures section shown");
+    check(!result.stdout_text.contains("pass-output"),
+          "human test failed mode: passing output hidden");
+    check(result.stdout_text.contains("fail-stdout"),
+          "human test failed mode: failing stdout shown");
+    check(result.stdout_text.contains("fail-stderr"),
+          "human test failed mode: failing stderr shown");
+    check(result.stdout_text.contains("failed    1"),
+          "human test failed mode: failed summary count");
+    check(result.stdout_text.contains("timed out 1"),
+          "human test failed mode: timeout summary count");
+}
+
+void test_human_test_all_output_mode() {
+    auto result = run_self_fixture("test-show-all");
+    check(result.exit_code == 1, "human test all mode: exit code");
+    check(result.stdout_text.contains("Output:"), "human test all mode: output section shown");
+    check(result.stdout_text.contains("pass-output"),
+          "human test all mode: passing output shown");
+    check(result.stdout_text.contains("fail-stdout"),
+          "human test all mode: failing output shown");
+}
+
+void test_human_test_none_output_mode() {
+    auto result = run_self_fixture("test-show-none");
+    check(result.exit_code == 1, "human test none mode: exit code");
+    check(!result.stdout_text.contains("Failures:"),
+          "human test none mode: failures section hidden");
+    check(!result.stdout_text.contains("Output:"),
+          "human test none mode: output section hidden");
+    check(!result.stdout_text.contains("pass-output"),
+          "human test none mode: passing output hidden");
+    check(!result.stdout_text.contains("fail-stdout"),
+          "human test none mode: failing output hidden");
+    check(result.stdout_text.contains("collected 3"),
+          "human test none mode: summary preserved");
+}
+
+void test_wrapped_output_regressions() {
+    auto build_result = run_self_fixture("wrapped-build");
+    check(build_result.exit_code == 0, "wrapped build: exit code");
+    check(build_result.stdout_text.contains("wrapped-build-output"),
+          "wrapped build: command output preserved");
+    check(build_result.stdout_text.contains("[%f/%t]"),
+          "wrapped build: ninja status propagated");
+
+    auto test_result = run_self_fixture("wrapped-test");
+    check(test_result.exit_code == 1, "wrapped test: exit code");
+    check(test_result.stdout_text.contains("wrapped-fail-output"),
+          "wrapped test: failed output preserved");
+    check(!test_result.stdout_text.contains("wrapped-pass-output"),
+          "wrapped test: passing output stays hidden");
+}
+
+void test_workspace_human_output() {
+    auto build_result = run_self_fixture("workspace-build");
+    check(build_result.exit_code == 0, "workspace build human: exit code");
+    check(build_result.stdout_text.contains("==> resolve"),
+          "workspace build human: resolve stage");
+    check(build_result.stdout_text.contains("==> sync"),
+          "workspace build human: sync stage");
+    check(build_result.stdout_text.contains("==> finish"),
+          "workspace build human: finish stage");
+    check(build_result.stdout_text.contains("build dir"),
+          "workspace build human: build dir reported");
+
+    auto test_result = run_self_fixture("workspace-test");
+    check(test_result.exit_code == 0, "workspace test human: exit code");
+    check(test_result.stdout_text.contains("==> member app (app)"),
+          "workspace test human: member header");
+    check(test_result.stdout_text.contains("exon: workspace test succeeded"),
+          "workspace test human: aggregate summary");
+}
+
 void test_module_detection_includes_dependency_cppm_sources() {
     TmpProject proj;
     proj.write("src/main.cpp", "int main() { return 0; }\n");
@@ -722,6 +1154,8 @@ standard = 23
 int main(int argc, char* argv[]) {
     if (auto rc = maybe_run_fake_intron(argc, argv); rc >= 0)
         return rc;
+    if (auto rc = maybe_run_output_fixture(argc, argv); rc >= 0)
+        return rc;
 
     self_executable_path = std::filesystem::weakly_canonical(std::filesystem::path{argv[0]});
 
@@ -739,6 +1173,14 @@ int main(int argc, char* argv[]) {
     test_reporting_capture_collects_stdout_and_stderr();
     test_reporting_tee_collects_output();
     test_reporting_timeout_marks_result();
+    test_human_build_success_output();
+    test_human_build_cached_output();
+    test_human_build_failure_output();
+    test_human_test_failed_output_mode();
+    test_human_test_all_output_mode();
+    test_human_test_none_output_mode();
+    test_wrapped_output_regressions();
+    test_workspace_human_output();
     test_module_detection_includes_dependency_cppm_sources();
 #if defined(_WIN32)
     test_windows_native_toolchain_diagnostic_predicates();

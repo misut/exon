@@ -15,6 +15,7 @@ import fetch;
 import fetch.system;
 import lock;
 import lock.system;
+import reporting;
 import templates;
 import toolchain;
 import toolchain.system;
@@ -44,7 +45,7 @@ std::string usage_text() {
             {"new --lib|--bin <name>",             "create a new workspace member"},
             {"info",                               "show package information"},
             {"build [--release] [--target <t>] [--member a,b] [--exclude x,y] "
-             "[--output raw|wrapped]",
+             "[--output human|wrapped|raw]",
                                                    "build the project"},
             {"check [--release] [--target <t>] [--member a,b] [--exclude x,y]",
                                                    "check syntax without linking"},
@@ -54,7 +55,7 @@ std::string usage_text() {
              "[--member <name>] [--exclude x,y] [-- <args...>]",
                                                    "build and open the selected native executable in a native debugger"},
             {"test [--release] [--target <t>] [--member a,b] [--exclude x,y] [--timeout <sec>] "
-             "[--output raw|wrapped] [--show-output failed|all|none]",
+             "[--output human|wrapped|raw] [--show-output failed|all|none]",
                                                    "build and run tests"},
             {"clean [--member a,b] [--exclude x,y]","remove build artifacts"},
             {"add [--dev] <pkg> <ver>",            "add a git dependency"},
@@ -424,6 +425,14 @@ manifest::Manifest workspace_build_manifest(std::filesystem::path const& workspa
     return manifest;
 }
 
+reporting::Options parse_reporting_options(std::string_view output_mode_text = {},
+                                           std::string_view show_output_text = {}) {
+    return {
+        .output = build::system::detail::parse_output_mode_text(output_mode_text),
+        .show_output = build::system::detail::parse_show_output_text(show_output_text),
+    };
+}
+
 int sync_workspace_member_cmake(WorkspaceMember const& member,
                                 std::optional<toolchain::Platform> platform = std::nullopt,
                                 bool all_targets = false) {
@@ -453,21 +462,58 @@ int sync_workspace_root_cmake(std::filesystem::path const& workspace_root,
     return 0;
 }
 
-int run_workspace_build(std::filesystem::path const& workspace_root,
-                        manifest::Manifest const& workspace_manifest,
-                        WorkspaceSelection const& selection,
-                        bool release, std::string_view target) {
+core::FileWrite workspace_member_cmake_write(WorkspaceMember const& member,
+                                             toolchain::Platform const& platform) {
+    auto fetch_result = fetch::system::fetch_all({
+        .manifest = member.resolved_manifest,
+        .project_root = member.path,
+        .lock_path = member.path / "exon.lock",
+        .platform = platform,
+    });
+    return {
+        .text = {
+            .path = member.path / "CMakeLists.txt",
+            .content = build::generate_portable_cmake(member.raw_manifest, member.path,
+                                                      fetch_result.deps),
+        },
+        .success_message = "synced CMakeLists.txt",
+    };
+}
+
+std::optional<core::FileWrite> workspace_root_cmake_write(
+    std::filesystem::path const& workspace_root,
+    manifest::Manifest const& workspace_manifest,
+    WorkspaceSelection const& selection) {
+    if (!workspace_manifest.sync_cmake_in_root)
+        return std::nullopt;
+    return core::FileWrite{
+        .text = {
+            .path = workspace_root / "CMakeLists.txt",
+            .content = generate_workspace_root_cmake(workspace_root, workspace_root,
+                                                     selection.members),
+        },
+        .success_message = "synced CMakeLists.txt",
+    };
+}
+
+struct WorkspaceBuildExecution {
+    build::BuildRequest request;
+    build::BuildPlan plan;
+    std::filesystem::path success_path;
+    std::string success_label;
+};
+
+WorkspaceBuildExecution prepare_workspace_build_execution(
+    std::filesystem::path const& workspace_root,
+    manifest::Manifest const& workspace_manifest,
+    WorkspaceSelection const& selection,
+    bool release, std::string_view target) {
     auto platform = target.empty()
-        ? std::optional<toolchain::Platform>{toolchain::detect_host_platform()}
-        : std::optional<toolchain::Platform>{*toolchain::platform_from_target(target)};
-    for (auto const& member : selection.members)
-        sync_workspace_member_cmake(member, platform, false);
-    sync_workspace_root_cmake(workspace_root, workspace_manifest, selection);
+        ? toolchain::detect_host_platform()
+        : *toolchain::platform_from_target(target);
 
     auto cmake_root = workspace_root / ".exon";
     std::filesystem::create_directories(cmake_root);
-    write_text(cmake_root / "CMakeLists.txt",
-               generate_workspace_root_cmake(workspace_root, cmake_root, selection.members));
 
     auto synthetic_manifest = workspace_build_manifest(workspace_root, selection.members);
     auto tc = toolchain::system::detect();
@@ -484,23 +530,114 @@ int run_workspace_build(std::filesystem::path const& workspace_root,
     }
 
     auto build_dir = workspace_build_root(workspace_root, release, target);
+    build::BuildRequest request{
+        .project = {
+            .root = workspace_root,
+            .exon_dir = cmake_root,
+            .build_dir = build_dir,
+            .profile = release ? "release" : "debug",
+            .target = std::string{target},
+            .is_wasm = !target.empty(),
+        },
+        .manifest = synthetic_manifest,
+        .toolchain = tc,
+        .release = release,
+        .configured = std::filesystem::exists(build_dir / "build.ninja"),
+        .wasm_toolchain_file = wasm_toolchain_file,
+    };
+
+    build::BuildPlan plan{
+        .project = request.project,
+        .configured = request.configured,
+    };
+    for (auto const& member : selection.members)
+        plan.writes.push_back(workspace_member_cmake_write(member, platform));
+    if (auto root_write = workspace_root_cmake_write(workspace_root, workspace_manifest, selection))
+        plan.writes.push_back(*root_write);
+    plan.writes.push_back({
+        .text = {
+            .path = cmake_root / "CMakeLists.txt",
+            .content = generate_workspace_root_cmake(workspace_root, cmake_root,
+                                                     selection.members),
+        },
+    });
+
     auto configure_spec = build::configure_command(
         tc, synthetic_manifest, build_dir, cmake_root, release, {}, {},
         wasm_toolchain_file, false);
     configure_spec.cwd = workspace_root;
-    std::println("configuring workspace...");
-    auto rc = build::system::run_process(configure_spec);
-    if (rc != 0)
-        return rc;
+    plan.configure_steps.push_back({
+        .spec = std::move(configure_spec),
+        .label = "configuring workspace...",
+    });
 
     auto build_spec = build::build_command(tc, synthetic_manifest, build_dir, {}, target);
     build_spec.cwd = workspace_root;
-    std::println("building workspace...");
-    rc = build::system::run_process(build_spec);
+    plan.build_steps.push_back({
+        .spec = std::move(build_spec),
+        .label = "building workspace...",
+    });
+
+    return {
+        .request = std::move(request),
+        .plan = std::move(plan),
+        .success_path = build_dir,
+        .success_label = "build dir",
+    };
+}
+
+int run_workspace_build(std::filesystem::path const& workspace_root,
+                        manifest::Manifest const& workspace_manifest,
+                        WorkspaceSelection const& selection,
+                        bool release, std::string_view target,
+                        reporting::Options const& options) {
+    if (options.output != reporting::OutputMode::raw) {
+        auto started = std::chrono::steady_clock::now();
+        auto project = core::ProjectContext{
+            .root = workspace_root,
+            .exon_dir = workspace_root / ".exon",
+            .build_dir = workspace_build_root(workspace_root, release, target),
+            .profile = release ? "release" : "debug",
+            .target = std::string{target},
+            .is_wasm = !target.empty(),
+        };
+        auto workspace_name = workspace_build_manifest(workspace_root, selection.members).name;
+        build::system::detail::print_header("build", workspace_name, project);
+        build::system::detail::print_stage("resolve");
+        try {
+            auto execution = prepare_workspace_build_execution(
+                workspace_root, workspace_manifest, selection, release, target);
+            if (options.output == reporting::OutputMode::human) {
+                return build::system::detail::run_build_human(
+                    execution.request, execution.plan, "build", started,
+                    execution.success_path, execution.success_label);
+            }
+            return build::system::detail::run_build_wrapped(
+                execution.request, execution.plan, "build", started,
+                execution.success_path, execution.success_label);
+        } catch (...) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started);
+            build::system::detail::print_failure_summary("build", "resolve", project, elapsed);
+            throw;
+        }
+    }
+
+    auto execution = prepare_workspace_build_execution(
+        workspace_root, workspace_manifest, selection, release, target);
+    auto changed = build::system::detail::apply_writes(execution.plan.writes);
+    if (changed || !execution.plan.configured) {
+        auto rc = build::system::detail::run_configure_steps(execution.plan.configure_steps,
+                                                             execution.request);
+        if (rc != 0)
+            return rc;
+    }
+
+    auto rc = build::system::detail::run_steps(execution.plan.build_steps);
     if (rc != 0)
         return rc;
 
-    auto rel = std::filesystem::relative(build_dir, workspace_root).generic_string();
+    auto rel = std::filesystem::relative(execution.success_path, workspace_root).generic_string();
     std::println("build succeeded: {}", rel);
     return 0;
 }
@@ -831,6 +968,64 @@ int run_build_command(int argc, char* argv[], BuildFn fn) {
     }
 }
 
+void print_workspace_human_member_header(std::filesystem::path const& workspace_root,
+                                         WorkspaceMember const& member) {
+    std::println("==> member {}", workspace_display_name(member, workspace_root));
+}
+
+void print_workspace_test_summary(int collected, int passed, int failed,
+                                  std::chrono::milliseconds elapsed) {
+    std::println("");
+    std::println("exon: workspace test {}", failed == 0 ? "succeeded" : "failed");
+    std::println("  collected {}", collected);
+    std::println("  passed    {}", passed);
+    std::println("  failed    {}", failed);
+    std::println("  elapsed   {}", reporting::format_duration(elapsed));
+}
+
+int run_workspace_test(std::filesystem::path const& workspace_root,
+                       WorkspaceSelection const& selection,
+                       bool release, std::string_view target,
+                       std::string_view filter,
+                       std::optional<std::chrono::milliseconds> timeout,
+                       reporting::Options const& options) {
+    auto started = std::chrono::steady_clock::now();
+    int executed = 0;
+    int passed = 0;
+    int failed = 0;
+    int last_rc = 0;
+
+    for (auto const& member : selection.members) {
+        if (options.output == reporting::OutputMode::human) {
+            if (executed > 0)
+                std::println("");
+            print_workspace_human_member_header(workspace_root, member);
+        } else {
+            std::println("--- {} ---", workspace_display_name(member, workspace_root));
+        }
+
+        ++executed;
+        auto rc = build::system::run_test(member.path, member.resolved_manifest,
+                                          member.raw_manifest, release, target, filter,
+                                          timeout, options);
+        if (rc == 0) {
+            ++passed;
+            continue;
+        }
+
+        ++failed;
+        last_rc = rc;
+        break;
+    }
+
+    if (options.output == reporting::OutputMode::human) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started);
+        print_workspace_test_summary(executed, passed, failed, elapsed);
+    }
+    return last_rc;
+}
+
 int cmd_build(int argc, char* argv[]) {
     try {
         auto args = cli::parse(argc, argv, 2, workspace_select_defs({
@@ -840,6 +1035,7 @@ int cmd_build(int argc, char* argv[]) {
         }));
         auto release = args.has("--release");
         auto target = std::string{args.get("--target")};
+        auto options = parse_reporting_options(args.get("--output"));
         auto requested_members = args.get_list("--member");
         auto excluded_members = args.get_list("--exclude");
         auto project_root = std::filesystem::current_path();
@@ -851,13 +1047,13 @@ int cmd_build(int argc, char* argv[]) {
             auto selection = select_workspace_members(project_root, raw_m, target,
                                                       requested_members, excluded_members,
                                                       true, false);
-            return run_workspace_build(project_root, raw_m, selection, release, target);
+            return run_workspace_build(project_root, raw_m, selection, release, target, options);
         }
         if (!requested_members.empty() || !excluded_members.empty())
             return command_error("--member and --exclude require a workspace root");
         if (m.name.empty())
             return command_error("package name is required in exon.toml");
-        return build::system::run(project_root, m, raw_m, release, target, args.get("--output"));
+        return build::system::run(project_root, m, raw_m, release, target, options);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
@@ -1022,6 +1218,7 @@ int cmd_test(int argc, char* argv[]) {
         auto target = std::string{args.get("--target")};
         auto filter = std::string{args.get("--filter")};
         auto timeout = parse_timeout(args.get("--timeout"));
+        auto options = parse_reporting_options(args.get("--output"), args.get("--show-output"));
         auto requested_members = args.get_list("--member");
         auto excluded_members = args.get_list("--exclude");
         auto project_root = std::filesystem::current_path();
@@ -1033,19 +1230,15 @@ int cmd_test(int argc, char* argv[]) {
             auto selection = select_workspace_members(project_root, raw_m, target,
                                                       requested_members, excluded_members,
                                                       false, false);
-            return run_selected_workspace_members(project_root, selection, [&](auto const& member) {
-                return build::system::run_test(member.path, member.resolved_manifest, member.raw_manifest, release,
-                                               target, filter, timeout, args.get("--output"),
-                                               args.get("--show-output"));
-            });
+            return run_workspace_test(project_root, selection, release, target, filter, timeout,
+                                      options);
         }
         if (!requested_members.empty() || !excluded_members.empty())
             return command_error("--member and --exclude require a workspace root");
         if (m.name.empty())
             return command_error("package name is required in exon.toml");
         return build::system::run_test(project_root, m, raw_m, release, target, filter,
-                                       timeout, args.get("--output"),
-                                       args.get("--show-output"));
+                                       timeout, options);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
