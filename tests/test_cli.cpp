@@ -1,6 +1,7 @@
 import std;
 import cli;
 import commands;
+import reporting;
 
 int failures = 0;
 
@@ -17,6 +18,11 @@ cli::Args test_parse(std::vector<std::string> const& args, std::vector<cli::ArgD
     for (auto& a : args)
         ptrs.push_back(const_cast<char*>(a.c_str()));
     return cli::parse(static_cast<int>(ptrs.size()), ptrs.data(), 0, std::move(defs));
+}
+
+std::string read_text(std::filesystem::path const& path) {
+    auto in = std::ifstream{path};
+    return {std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
 }
 
 // --- usage tests ---
@@ -172,6 +178,40 @@ void test_commands_usage_lists_human_output_mode() {
           "usage lists human output mode for test");
 }
 
+void test_commands_reporting_defaults() {
+    auto options = commands::parse_reporting_options();
+    check(options.output == reporting::OutputMode::human,
+          "commands default output mode is human");
+    check(options.show_output == reporting::ShowOutput::failed,
+          "commands default show-output is failed");
+}
+
+void test_readme_output_docs_match_usage() {
+    auto readme = read_text(std::filesystem::current_path() / "README.md");
+    check(readme.find(
+              "`exon build [--release] [--target <t>] [--member a,b] [--exclude x,y] "
+              "[--output human\\|wrapped\\|raw]`") != std::string::npos,
+          "README documents build human output mode");
+    check(readme.find(
+              "`exon test [--release] [--target <t>] [--member a,b] [--exclude x,y] "
+              "[--timeout <sec>] [--output human\\|wrapped\\|raw] "
+              "[--show-output failed\\|all\\|none]`") != std::string::npos,
+          "README documents test human output mode");
+    check(readme.find("default to `human` output") != std::string::npos,
+          "README documents human default");
+    check(readme.find("`wrapped` adds the same headers while still showing the underlying "
+                      "CMake/Ninja/test output") != std::string::npos,
+          "README documents wrapped behavior");
+    check(readme.find("`raw` keeps exon wrapping to a minimum") != std::string::npos,
+          "README documents raw behavior");
+    check(readme.find("`exon test --show-output failed` (default)") != std::string::npos,
+          "README documents failed-only default");
+    check(readme.find("[--output raw\\|wrapped]") == std::string::npos,
+          "README removes raw wrapped-only command docs");
+    check(readme.find("default to a wrapped console") == std::string::npos,
+          "README removes wrapped default wording");
+}
+
 int main() {
     std::println("test_cli:");
 
@@ -189,6 +229,8 @@ int main() {
     test_parse_debugger_option_with_separator();
     test_commands_usage_lists_debug();
     test_commands_usage_lists_human_output_mode();
+    test_commands_reporting_defaults();
+    test_readme_output_docs_match_usage();
 
     if (failures > 0) {
         std::println("test_cli: {} FAILED", failures);

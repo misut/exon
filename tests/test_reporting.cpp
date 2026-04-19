@@ -25,6 +25,17 @@ void test_default_output_mode() {
     reporting::Options options;
     check(options.output == reporting::OutputMode::human,
           "default output mode is human");
+    check(options.show_output == reporting::ShowOutput::failed,
+          "default show_output is failed");
+}
+
+void test_output_mode_strings() {
+    check(reporting::to_string(reporting::OutputMode::human) == "human",
+          "output mode string human");
+    check(reporting::to_string(reporting::OutputMode::raw) == "raw",
+          "output mode string raw");
+    check(reporting::to_string(reporting::OutputMode::wrapped) == "wrapped",
+          "output mode string wrapped");
 }
 
 void test_parse_show_output() {
@@ -72,6 +83,7 @@ int main() {
     std::cout << "test_reporting:\n";
     test_parse_output_mode();
     test_default_output_mode();
+    test_output_mode_strings();
     test_parse_show_output();
     test_stream_mode_for_output_mode();
     test_should_show_output();

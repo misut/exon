@@ -973,13 +973,21 @@ void print_workspace_human_member_header(std::filesystem::path const& workspace_
     std::println("==> member {}", workspace_display_name(member, workspace_root));
 }
 
-void print_workspace_test_summary(int collected, int passed, int failed,
+struct WorkspaceTestAggregate {
+    int members_run = 0;
+    int members_passed = 0;
+    int members_failed = 0;
+    int binaries_run = 0;
+};
+
+void print_workspace_test_summary(WorkspaceTestAggregate const& aggregate,
                                   std::chrono::milliseconds elapsed) {
     std::println("");
-    std::println("exon: workspace test {}", failed == 0 ? "succeeded" : "failed");
-    std::println("  collected {}", collected);
-    std::println("  passed    {}", passed);
-    std::println("  failed    {}", failed);
+    std::println("exon: workspace test {}",
+                 aggregate.members_failed == 0 ? "succeeded" : "failed");
+    std::println("  members   {} run, {} passed, {} failed",
+                 aggregate.members_run, aggregate.members_passed, aggregate.members_failed);
+    std::println("  binaries  {} run", aggregate.binaries_run);
     std::println("  elapsed   {}", reporting::format_duration(elapsed));
 }
 
@@ -990,30 +998,30 @@ int run_workspace_test(std::filesystem::path const& workspace_root,
                        std::optional<std::chrono::milliseconds> timeout,
                        reporting::Options const& options) {
     auto started = std::chrono::steady_clock::now();
-    int executed = 0;
-    int passed = 0;
-    int failed = 0;
+    WorkspaceTestAggregate aggregate;
     int last_rc = 0;
 
     for (auto const& member : selection.members) {
         if (options.output == reporting::OutputMode::human) {
-            if (executed > 0)
+            if (aggregate.members_run > 0)
                 std::println("");
             print_workspace_human_member_header(workspace_root, member);
         } else {
             std::println("--- {} ---", workspace_display_name(member, workspace_root));
         }
 
-        ++executed;
+        ++aggregate.members_run;
+        build::system::TestRunSummary member_summary;
         auto rc = build::system::run_test(member.path, member.resolved_manifest,
                                           member.raw_manifest, release, target, filter,
-                                          timeout, options);
+                                          timeout, options, member_summary);
+        aggregate.binaries_run += member_summary.collected;
         if (rc == 0) {
-            ++passed;
+            ++aggregate.members_passed;
             continue;
         }
 
-        ++failed;
+        ++aggregate.members_failed;
         last_rc = rc;
         break;
     }
@@ -1021,7 +1029,7 @@ int run_workspace_test(std::filesystem::path const& workspace_root,
     if (options.output == reporting::OutputMode::human) {
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started);
-        print_workspace_test_summary(executed, passed, failed, elapsed);
+        print_workspace_test_summary(aggregate, elapsed);
     }
     return last_rc;
 }
