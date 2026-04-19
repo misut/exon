@@ -83,6 +83,7 @@ hello, world!
 | `exon build [--release] [--target <t>] [--member a,b] [--exclude x,y] [--output raw\|wrapped]` | Build the project or selected workspace members |
 | `exon check [--release] [--target <t>] [--member a,b] [--exclude x,y]` | Check syntax without linking |
 | `exon run [--release] [--target <t>] [--member <name>]` | Build and run |
+| `exon debug [--release] [--debugger auto\|lldb\|gdb\|<path>] [--member <name>] [--exclude x,y] [-- <args...>]` | Build and open the selected native executable in LLDB or GDB |
 | `exon test [--release] [--target <t>] [--member a,b] [--exclude x,y] [--timeout <sec>] [--output raw\|wrapped] [--show-output failed\|all\|none]` | Build and run tests |
 | `exon clean [--member a,b] [--exclude x,y]` | Remove build artifacts |
 | `exon add [--dev] <pkg> <ver>` | Add a git dependency |
@@ -94,6 +95,27 @@ hello, world!
 | `exon update [--member a,b] [--exclude x,y]` | Update dependencies |
 | `exon sync [--member a,b] [--exclude x,y]` | Sync CMakeLists.txt with exon.toml |
 | `exon fmt` | Format source files |
+
+### Native debugging
+
+`exon debug` is a native-only convenience launcher for CLI debuggers. In v1 it supports host executables only and does not support `--target wasm32-wasi` yet.
+
+```sh
+exon debug
+exon debug -- --port 8080
+exon debug --debugger gdb -- input.txt
+```
+
+`auto` picks a debugger by host platform:
+
+- macOS: `lldb`, then `gdb`
+- Linux: `gdb`, then `lldb`
+- Windows: `lldb`, then `gdb`
+
+Debugger invocation follows the debugger's native CLI syntax:
+
+- LLDB: `lldb -- <executable> <args...>`
+- GDB: `gdb --args <executable> <args...>`
 
 ## exon.toml
 

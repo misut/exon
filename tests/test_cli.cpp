@@ -1,5 +1,6 @@
 import std;
 import cli;
+import commands;
 
 int failures = 0;
 
@@ -143,6 +144,23 @@ void test_parse_mixed() {
     check(args.positional()[0] == "foo", "mixed: positional value");
 }
 
+void test_parse_debugger_option_with_separator() {
+    auto args = test_parse(
+        {"--debugger", "lldb", "--", "--flag", "value"},
+        {cli::Option{"--debugger"}});
+    check(args.get("--debugger") == "lldb", "debugger option parsed");
+    check(args.positional().size() == 2, "debugger separator keeps positionals");
+    check(args.positional()[0] == "--flag", "debugger positional flag preserved");
+    check(args.positional()[1] == "value", "debugger positional value preserved");
+}
+
+void test_commands_usage_lists_debug() {
+    auto usage = commands::usage_text();
+    check(usage.find("debug [--release] [--debugger auto|lldb|gdb|<path>]") !=
+              std::string::npos,
+          "usage lists debug command");
+}
+
 int main() {
     std::println("test_cli:");
 
@@ -157,6 +175,8 @@ int main() {
     test_parse_unknown_flag();
     test_parse_missing_value();
     test_parse_mixed();
+    test_parse_debugger_option_with_separator();
+    test_commands_usage_lists_debug();
 
     if (failures > 0) {
         std::println("test_cli: {} FAILED", failures);

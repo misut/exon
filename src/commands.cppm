@@ -9,6 +9,8 @@ import manifest;
 import manifest.system;
 import build;
 import build.system;
+import debug;
+import debug.system;
 import fetch;
 import fetch.system;
 import lock;
@@ -48,6 +50,9 @@ std::string usage_text() {
                                                    "check syntax without linking"},
             {"run [--release] [--target <t>] [--member <name>] [args]",
                                                    "build and run the project"},
+            {"debug [--release] [--debugger auto|lldb|gdb|<path>] "
+             "[--member <name>] [--exclude x,y] [args]",
+                                                   "build and open the project in a native CLI debugger"},
             {"test [--release] [--target <t>] [--member a,b] [--exclude x,y] [--timeout <sec>] "
              "[--output raw|wrapped] [--show-output failed|all|none]",
                                                    "build and run tests"},
@@ -543,6 +548,65 @@ std::vector<cli::ArgDef> const build_defs = {
     cli::Option{"--target"},
 };
 
+struct RunnableCommandTarget {
+    std::filesystem::path root;
+    manifest::Manifest raw_manifest;
+    manifest::Manifest resolved_manifest;
+};
+
+std::expected<RunnableCommandTarget, std::string>
+resolve_runnable_command_target(std::filesystem::path const& project_root,
+                                manifest::Manifest const& raw_m,
+                                std::string_view target,
+                                std::vector<std::string> const& requested_members,
+                                std::vector<std::string> const& excluded_members) {
+    auto m = resolve_manifest(raw_m, target);
+    auto member_root = project_root;
+    auto raw_target_manifest = raw_m;
+    auto target_manifest = m;
+    if (manifest::is_workspace(raw_m)) {
+        auto selection = select_workspace_members(project_root, raw_m, target,
+                                                  requested_members, excluded_members,
+                                                  false, false);
+        auto runnable = std::vector<WorkspaceMember>{};
+        for (auto const& member : selection.members) {
+            if (member.runnable)
+                runnable.push_back(member);
+        }
+        if (requested_members.empty()) {
+            if (runnable.size() != 1) {
+                return std::unexpected{
+                    "workspace execution requires exactly one runnable member; pass --member <name>"};
+            }
+        } else {
+            if (selection.members.size() != 1) {
+                return std::unexpected{
+                    "--member must select exactly one workspace member"};
+            }
+            if (!selection.members.front().runnable)
+                return std::unexpected{"cannot run a library package"};
+            runnable = {selection.members.front()};
+        }
+        auto const& member = runnable.front();
+        member_root = member.path;
+        raw_target_manifest = member.raw_manifest;
+        target_manifest = member.resolved_manifest;
+    } else if (!requested_members.empty() || !excluded_members.empty()) {
+        return std::unexpected{"--member and --exclude require a workspace root"};
+    }
+
+    if (target_manifest.name.empty())
+        return std::unexpected{"package name is required in exon.toml"};
+    if (target_manifest.type == "lib")
+        return std::unexpected{"cannot run a library package"};
+
+    return RunnableCommandTarget{
+        .root = member_root,
+        .raw_manifest = raw_target_manifest,
+        .resolved_manifest = target_manifest,
+    };
+}
+
 std::string read_text(std::filesystem::path const& path) {
     auto text = cppx::fs::system::read_text(path);
     if (!text)
@@ -823,66 +887,99 @@ int cmd_run(int argc, char* argv[]) {
         auto raw_m = load_manifest(project_root);
         if (!check_platform(raw_m, target))
             return 1;
-        auto m = resolve_manifest(raw_m, target);
-        auto member_root = project_root;
-        auto raw_target_manifest = raw_m;
-        auto target_manifest = m;
-        if (manifest::is_workspace(raw_m)) {
-            auto selection = select_workspace_members(project_root, raw_m, target,
-                                                      requested_members, excluded_members,
-                                                      false, false);
-            auto runnable = std::vector<WorkspaceMember>{};
-            for (auto const& member : selection.members) {
-                if (member.runnable)
-                    runnable.push_back(member);
-            }
-            if (requested_members.empty()) {
-                if (runnable.size() != 1) {
-                    return command_error(
-                        "workspace run requires exactly one runnable member; pass --member <name>");
-                }
-            } else {
-                if (selection.members.size() != 1)
-                    return command_error("--member for run must select exactly one workspace member");
-                if (!selection.members.front().runnable)
-                    return command_error("cannot run a library package");
-                runnable = {selection.members.front()};
-            }
-            auto const& member = runnable.front();
-            member_root = member.path;
-            raw_target_manifest = member.raw_manifest;
-            target_manifest = member.resolved_manifest;
-        } else if (!requested_members.empty() || !excluded_members.empty()) {
-            return command_error("--member and --exclude require a workspace root");
-        }
-        if (target_manifest.name.empty())
-            return command_error("package name is required in exon.toml");
-        if (target_manifest.type == "lib")
-            return command_error("cannot run a library package");
+        auto runnable_target = resolve_runnable_command_target(project_root, raw_m, target,
+                                                               requested_members, excluded_members);
+        if (!runnable_target)
+            return command_error(runnable_target.error());
         bool is_wasm = !target.empty();
-        int rc = build::system::run(member_root, target_manifest, raw_target_manifest, release, target);
+        int rc = build::system::run(runnable_target->root,
+                                    runnable_target->resolved_manifest,
+                                    runnable_target->raw_manifest,
+                                    release, target);
         if (rc != 0)
             return rc;
 
-        auto project = build::project_context(member_root, release, target);
+        auto project = build::project_context(runnable_target->root, release, target);
         core::ProcessSpec spec{
-            .cwd = member_root,
+            .cwd = runnable_target->root,
         };
         if (is_wasm) {
             auto wasm_runtime = toolchain::system::detect_wasm_runtime();
             if (wasm_runtime.empty())
                 throw std::runtime_error(
                     "wasmtime not found on PATH (install: https://wasmtime.dev)");
-            auto wasm_file = project.build_dir / target_manifest.name;
+            auto wasm_file = project.build_dir / runnable_target->resolved_manifest.name;
             spec.program = wasm_runtime;
             spec.args.push_back(wasm_file.string());
         } else {
-            auto exe = project.build_dir / (target_manifest.name + std::string{toolchain::exe_suffix});
+            auto exe = project.build_dir /
+                (runnable_target->resolved_manifest.name + std::string{toolchain::exe_suffix});
             spec.program = exe.string();
         }
         for (auto const& a : args.positional())
             spec.args.push_back(a);
-        std::println("running {}...\n", target_manifest.name);
+        std::println("running {}...\n", runnable_target->resolved_manifest.name);
+        return build::system::run_process(spec);
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
+}
+
+int cmd_debug(int argc, char* argv[]) {
+    try {
+        auto debug_defs = workspace_select_defs({
+            cli::Flag{"--release"},
+            cli::Option{"--target"},
+            cli::Option{"--debugger"},
+        });
+        auto args = cli::parse(argc, argv, 2, debug_defs);
+        auto release = args.has("--release");
+        auto target = std::string{args.get("--target")};
+        if (!target.empty()) {
+            return command_error(
+                "exon debug currently supports native host executables only; --target is not supported yet");
+        }
+
+        auto debugger_request = std::string{args.get("--debugger")};
+        if (debugger_request.empty())
+            debugger_request = "auto";
+
+        auto requested_members = args.get_list("--member");
+        auto excluded_members = args.get_list("--exclude");
+        auto project_root = std::filesystem::current_path();
+        auto raw_m = load_manifest(project_root);
+        if (!check_platform(raw_m, {}))
+            return 1;
+
+        auto runnable_target = resolve_runnable_command_target(project_root, raw_m, {},
+                                                               requested_members, excluded_members);
+        if (!runnable_target)
+            return command_error(runnable_target.error());
+
+        auto debugger_program = debug::system::resolve_debugger(debugger_request);
+        if (!debugger_program)
+            return command_error(debugger_program.error());
+
+        auto rc = build::system::run(runnable_target->root,
+                                     runnable_target->resolved_manifest,
+                                     runnable_target->raw_manifest,
+                                     release, {});
+        if (rc != 0)
+            return rc;
+
+        auto project = build::project_context(runnable_target->root, release, {});
+        auto executable = project.build_dir /
+            (runnable_target->resolved_manifest.name + std::string{toolchain::exe_suffix});
+        auto program_args = std::vector<std::string>{};
+        for (auto const& arg : args.positional())
+            program_args.push_back(arg);
+
+        auto spec = debug::debugger_launch_spec(*debugger_program, executable,
+                                                program_args, runnable_target->root);
+        std::println("starting {} for {}...\n",
+                     debug::debugger_kind_name(debugger_program->kind),
+                     runnable_target->resolved_manifest.name);
         return build::system::run_process(spec);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
