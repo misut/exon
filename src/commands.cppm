@@ -51,8 +51,8 @@ std::string usage_text() {
             {"run [--release] [--target <t>] [--member <name>] [args]",
                                                    "build and run the project"},
             {"debug [--release] [--debugger auto|lldb|gdb|devenv|cdb|<path>] "
-             "[--member <name>] [--exclude x,y] [args]",
-                                                   "build and open the project in a native debugger"},
+             "[--member <name>] [--exclude x,y] [-- <args...>]",
+                                                   "build and open the selected native executable in a native debugger"},
             {"test [--release] [--target <t>] [--member a,b] [--exclude x,y] [--timeout <sec>] "
              "[--output raw|wrapped] [--show-output failed|all|none]",
                                                    "build and run tests"},

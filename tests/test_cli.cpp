@@ -156,7 +156,9 @@ void test_parse_debugger_option_with_separator() {
 
 void test_commands_usage_lists_debug() {
     auto usage = commands::usage_text();
-    check(usage.find("debug [--release] [--debugger auto|lldb|gdb|devenv|cdb|<path>]") !=
+    check(usage.find(
+              "debug [--release] [--debugger auto|lldb|gdb|devenv|cdb|<path>] "
+              "[--member <name>] [--exclude x,y] [-- <args...>]") !=
               std::string::npos,
           "usage lists debug command");
 }
