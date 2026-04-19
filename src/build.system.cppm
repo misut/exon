@@ -464,6 +464,62 @@ std::string display_path(std::filesystem::path const& path,
     return path.generic_string();
 }
 
+std::string quote_command_arg(std::string_view arg) {
+    if (arg.empty())
+        return "\"\"";
+
+    auto needs_quotes = false;
+    for (auto ch : arg) {
+        if (std::isspace(static_cast<unsigned char>(ch)) || ch == '"') {
+            needs_quotes = true;
+            break;
+        }
+    }
+    if (!needs_quotes)
+        return std::string{arg};
+
+    auto escaped = std::string{};
+    escaped.reserve(arg.size());
+    for (auto ch : arg) {
+        if (ch == '"')
+            escaped += "\\\"";
+        else
+            escaped.push_back(ch);
+    }
+    return std::format("\"{}\"", escaped);
+}
+
+std::string command_text(core::ProcessSpec const& spec) {
+    auto text = quote_command_arg(spec.program);
+    for (auto const& arg : spec.args) {
+        text.push_back(' ');
+        text += quote_command_arg(arg);
+    }
+    return text;
+}
+
+std::string tail_excerpt(std::string_view text, std::size_t max_chars = 2000) {
+    if (text.empty() || text.size() <= max_chars)
+        return std::string{text};
+
+    auto start = text.size() - max_chars;
+    if (auto line_start = text.find('\n', start); line_start != std::string_view::npos &&
+        line_start + 1 < text.size()) {
+        start = line_start + 1;
+    }
+    return std::format("...\n{}", text.substr(start));
+}
+
+void print_output_block(std::string_view heading, std::string_view text) {
+    if (text.empty())
+        return;
+    write_line(stdout);
+    write_formatted_line(stdout, "---- {} ----", heading);
+    write_stream(stdout, text);
+    if (!text.ends_with('\n'))
+        write_line(stdout);
+}
+
 void print_header(std::string_view verb, std::string_view name,
                   core::ProjectContext const& project) {
     write_formatted_line(stdout, "exon: {} {} ({})", verb, name, profile_label(project));
@@ -490,10 +546,28 @@ void print_failure_summary(std::string_view verb, std::string_view stage,
 
 void print_build_success(std::string_view verb, std::filesystem::path const& artifact,
                          core::ProjectContext const& project,
-                         std::chrono::milliseconds elapsed) {
+                         std::chrono::milliseconds elapsed,
+                         std::string_view location_label) {
     write_line(stdout);
     write_formatted_line(stdout, "exon: {} succeeded", verb);
-    write_formatted_line(stdout, "  artifact  {}", display_path(artifact, project.root));
+    write_formatted_line(stdout, "  {:<9} {}", location_label,
+                         display_path(artifact, project.root));
+    write_formatted_line(stdout, "  elapsed   {}", reporting::format_duration(elapsed));
+}
+
+void print_build_success(std::string_view verb, std::filesystem::path const& artifact,
+                         core::ProjectContext const& project,
+                         std::chrono::milliseconds elapsed) {
+    print_build_success(verb, artifact, project, elapsed, "artifact");
+}
+
+void print_build_finish(std::filesystem::path const& location,
+                        core::ProjectContext const& project,
+                        std::chrono::milliseconds elapsed,
+                        std::string_view location_label) {
+    print_stage("finish");
+    write_formatted_line(stdout, "  {:<9} {}", location_label,
+                         display_path(location, project.root));
     write_formatted_line(stdout, "  elapsed   {}", reporting::format_duration(elapsed));
 }
 
@@ -530,6 +604,113 @@ void print_captured_output(std::string_view name, reporting::ProcessResult const
         write_stream(stderr, result.stderr_text);
         if (!result.stderr_text.ends_with('\n'))
             write_line(stderr);
+    }
+}
+
+struct StepFailure {
+    core::ProcessStep step;
+    reporting::ProcessResult result;
+};
+
+struct TestRunRecord {
+    std::string name;
+    reporting::ProcessResult result;
+};
+
+reporting::ProcessResult run_step(core::ProcessStep const& step, reporting::StreamMode mode,
+                                  bool use_ninja_status);
+void maybe_print_windows_native_toolchain_warning(build::BuildRequest const& request);
+void maybe_print_windows_native_toolchain_failure_hint(build::BuildRequest const& request,
+                                                       reporting::ProcessResult const& result);
+
+void print_failure_excerpt(core::ProcessStep const& step,
+                           reporting::ProcessResult const& result) {
+    auto stderr_excerpt = tail_excerpt(result.stderr_text);
+    auto stdout_excerpt = tail_excerpt(result.stdout_text);
+    if (stderr_excerpt.empty() && stdout_excerpt.empty())
+        return;
+
+    write_line(stdout);
+    write_line(stdout, "Captured output excerpt:");
+    write_formatted_line(stdout, "  command   {}", command_text(step.spec));
+    print_output_block("stderr excerpt", stderr_excerpt);
+    print_output_block("stdout excerpt", stdout_excerpt);
+}
+
+void print_wrapped_rerun_hint() {
+    write_line(stdout);
+    write_line(stdout, "hint: rerun with --output wrapped to show full tool output");
+}
+
+std::optional<StepFailure> run_steps_human(std::vector<core::ProcessStep> const& steps,
+                                           std::string_view stage,
+                                           bool use_ninja_status = false) {
+    print_stage(stage);
+    for (auto const& step : steps) {
+        auto result = run_step(step, reporting::StreamMode::capture, use_ninja_status);
+        if (result.exit_code != 0)
+            return StepFailure{.step = step, .result = std::move(result)};
+    }
+    return std::nullopt;
+}
+
+std::optional<StepFailure> run_configure_steps_human(std::vector<core::ProcessStep> const& steps,
+                                                     build::BuildRequest const& request) {
+    print_stage("configure");
+    maybe_print_windows_native_toolchain_warning(request);
+    for (auto const& step : steps) {
+        auto result = run_step(step, reporting::StreamMode::capture, false);
+        if (result.exit_code != 0)
+            return StepFailure{.step = step, .result = std::move(result)};
+    }
+    return std::nullopt;
+}
+
+int finish_human_failure(std::string_view verb, std::string_view stage,
+                         build::BuildRequest const& request,
+                         core::ProcessStep const& step,
+                         reporting::ProcessResult const& result,
+                         std::chrono::steady_clock::time_point started) {
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+    print_failure_summary(verb, stage, request.project, elapsed);
+    print_failure_excerpt(step, result);
+    maybe_print_windows_native_toolchain_failure_hint(request, result);
+    print_wrapped_rerun_hint();
+    return result.exit_code;
+}
+
+void print_human_test_outputs(std::vector<TestRunRecord> const& records,
+                              reporting::ShowOutput show_output) {
+    auto selected = std::vector<TestRunRecord const*>{};
+    for (auto const& record : records) {
+        auto failed = record.result.timed_out || record.result.exit_code != 0;
+        if (!reporting::should_show_output(show_output, failed))
+            continue;
+        if (record.result.stdout_text.empty() && record.result.stderr_text.empty())
+            continue;
+        selected.push_back(&record);
+    }
+    if (selected.empty())
+        return;
+
+    write_line(stdout);
+    write_line(stdout, show_output == reporting::ShowOutput::all ? "Output:" : "Failures:");
+    for (auto const* record : selected) {
+        write_line(stdout);
+        write_formatted_line(stdout, "{} {}", reporting::test_status(record->result), record->name);
+        if (!record->result.stdout_text.empty()) {
+            write_formatted_line(stdout, "---- output: {} (stdout) ----", record->name);
+            write_stream(stdout, record->result.stdout_text);
+            if (!record->result.stdout_text.ends_with('\n'))
+                write_line(stdout);
+        }
+        if (!record->result.stderr_text.empty()) {
+            write_formatted_line(stdout, "---- output: {} (stderr) ----", record->name);
+            write_stream(stdout, record->result.stderr_text);
+            if (!record->result.stderr_text.ends_with('\n'))
+                write_line(stdout);
+        }
     }
 }
 
@@ -661,11 +842,11 @@ reporting::ProcessResult run_step(core::ProcessStep const& step, reporting::Stre
 }
 
 reporting::OutputMode parse_output_mode_text(std::string_view value) {
-    auto parsed = value.empty() ? std::optional{reporting::OutputMode::wrapped}
+    auto parsed = value.empty() ? std::optional{reporting::OutputMode::human}
                                 : reporting::parse_output_mode(value);
     if (!parsed) {
         throw std::runtime_error(
-            std::format("invalid --output '{}': expected raw or wrapped", value));
+            std::format("invalid --output '{}': expected human, raw, or wrapped", value));
     }
     return *parsed;
 }
@@ -714,7 +895,7 @@ int run_configure_steps_wrapped(std::vector<core::ProcessStep> const& steps,
     print_stage("configure");
     maybe_print_windows_native_toolchain_warning(request);
     for (auto const& step : steps) {
-        auto result = run_step(step, reporting::StreamMode::tee);
+        auto result = run_step(step, reporting::StreamMode::tee, false);
         if (result.exit_code != 0) {
             maybe_print_windows_native_toolchain_failure_hint(request, result);
             return result.exit_code;
@@ -756,7 +937,7 @@ int run_tests_wrapped(std::vector<core::ProcessStep> const& steps,
                       int& passed, int& failed, int& timed_out) {
     print_stage("run");
     for (auto const& step : steps) {
-        auto result = run_step(step, reporting::StreamMode::capture);
+        auto result = run_step(step, reporting::StreamMode::capture, false);
         write_formatted_line(stdout, "  {} ... {}", step.label, reporting::test_status(result));
         print_captured_output(step.label, result, show_output);
         if (result.timed_out) {
@@ -772,10 +953,13 @@ int run_tests_wrapped(std::vector<core::ProcessStep> const& steps,
 
 int run_build_wrapped(build::BuildRequest const& request, build::BuildPlan const& plan,
                       std::string_view verb,
-                      std::chrono::steady_clock::time_point started) {
+                      std::chrono::steady_clock::time_point started,
+                      std::optional<std::filesystem::path> success_path = std::nullopt,
+                      std::string_view success_label = "artifact") {
     print_stage("sync");
     auto changed = apply_writes(plan.writes, false);
-    write_formatted_line(stdout, "  {}", changed ? "generated build files" : "build files up to date");
+    write_formatted_line(stdout, "  {}",
+                         changed ? "generated build files" : "build files up to date");
 
     if (changed || !plan.configured) {
         auto rc = run_configure_steps_wrapped(plan.configure_steps, request);
@@ -798,10 +982,42 @@ int run_build_wrapped(build::BuildRequest const& request, build::BuildPlan const
         return rc;
     }
 
-    auto artifact = request.project.build_dir / request.manifest.name;
-    if (!request.project.is_wasm)
-        artifact += toolchain::exe_suffix;
-    print_build_success(verb, artifact, request.project, elapsed);
+    auto location = success_path.value_or(request.project.build_dir / request.manifest.name);
+    if (!success_path && !request.project.is_wasm)
+        location += toolchain::exe_suffix;
+    print_build_success(verb, location, request.project, elapsed, success_label);
+    return 0;
+}
+
+int run_build_human(build::BuildRequest const& request, build::BuildPlan const& plan,
+                    std::string_view verb,
+                    std::chrono::steady_clock::time_point started,
+                    std::optional<std::filesystem::path> success_path = std::nullopt,
+                    std::string_view success_label = "artifact") {
+    print_stage("sync");
+    auto changed = apply_writes(plan.writes, false);
+    write_formatted_line(stdout, "  {}",
+                         changed ? "generated build files" : "build files up to date");
+
+    if (changed || !plan.configured) {
+        if (auto failure = run_configure_steps_human(plan.configure_steps, request))
+            return finish_human_failure(verb, "configure", request, failure->step,
+                                        failure->result, started);
+    } else {
+        print_stage("configure");
+        write_line(stdout, "  cached");
+    }
+
+    if (auto failure = run_steps_human(plan.build_steps, "build"))
+        return finish_human_failure(verb, "build", request, failure->step,
+                                    failure->result, started);
+
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+    auto location = success_path.value_or(request.project.build_dir / request.manifest.name);
+    if (!success_path && !request.project.is_wasm)
+        location += toolchain::exe_suffix;
+    print_build_finish(location, request.project, elapsed, success_label);
     return 0;
 }
 
@@ -844,6 +1060,58 @@ int run_test_wrapped(build::BuildRequest const& request, build::BuildPlan const&
     print_test_summary(static_cast<int>(plan.run_steps.size()), passed, failed, timed_out,
                        request.project, elapsed);
     return run_rc;
+}
+
+int run_test_human(build::BuildRequest const& request, build::BuildPlan const& plan,
+                   reporting::Options const& options,
+                   std::chrono::steady_clock::time_point started) {
+    print_stage("sync");
+    auto changed = apply_writes(plan.writes, false);
+    write_formatted_line(stdout, "  {}",
+                         changed ? "generated build files" : "build files up to date");
+
+    if (changed || !plan.configured) {
+        if (auto failure = run_configure_steps_human(plan.configure_steps, request))
+            return finish_human_failure("test", "configure", request, failure->step,
+                                        failure->result, started);
+    } else {
+        print_stage("configure");
+        write_line(stdout, "  cached");
+    }
+
+    if (auto failure = run_steps_human(plan.build_steps, "build"))
+        return finish_human_failure("test", "build", request, failure->step,
+                                    failure->result, started);
+
+    auto records = std::vector<TestRunRecord>{};
+    int passed = 0;
+    int failed = 0;
+    int timed_out = 0;
+
+    print_stage("run");
+    write_formatted_line(stdout, "  collected {} test binaries", plan.run_steps.size());
+    for (auto const& step : plan.run_steps) {
+        auto result = run_step(step, reporting::StreamMode::capture, false);
+        write_formatted_line(stdout, "  {:<7} {}", reporting::test_status(result), step.label);
+        if (result.timed_out) {
+            ++timed_out;
+        } else if (result.exit_code == 0) {
+            ++passed;
+        } else {
+            ++failed;
+        }
+        records.push_back({
+            .name = step.label,
+            .result = std::move(result),
+        });
+    }
+
+    print_human_test_outputs(records, options.show_output);
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+    print_test_summary(static_cast<int>(plan.run_steps.size()), passed, failed, timed_out,
+                       request.project, elapsed);
+    return (failed == 0 && timed_out == 0) ? 0 : 1;
 }
 
 } // namespace detail
@@ -900,6 +1168,8 @@ inline int run(std::filesystem::path const& project_root, manifest::Manifest con
             auto request = detail::prepare_request(project_root, m, release, target, false, {},
                                                    {});
             auto plan = build::plan_build(request);
+            if (options.output == reporting::OutputMode::human)
+                return detail::run_build_human(request, plan, "build", started);
             return detail::run_build_wrapped(request, plan, "build", started);
         } catch (...) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -954,6 +1224,8 @@ inline int run(std::filesystem::path const& project_root, manifest::Manifest con
             auto request = detail::prepare_request(project_root, m, portable_manifest, release,
                                                    target, false, {}, {});
             auto plan = build::plan_build(request);
+            if (options.output == reporting::OutputMode::human)
+                return detail::run_build_human(request, plan, "build", started);
             return detail::run_build_wrapped(request, plan, "build", started);
         } catch (...) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1072,6 +1344,8 @@ inline int run_test(std::filesystem::path const& project_root,
             auto request = detail::prepare_request(project_root, m, release, target, true, filter,
                                                    timeout);
             auto plan = build::plan_test(request);
+            if (options.output == reporting::OutputMode::human)
+                return detail::run_test_human(request, plan, options, started);
             return detail::run_test_wrapped(request, plan, options, started);
         } catch (...) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1137,6 +1411,8 @@ inline int run_test(std::filesystem::path const& project_root,
             auto request = detail::prepare_request(project_root, m, portable_manifest, release,
                                                    target, true, filter, timeout);
             auto plan = build::plan_test(request);
+            if (options.output == reporting::OutputMode::human)
+                return detail::run_test_human(request, plan, options, started);
             return detail::run_test_wrapped(request, plan, options, started);
         } catch (...) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
