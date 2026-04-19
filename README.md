@@ -101,10 +101,25 @@ hello, world!
 `exon debug` is a native-only convenience launcher for host debuggers. It supports host executables only and does not support `--target wasm32-wasi` yet.
 
 ```sh
+exon debug [--release] [--debugger auto|lldb|gdb|devenv|cdb|<path>] [--member <name>] [--exclude x,y] [-- <args...>]
+```
+
+```sh
 exon debug
 exon debug -- --port 8080
 exon debug --debugger gdb -- input.txt
+exon debug --debugger devenv.com
+exon debug --debugger C:\Debuggers\cdb.exe -- input.txt
 ```
+
+`--debugger` accepts `auto`, a built-in debugger name, or a path/command whose basename classifies as one of these supported debugger families:
+
+- `lldb*`
+- `gdb*`
+- `devenv`, `devenv.exe`, `devenv.com`
+- `cdb`, `cdb.exe`
+
+Examples of accepted custom values include `lldb-18`, `gdb-14`, `devenv.com`, and `C:\Debuggers\cdb.exe`. Values outside those families, including `vsjitdebugger`, are rejected.
 
 `auto` picks a debugger by host platform:
 
@@ -121,8 +136,11 @@ Debugger invocation follows the debugger's native CLI syntax:
 
 Windows-specific notes:
 
+- `devenv` launches through the full Visual Studio IDE. `cdb` is the command-line debugger from the Windows debugger toolchain, which fits Build Tools / Debugging Tools-style environments better.
 - `devenv` and `cdb` are only supported on Windows hosts.
-- `devenv /debugexe` can misinterpret program arguments that start with `/` as Visual Studio switches. When that happens, `exon debug --debugger devenv` fails early with a targeted error, and `--debugger auto` skips `devenv` and falls back to the next supported debugger on `PATH`.
+- `devenv /debugexe` can misinterpret program arguments that start with `/` as Visual Studio switches. `exon debug --debugger devenv -- /flag` fails early with a targeted error.
+- `exon debug --debugger auto -- /flag` skips `devenv` and continues with `cdb`, then `lldb`, then `gdb`.
+- `exon debug --help` is not a separate command-specific help entry today; use the top-level `exon` usage text instead.
 
 ## exon.toml
 
