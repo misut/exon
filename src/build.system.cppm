@@ -23,6 +23,13 @@ import vcpkg.system;
 
 export namespace build::system {
 
+struct TestRunSummary {
+    int collected = 0;
+    int passed = 0;
+    int failed = 0;
+    int timed_out = 0;
+};
+
 bool sync_root_cmake(std::filesystem::path const& project_root,
                      manifest::Manifest const& m,
                      std::vector<fetch::FetchedDep> const& deps);
@@ -62,6 +69,12 @@ int run_test(std::filesystem::path const& project_root,
              std::optional<std::chrono::milliseconds> timeout,
              reporting::Options const& options);
 int run_test(std::filesystem::path const& project_root,
+             manifest::Manifest const& m, bool release,
+             std::string_view target, std::string_view filter,
+             std::optional<std::chrono::milliseconds> timeout,
+             reporting::Options const& options,
+             TestRunSummary& summary);
+int run_test(std::filesystem::path const& project_root,
              manifest::Manifest const& m, manifest::Manifest const& portable_manifest,
              bool release, std::string_view target, std::string_view filter,
              std::optional<std::chrono::milliseconds> timeout);
@@ -76,6 +89,12 @@ int run_test(std::filesystem::path const& project_root,
              bool release, std::string_view target, std::string_view filter,
              std::optional<std::chrono::milliseconds> timeout,
              reporting::Options const& options);
+int run_test(std::filesystem::path const& project_root,
+             manifest::Manifest const& m, manifest::Manifest const& portable_manifest,
+             bool release, std::string_view target, std::string_view filter,
+             std::optional<std::chrono::milliseconds> timeout,
+             reporting::Options const& options,
+             TestRunSummary& summary);
 
 namespace detail {
 
@@ -585,6 +604,14 @@ void print_test_summary(int collected, int passed, int failed, int timed_out,
     write_formatted_line(stdout, "  elapsed   {}", reporting::format_duration(elapsed));
 }
 
+void assign_test_run_summary(TestRunSummary& summary, int collected, int passed, int failed,
+                             int timed_out) {
+    summary.collected = collected;
+    summary.passed = passed;
+    summary.failed = failed;
+    summary.timed_out = timed_out;
+}
+
 void print_captured_output(std::string_view name, reporting::ProcessResult const& result,
                            reporting::ShowOutput show_output) {
     auto failed = result.timed_out || result.exit_code != 0;
@@ -904,16 +931,17 @@ int run_configure_steps_wrapped(std::vector<core::ProcessStep> const& steps,
     return 0;
 }
 
-int run_tests(std::vector<core::ProcessStep> const& steps) {
+int run_tests(std::vector<core::ProcessStep> const& steps, TestRunSummary& summary) {
     std::println("running tests...\n");
     int passed = 0;
     int failed = 0;
+    int timed_out = 0;
     for (auto const& step : steps) {
         auto result = run_process(step.spec);
         auto const& name = step.label;
         if (result.timed_out) {
             std::println("  {} ... TIMEOUT", name);
-            ++failed;
+            ++timed_out;
         } else if (result.exit_code == 0) {
             std::println("  {} ... ok", name);
             ++passed;
@@ -923,9 +951,10 @@ int run_tests(std::vector<core::ProcessStep> const& steps) {
         }
     }
 
+    assign_test_run_summary(summary, static_cast<int>(steps.size()), passed, failed, timed_out);
     std::println("");
-    if (failed > 0) {
-        std::println("{} passed, {} failed", passed, failed);
+    if (failed > 0 || timed_out > 0) {
+        std::println("{} passed, {} failed", passed, failed + timed_out);
         return 1;
     }
     std::println("all {} tests passed", passed);
@@ -934,8 +963,11 @@ int run_tests(std::vector<core::ProcessStep> const& steps) {
 
 int run_tests_wrapped(std::vector<core::ProcessStep> const& steps,
                       reporting::ShowOutput show_output,
-                      int& passed, int& failed, int& timed_out) {
+                      TestRunSummary& summary) {
     print_stage("run");
+    int passed = 0;
+    int failed = 0;
+    int timed_out = 0;
     for (auto const& step : steps) {
         auto result = run_step(step, reporting::StreamMode::capture, false);
         write_formatted_line(stdout, "  {} ... {}", step.label, reporting::test_status(result));
@@ -948,6 +980,7 @@ int run_tests_wrapped(std::vector<core::ProcessStep> const& steps,
             ++failed;
         }
     }
+    assign_test_run_summary(summary, static_cast<int>(steps.size()), passed, failed, timed_out);
     return (failed == 0 && timed_out == 0) ? 0 : 1;
 }
 
@@ -1023,7 +1056,8 @@ int run_build_human(build::BuildRequest const& request, build::BuildPlan const& 
 
 int run_test_wrapped(build::BuildRequest const& request, build::BuildPlan const& plan,
                      reporting::Options const& options,
-                     std::chrono::steady_clock::time_point started) {
+                     std::chrono::steady_clock::time_point started,
+                     TestRunSummary& summary) {
     print_stage("sync");
     auto changed = apply_writes(plan.writes, false);
     write_formatted_line(stdout, "  {}", changed ? "generated build files" : "build files up to date");
@@ -1049,22 +1083,19 @@ int run_test_wrapped(build::BuildRequest const& request, build::BuildPlan const&
         return build_rc;
     }
 
-    int passed = 0;
-    int failed = 0;
-    int timed_out = 0;
     write_formatted_line(stdout, "  collected {} test binaries", plan.run_steps.size());
-    auto run_rc = run_tests_wrapped(plan.run_steps, options.show_output, passed, failed,
-                                    timed_out);
+    auto run_rc = run_tests_wrapped(plan.run_steps, options.show_output, summary);
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started);
-    print_test_summary(static_cast<int>(plan.run_steps.size()), passed, failed, timed_out,
+    print_test_summary(summary.collected, summary.passed, summary.failed, summary.timed_out,
                        request.project, elapsed);
     return run_rc;
 }
 
 int run_test_human(build::BuildRequest const& request, build::BuildPlan const& plan,
                    reporting::Options const& options,
-                   std::chrono::steady_clock::time_point started) {
+                   std::chrono::steady_clock::time_point started,
+                   TestRunSummary& summary) {
     print_stage("sync");
     auto changed = apply_writes(plan.writes, false);
     write_formatted_line(stdout, "  {}",
@@ -1107,9 +1138,11 @@ int run_test_human(build::BuildRequest const& request, build::BuildPlan const& p
     }
 
     print_human_test_outputs(records, options.show_output);
+    assign_test_run_summary(summary, static_cast<int>(plan.run_steps.size()), passed, failed,
+                            timed_out);
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started);
-    print_test_summary(static_cast<int>(plan.run_steps.size()), passed, failed, timed_out,
+    print_test_summary(summary.collected, summary.passed, summary.failed, summary.timed_out,
                        request.project, elapsed);
     return (failed == 0 && timed_out == 0) ? 0 : 1;
 }
@@ -1335,6 +1368,16 @@ inline int run_test(std::filesystem::path const& project_root,
                     std::string_view target, std::string_view filter,
                     std::optional<std::chrono::milliseconds> timeout,
                     reporting::Options const& options) {
+    TestRunSummary summary;
+    return run_test(project_root, m, release, target, filter, timeout, options, summary);
+}
+
+inline int run_test(std::filesystem::path const& project_root,
+                    manifest::Manifest const& m, bool release,
+                    std::string_view target, std::string_view filter,
+                    std::optional<std::chrono::milliseconds> timeout,
+                    reporting::Options const& options,
+                    TestRunSummary& summary) {
     if (options.output != reporting::OutputMode::raw) {
         auto started = std::chrono::steady_clock::now();
         auto project = build::project_context(project_root, release, target);
@@ -1345,8 +1388,8 @@ inline int run_test(std::filesystem::path const& project_root,
                                                    timeout);
             auto plan = build::plan_test(request);
             if (options.output == reporting::OutputMode::human)
-                return detail::run_test_human(request, plan, options, started);
-            return detail::run_test_wrapped(request, plan, options, started);
+                return detail::run_test_human(request, plan, options, started, summary);
+            return detail::run_test_wrapped(request, plan, options, started, summary);
         } catch (...) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started);
@@ -1369,7 +1412,7 @@ inline int run_test(std::filesystem::path const& project_root,
     if (rc != 0)
         return rc;
 
-    return detail::run_tests(plan.run_steps);
+    return detail::run_tests(plan.run_steps, summary);
 }
 
 inline int run_test(std::filesystem::path const& project_root,
@@ -1402,6 +1445,18 @@ inline int run_test(std::filesystem::path const& project_root,
                     std::string_view target, std::string_view filter,
                     std::optional<std::chrono::milliseconds> timeout,
                     reporting::Options const& options) {
+    TestRunSummary summary;
+    return run_test(project_root, m, portable_manifest, release, target, filter, timeout,
+                    options, summary);
+}
+
+inline int run_test(std::filesystem::path const& project_root,
+                    manifest::Manifest const& m,
+                    manifest::Manifest const& portable_manifest, bool release,
+                    std::string_view target, std::string_view filter,
+                    std::optional<std::chrono::milliseconds> timeout,
+                    reporting::Options const& options,
+                    TestRunSummary& summary) {
     if (options.output != reporting::OutputMode::raw) {
         auto started = std::chrono::steady_clock::now();
         auto project = build::project_context(project_root, release, target);
@@ -1412,8 +1467,8 @@ inline int run_test(std::filesystem::path const& project_root,
                                                    target, true, filter, timeout);
             auto plan = build::plan_test(request);
             if (options.output == reporting::OutputMode::human)
-                return detail::run_test_human(request, plan, options, started);
-            return detail::run_test_wrapped(request, plan, options, started);
+                return detail::run_test_human(request, plan, options, started, summary);
+            return detail::run_test_wrapped(request, plan, options, started, summary);
         } catch (...) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started);
@@ -1436,7 +1491,7 @@ inline int run_test(std::filesystem::path const& project_root,
     if (rc != 0)
         return rc;
 
-    return detail::run_tests(plan.run_steps);
+    return detail::run_tests(plan.run_steps, summary);
 }
 
 } // namespace build::system

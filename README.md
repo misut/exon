@@ -80,11 +80,11 @@ hello, world!
 | `exon init [--lib\|--workspace] [name]` | Create a new package or workspace |
 | `exon new --lib\|--bin <name>` | Create a new workspace member from the workspace root |
 | `exon info` | Show package information |
-| `exon build [--release] [--target <t>] [--member a,b] [--exclude x,y] [--output raw\|wrapped]` | Build the project or selected workspace members |
+| `exon build [--release] [--target <t>] [--member a,b] [--exclude x,y] [--output human\|wrapped\|raw]` | Build the project or selected workspace members |
 | `exon check [--release] [--target <t>] [--member a,b] [--exclude x,y]` | Check syntax without linking |
 | `exon run [--release] [--target <t>] [--member <name>]` | Build and run |
 | `exon debug [--release] [--debugger auto\|lldb\|gdb\|devenv\|cdb\|<path>] [--member <name>] [--exclude x,y] [-- <args...>]` | Build and open the selected native executable in a native debugger |
-| `exon test [--release] [--target <t>] [--member a,b] [--exclude x,y] [--timeout <sec>] [--output raw\|wrapped] [--show-output failed\|all\|none]` | Build and run tests |
+| `exon test [--release] [--target <t>] [--member a,b] [--exclude x,y] [--timeout <sec>] [--output human\|wrapped\|raw] [--show-output failed\|all\|none]` | Build and run tests |
 | `exon clean [--member a,b] [--exclude x,y]` | Remove build artifacts |
 | `exon add [--dev] <pkg> <ver>` | Add a git dependency |
 | `exon add [--dev] --path <name> <path>` | Add a local path dependency |
@@ -279,7 +279,7 @@ ldflags = ["/fsanitize=address"]
 
 When these flags are present, exon now copies `clang_rt.asan_dynamic-x86_64.dll` next to each built executable and test binary. This makes direct execution from `.exon/debug/` work without manually editing `PATH`.
 
-`exon build` and `exon test` default to a wrapped console that adds stage headers and final summaries while still showing the underlying CMake/Ninja output. Use `--output raw` to fall back to the underlying tool output with minimal exon wrapping.
+`exon build` and `exon test` default to `human` output. `human` keeps the console focused on stage headers and final summaries, `wrapped` adds the same headers while still showing the underlying CMake/Ninja/test output, and `raw` keeps exon wrapping to a minimum.
 
 `exon test --show-output failed` (default) only shows captured stdout/stderr for failing or timed-out test binaries. Use `--show-output all` to always print captured output, or `--show-output none` to suppress it entirely.
 

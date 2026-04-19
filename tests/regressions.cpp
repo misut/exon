@@ -330,10 +330,11 @@ int run_test_output_fixture(reporting::ShowOutput show_output) {
         .label = "test-timeout",
     });
 
+    build::system::TestRunSummary summary;
     return build::system::detail::run_test_human(
         request, plan, reporting::Options{.output = reporting::OutputMode::human,
                                           .show_output = show_output},
-        std::chrono::steady_clock::now());
+        std::chrono::steady_clock::now(), summary);
 }
 
 int run_wrapped_build_output_fixture() {
@@ -385,38 +386,114 @@ int run_wrapped_test_output_fixture() {
 #endif
     plan.run_steps.push_back({.spec = std::move(pass), .label = "wrapped-pass"});
     plan.run_steps.push_back({.spec = std::move(fail), .label = "wrapped-fail"});
+    build::system::TestRunSummary summary;
     return build::system::detail::run_test_wrapped(
         request, plan, reporting::Options{.output = reporting::OutputMode::wrapped,
                                           .show_output = reporting::ShowOutput::failed},
-        std::chrono::steady_clock::now());
+        std::chrono::steady_clock::now(), summary);
+}
+
+void write_workspace_member(TmpProject& proj, std::string_view dir, std::string_view name,
+                            std::vector<std::pair<std::string, std::string>> const& tests) {
+    proj.write(std::format("{}/exon.toml", dir), std::format(R"(
+[package]
+name = "{}"
+version = "0.1.0"
+type = "bin"
+standard = 23
+)", name));
+    proj.write(std::format("{}/src/main.cpp", dir), std::format(R"(import std;
+
+int main() {{
+    std::println("{} main");
+    return 0;
+}}
+)", name));
+    for (auto const& [file_name, content] : tests)
+        proj.write(std::format("{}/tests/{}", dir, file_name), content);
 }
 
 void write_workspace_fixture(TmpProject& proj) {
     proj.write("exon.toml", R"(
 [workspace]
-members = ["app"]
+members = ["app", "tool"]
 )");
-    proj.write("app/exon.toml", R"(
-[package]
-name = "app"
-version = "0.1.0"
-type = "bin"
-standard = 23
-)");
-    proj.write("app/src/main.cpp", R"(import std;
+    write_workspace_member(
+        proj, "app", "app",
+        {
+            {"first.cpp", R"(import std;
 
 int main() {
-    std::println("hello workspace");
+    std::println("workspace app first");
     return 0;
 }
-)");
-    proj.write("app/tests/test_app.cpp", R"(import std;
+)"},
+            {"second.cpp", R"(import std;
 
 int main() {
-    std::println("workspace test");
+    std::println("workspace app second");
     return 0;
 }
+)"},
+        });
+    write_workspace_member(
+        proj, "tool", "tool",
+        {
+            {"tool.cpp", R"(import std;
+
+int main() {
+    std::println("workspace tool");
+    return 0;
+}
+)"},
+        });
+}
+
+void write_workspace_failfast_fixture(TmpProject& proj) {
+    proj.write("exon.toml", R"(
+[workspace]
+members = ["app", "broken", "after"]
 )");
+    write_workspace_member(
+        proj, "app", "app",
+        {
+            {"first.cpp", R"(import std;
+
+int main() {
+    std::println("workspace app first");
+    return 0;
+}
+)"},
+            {"second.cpp", R"(import std;
+
+int main() {
+    std::println("workspace app second");
+    return 0;
+}
+)"},
+        });
+    write_workspace_member(
+        proj, "broken", "broken",
+        {
+            {"broken.cpp", R"(import std;
+
+int main() {
+    std::println("workspace broken");
+    return 1;
+}
+)"},
+        });
+    write_workspace_member(
+        proj, "after", "after",
+        {
+            {"after.cpp", R"(import std;
+
+int main() {
+    std::println("workspace after");
+    return 0;
+}
+)"},
+        });
 }
 
 int run_workspace_build_fixture() {
@@ -429,6 +506,13 @@ int run_workspace_build_fixture() {
 int run_workspace_test_fixture() {
     TmpProject proj;
     write_workspace_fixture(proj);
+    auto guard = CwdGuard{proj.root};
+    return run_command(commands::cmd_test, {"exon", "test", "--output", "human"});
+}
+
+int run_workspace_test_failfast_fixture() {
+    TmpProject proj;
+    write_workspace_failfast_fixture(proj);
     auto guard = CwdGuard{proj.root};
     return run_command(commands::cmd_test, {"exon", "test", "--output", "human"});
 }
@@ -458,6 +542,8 @@ int maybe_run_output_fixture(int argc, char* argv[]) {
         return run_workspace_build_fixture();
     if (fixture == "workspace-test")
         return run_workspace_test_fixture();
+    if (fixture == "workspace-test-failfast")
+        return run_workspace_test_failfast_fixture();
     return 2;
 }
 
@@ -1016,8 +1102,37 @@ void test_workspace_human_output() {
     check(test_result.exit_code == 0, "workspace test human: exit code");
     check(test_result.stdout_text.contains("==> member app (app)"),
           "workspace test human: member header");
+    check(test_result.stdout_text.contains("==> member tool (tool)"),
+          "workspace test human: second member header");
+    check(test_result.stdout_text.contains("members   2 run, 2 passed, 0 failed"),
+          "workspace test human: member aggregate summary");
+    check(test_result.stdout_text.contains("binaries  3 run"),
+          "workspace test human: binary aggregate summary");
+    check(test_result.stdout_text.contains("collected 2 test binaries"),
+          "workspace test human: per-member binary summary kept");
+    check(test_result.stdout_text.contains("collected 1 test binaries"),
+          "workspace test human: second member binary summary kept");
     check(test_result.stdout_text.contains("exon: workspace test succeeded"),
           "workspace test human: aggregate summary");
+    check(!test_result.stdout_text.contains("exon: workspace test succeeded\n  collected "),
+          "workspace test human: aggregate summary is no longer binary-looking");
+}
+
+void test_workspace_human_fail_fast_summary() {
+    auto result = run_self_fixture("workspace-test-failfast");
+    check(result.exit_code == 1, "workspace test fail-fast: exit code");
+    check(result.stdout_text.contains("==> member app (app)"),
+          "workspace test fail-fast: first member ran");
+    check(result.stdout_text.contains("==> member broken (broken)"),
+          "workspace test fail-fast: failing member ran");
+    check(!result.stdout_text.contains("==> member after (after)"),
+          "workspace test fail-fast: later member skipped after failure");
+    check(result.stdout_text.contains("members   2 run, 1 passed, 1 failed"),
+          "workspace test fail-fast: executed member summary");
+    check(result.stdout_text.contains("binaries  3 run"),
+          "workspace test fail-fast: executed binary summary");
+    check(result.stdout_text.contains("exon: workspace test failed"),
+          "workspace test fail-fast: failure footer");
 }
 
 void test_module_detection_includes_dependency_cppm_sources() {
@@ -1181,6 +1296,7 @@ int main(int argc, char* argv[]) {
     test_human_test_none_output_mode();
     test_wrapped_output_regressions();
     test_workspace_human_output();
+    test_workspace_human_fail_fast_summary();
     test_module_detection_includes_dependency_cppm_sources();
 #if defined(_WIN32)
     test_windows_native_toolchain_diagnostic_predicates();
