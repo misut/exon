@@ -13,19 +13,27 @@ if(MSVC)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
+if(NOT DEFINED EXON_ENABLE_TEST_TARGETS)
+    set(EXON_ENABLE_TEST_TARGETS ON)
+endif()
+
 include(FetchContent)
-FetchContent_Declare(cppx
-    GIT_REPOSITORY https://github.com/misut/cppx.git
-    GIT_TAG v1.3.0
-    GIT_SHALLOW ON
-)
-FetchContent_Declare(tomlcpp
-    GIT_REPOSITORY https://github.com/misut/tomlcpp.git
-    GIT_TAG v0.3.0
-    GIT_SHALLOW ON
-)
-FetchContent_MakeAvailable(cppx)
-FetchContent_MakeAvailable(tomlcpp)
+if(NOT TARGET cppx)
+    FetchContent_Declare(cppx
+        GIT_REPOSITORY https://github.com/misut/cppx.git
+        GIT_TAG v1.3.0
+        GIT_SHALLOW ON
+    )
+    FetchContent_MakeAvailable(cppx)
+endif()
+if(NOT TARGET tomlcpp)
+    FetchContent_Declare(tomlcpp
+        GIT_REPOSITORY https://github.com/misut/tomlcpp.git
+        GIT_TAG v0.3.0
+        GIT_SHALLOW ON
+    )
+    FetchContent_MakeAvailable(tomlcpp)
+endif()
 
 add_library(exon-modules)
 target_sources(exon-modules
@@ -87,8 +95,10 @@ set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vcpkg.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
     PROPERTIES COMPILE_DEFINITIONS
-    "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.24.0\""
+    "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.25.0\""
 )
+
+if(EXON_ENABLE_TEST_TARGETS)
 
 add_executable(test-regressions)
 target_sources(test-regressions PRIVATE
@@ -185,3 +195,4 @@ target_sources(test-test_vcpkg PRIVATE
 target_link_libraries(test-test_vcpkg PRIVATE
     exon-modules
 )
+endif()
