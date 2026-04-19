@@ -43,7 +43,7 @@ struct TmpProject {
     void write(std::string const& rel_path, std::string const& content) {
         auto path = root / rel_path;
         std::filesystem::create_directories(path.parent_path());
-        auto file = std::ofstream{path};
+        auto file = std::ofstream{path, std::ios::binary};
         file << content;
     }
 };
