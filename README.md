@@ -394,7 +394,10 @@ utils = true
 exon add --workspace core
 ```
 
-See [docs/workspace.md](docs/workspace.md) for a full monorepo walkthrough.
+See [docs/workspace.md](docs/workspace.md) for a full monorepo walkthrough, or open
+[`examples/workspace/`](examples/workspace/) for a checked-in runnable workspace that
+demonstrates shared defaults, workspace member dependencies, and root
+`exon run --member <name>`.
 
 ### vcpkg dependencies
 

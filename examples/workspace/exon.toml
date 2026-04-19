@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "libs/foundation",
+    "libs/greeting",
+    "apps/hello",
+    "apps/report",
+    "apps/inspect",
+]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["misut"]
+license = "MIT"
+standard = 23
+build-system = "exon"
+
+[workspace.build]
+cxxflags = ["-Wall", "-Wextra"]
+
+[workspace.build.debug]
+cxxflags = ["-DWORKSPACE_PROFILE_DEBUG=1"]
+
+[workspace.build.release]
+cxxflags = ["-DWORKSPACE_PROFILE_RELEASE=1"]
+
+[sync]
+cmake-in-root = true
