@@ -2,6 +2,20 @@
 
 A workspace is a collection of packages that share a single root and can reference each other. Use it when one logical project is split across multiple packages (a library plus its binary, a core plus plugins, etc.).
 
+## Scaffolding
+
+Create a workspace root, then add members from the root:
+
+```sh
+mkdir my-monorepo
+cd my-monorepo
+
+exon init --workspace
+exon new --lib core
+exon new --lib util
+exon new --bin app
+```
+
 ## Layout
 
 ```
@@ -24,10 +38,25 @@ The workspace root has a `[workspace]` section listing member directories (relat
 ```toml
 # my-monorepo/exon.toml
 [workspace]
-members = ["core", "app"]
+members = ["core", "util", "app"]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["misut"]
+license = "MIT"
+standard = 23
+
+[workspace.build]
+cxxflags = ["-Wall"]
+
+[workspace.build.debug]
+cxxflags = ["-fsanitize=address"]
+ldflags = ["-fsanitize=address"]
 ```
 
-Running `exon build`, `exon check`, `exon test`, `exon sync`, or `exon clean` in the workspace root iterates over every member in order.
+`[workspace.package]` provides defaults for members. A member's explicit `[package]` field wins; missing fields inherit from the root.
+
+`[workspace.build]`, `[workspace.build.debug]`, and `[workspace.build.release]` prepend shared compile and link flags to each member's own build flags.
 
 ## Member packages
 
@@ -37,28 +66,34 @@ Each member has a normal `exon.toml` with a `[package]` section:
 # my-monorepo/core/exon.toml
 [package]
 name = "core"
-version = "0.1.0"
 type = "lib"
-standard = 23
+```
+
+```toml
+# my-monorepo/util/exon.toml
+[package]
+name = "util"
+type = "lib"
+
+[dependencies.workspace]
+core = true
 ```
 
 ```toml
 # my-monorepo/app/exon.toml
 [package]
 name = "app"
-version = "0.1.0"
 type = "bin"
-standard = 23
 
 [dependencies.workspace]
-core = true
+util = true
 ```
 
-`core = true` tells exon: *find a workspace member whose `package.name` is `core` and link it*. Exon walks up from `app/` looking for an `exon.toml` with `[workspace]`, then matches `core` against each member's `package.name` field. Member directory names are irrelevant — only `package.name` matches.
+`util = true` tells exon: find a workspace member whose `package.name` is `util` and link it. Exon walks up from `app/` looking for an `exon.toml` with `[workspace]`, then matches `util` against each member's `package.name`. Member directory names are irrelevant — only `package.name` matches.
 
 ## Sharing a module across members
 
-With the workspace dep in place, `app/src/main.cpp` can just `import core;`:
+With the workspace deps in place, `app/src/main.cpp` can just `import util;`:
 
 ```cpp
 // my-monorepo/core/src/core.cppm
@@ -72,20 +107,42 @@ std::string greeting() { return "hello from core"; }
 ```
 
 ```cpp
-// my-monorepo/app/src/main.cpp
+// my-monorepo/util/src/util.cppm
+export module util;
 import std;
 import core;
 
+export namespace util {
+std::string banner() {
+    return std::format("{} ({})", core::greeting(), core::magic_number());
+}
+}
+```
+
+```cpp
+// my-monorepo/app/src/main.cpp
+import std;
+import util;
+
 int main() {
-    std::println("magic: {}", core::magic_number());
-    std::println("{}", core::greeting());
+    std::println("{}", util::banner());
     return 0;
 }
 ```
 
+## Root commands
+
+From the workspace root:
+
+- `exon build`, `exon check`, `exon test`, `exon sync`, `exon clean`, and `exon update` operate on the selected member set.
+- Members run in dependency order based on `[dependencies.workspace]`, not declaration order in `members = [...]`.
+- `--member a,b` narrows the selection.
+- `--exclude x,y` removes members from the selection.
+- `exon run --member <name>` runs a workspace member from the root. Without `--member`, exon requires exactly one runnable member in the current selection.
+
 ## Building
 
-Build everything from the workspace root:
+Build the whole workspace from the root:
 
 ```sh
 cd my-monorepo
@@ -93,19 +150,26 @@ exon build
 ```
 
 ```
---- core ---
-configuring...
-building...
-build succeeded: .exon/debug/core
---- app ---
-fetching dependencies...
-  path: core -> /abs/path/to/my-monorepo/core
-configuring...
-building...
-build succeeded: .exon/debug/app
+configuring workspace...
+building workspace...
+build succeeded: .exon/workspace/debug
 ```
 
-Or build a single member directly:
+Workspace builds generate one shared CMake graph under `.exon/workspace/<profile>` (or `.exon/workspace/<target>/<profile>` for cross-target builds). Shared workspace libraries are compiled once and reused by downstream members.
+
+Build only one app plus the workspace libraries it depends on:
+
+```sh
+exon build --member app
+```
+
+Run one app from the root:
+
+```sh
+exon run --member app
+```
+
+You can still run a member directly from its own directory:
 
 ```sh
 cd my-monorepo/app
@@ -114,14 +178,13 @@ exon run
 
 ```
 fetching dependencies...
-  path: core -> /abs/path/to/my-monorepo/core
+fetching dependencies...
 configuring...
 building...
 build succeeded: .exon/debug/app
 running app...
 
-magic: 42
-hello from core
+hello from core (42)
 ```
 
 ## CLI
@@ -148,6 +211,18 @@ Remove any dep (git, find, path, or workspace) by name:
 exon remove core
 ```
 
+Update part of the workspace:
+
+```sh
+exon update --member util,app
+```
+
+Exclude one member from a root-wide test run:
+
+```sh
+exon test --exclude app
+```
+
 ## Workspace vs. path deps
 
 Both end up calling `add_subdirectory()` under the hood. Prefer **workspace** when both packages live in the same monorepo — it's resilient to directory moves and uses the package name that end-users actually see. Prefer **path** for references outside the workspace (vendored libraries, sibling repositories, etc.).
@@ -162,15 +237,40 @@ shared = "../../vendor/shared"   # "explicit directory, anywhere on disk"
 
 ## Generated CMake
 
-When exon syncs `CMakeLists.txt` for `app`, it emits:
+`exon sync` from the workspace root does two things:
+
+- regenerate each selected member's root `CMakeLists.txt`
+- regenerate the workspace root `CMakeLists.txt` aggregator when `[sync] cmake-in-root = true` on the workspace root
+
+The generated workspace root file looks like this:
+
+```cmake
+# my-monorepo/CMakeLists.txt
+cmake_minimum_required(VERSION 3.30)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
+set(CMAKE_CXX_MODULE_STD ON)
+project(my_monorepo LANGUAGES CXX)
+
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(EXON_ENABLE_TEST_TARGETS OFF)
+
+add_subdirectory("core" ${CMAKE_BINARY_DIR}/members/core)
+add_subdirectory("util" ${CMAKE_BINARY_DIR}/members/util)
+add_subdirectory("app" ${CMAKE_BINARY_DIR}/members/app)
+```
+
+Each member still gets its own portable root `CMakeLists.txt`. For example, `app/CMakeLists.txt` can contain:
 
 ```cmake
 # my-monorepo/app/CMakeLists.txt
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../core ${CMAKE_BINARY_DIR}/_deps/core-build)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../util ${CMAKE_BINARY_DIR}/_deps/util-build)
 
 add_executable(app)
 target_sources(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp)
-target_link_libraries(app PRIVATE core)
+target_link_libraries(app PRIVATE util)
 ```
 
-The explicit binary_dir is required because the source path is outside the project's own source tree. `exon sync` regenerates this file whenever `exon.toml` changes, so editing the TOML is enough — you never hand-edit the CMakeLists.
+The explicit binary dir is required because the source path is outside the member's own source tree. `exon sync` regenerates these files whenever `exon.toml` changes, so editing the TOML is enough — do not hand-edit the generated `CMakeLists.txt` files.

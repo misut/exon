@@ -108,6 +108,30 @@ struct Build {
     std::vector<std::string> ldflags;
 };
 
+struct WorkspacePackageDefaults {
+    std::string version;
+    std::vector<std::string> authors;
+    std::string license;
+    std::string type;
+    int standard = 23;
+    std::vector<toolchain::Platform> platforms;
+    std::string build_system;
+    bool has_version = false;
+    bool has_authors = false;
+    bool has_license = false;
+    bool has_type = false;
+    bool has_standard = false;
+    bool has_platforms = false;
+    bool has_build_system = false;
+};
+
+struct WorkspaceDefaults {
+    WorkspacePackageDefaults package;
+    Build build;
+    Build build_debug;
+    Build build_release;
+};
+
 struct TargetSection {
     std::string predicate;
     std::map<std::string, std::string> dependencies;
@@ -142,6 +166,13 @@ struct Manifest {
     std::string license;
     std::string type = "bin"; // "bin" or "lib"
     int standard = 23;
+    bool has_version = false;
+    bool has_authors = false;
+    bool has_license = false;
+    bool has_type = false;
+    bool has_standard = false;
+    bool has_platforms = false;
+    bool has_build_system = false;
     std::map<std::string, std::string> dependencies;
     std::map<std::string, std::string> dev_dependencies; // [dev-dependencies]
     std::map<std::string, std::string> find_deps;        // [dependencies.find]
@@ -167,12 +198,14 @@ struct Manifest {
     Build build;                                         // [build]
     Build build_debug;                                   // [build.debug]
     Build build_release;                                 // [build.release]
+    bool has_workspace = false;
     std::vector<std::string> workspace_members; // workspace member paths
+    std::optional<WorkspaceDefaults> workspace_defaults;
     std::string build_system;                    // [package] build-system = "exon"|"cmake"
     bool sync_cmake_in_root = true;              // [sync] cmake-in-root = true
 };
 
-bool is_workspace(Manifest const& m) { return !m.workspace_members.empty(); }
+bool is_workspace(Manifest const& m) { return m.has_workspace; }
 
 // check if the given target platform is allowed by the manifest's platforms list
 bool supports_platform(Manifest const& m, toolchain::Platform const& target) {
@@ -188,74 +221,153 @@ bool supports_platform(Manifest const& m, toolchain::Platform const& target) {
 Manifest from_toml(toml::Table const& table) {
     Manifest m;
 
+    auto parse_platforms = [](toml::Array const& arr,
+                              std::vector<toolchain::Platform>& out) {
+        if (arr.empty())
+            throw std::runtime_error(
+                "[package].platforms cannot be empty; remove the field to support all platforms");
+        for (auto const& entry : arr) {
+            if (!entry.is_table())
+                throw std::runtime_error(
+                    "[package].platforms entries must be inline tables like { os = \"linux\" }");
+            toolchain::Platform p{};
+            auto const& t = entry.as_table();
+            if (t.contains("os")) {
+                auto const os = toolchain::parse_os(t.at("os").as_string());
+                if (os == toolchain::OS::Unknown)
+                    throw std::runtime_error(std::format(
+                        "unknown os '{}' in [package].platforms; known: linux, macos, windows, wasi",
+                        t.at("os").as_string()));
+                p.os = os;
+            }
+            if (t.contains("arch")) {
+                auto const arch = toolchain::parse_arch(t.at("arch").as_string());
+                if (arch == toolchain::Arch::Unknown)
+                    throw std::runtime_error(std::format(
+                        "unknown arch '{}' in [package].platforms; known: x86_64, aarch64, wasm32",
+                        t.at("arch").as_string()));
+                p.arch = arch;
+            }
+            if (!toolchain::platform_has_os(p) && !toolchain::platform_has_arch(p))
+                throw std::runtime_error(
+                    "[package].platforms entry must have at least 'os' or 'arch'");
+            out.push_back(std::move(p));
+        }
+    };
+
+    auto parse_build_table = [](toml::Table const& bt, Build& out) {
+        if (bt.contains("cxxflags")) {
+            auto const& arr = bt.at("cxxflags").as_array();
+            for (auto const& v : arr)
+                out.cxxflags.push_back(v.as_string());
+        }
+        if (bt.contains("ldflags")) {
+            auto const& arr = bt.at("ldflags").as_array();
+            for (auto const& v : arr)
+                out.ldflags.push_back(v.as_string());
+        }
+    };
+
     if (table.contains("package")) {
         auto const& pkg = table.at("package").as_table();
 
         if (pkg.contains("name"))
             m.name = pkg.at("name").as_string();
-        if (pkg.contains("version"))
+        if (pkg.contains("version")) {
             m.version = pkg.at("version").as_string();
+            m.has_version = true;
+        }
         if (pkg.contains("description"))
             m.description = pkg.at("description").as_string();
-        if (pkg.contains("license"))
+        if (pkg.contains("license")) {
             m.license = pkg.at("license").as_string();
-        if (pkg.contains("type"))
+            m.has_license = true;
+        }
+        if (pkg.contains("type")) {
             m.type = pkg.at("type").as_string();
+            m.has_type = true;
+        }
         if (pkg.contains("build-system")) {
             m.build_system = pkg.at("build-system").as_string();
             if (m.build_system != "exon" && m.build_system != "cmake")
                 throw std::runtime_error(
                     std::format("build-system must be \"exon\" or \"cmake\", got \"{}\"",
                                 m.build_system));
+            m.has_build_system = true;
         }
-        if (pkg.contains("standard"))
+        if (pkg.contains("standard")) {
             m.standard = static_cast<int>(pkg.at("standard").as_integer());
+            m.has_standard = true;
+        }
         if (pkg.contains("authors")) {
             for (auto const& a : pkg.at("authors").as_array()) {
                 m.authors.push_back(a.as_string());
             }
+            m.has_authors = true;
         }
         if (pkg.contains("platforms")) {
-            auto const& arr = pkg.at("platforms").as_array();
-            if (arr.empty())
-                throw std::runtime_error(
-                    "[package].platforms cannot be empty; remove the field to support all platforms");
-            for (auto const& entry : arr) {
-                if (!entry.is_table())
-                    throw std::runtime_error(
-                        "[package].platforms entries must be inline tables like { os = \"linux\" }");
-                toolchain::Platform p{};
-                auto const& t = entry.as_table();
-                if (t.contains("os")) {
-                    auto const os = toolchain::parse_os(t.at("os").as_string());
-                    if (os == toolchain::OS::Unknown)
-                        throw std::runtime_error(std::format(
-                            "unknown os '{}' in [package].platforms; known: linux, macos, windows, wasi",
-                            t.at("os").as_string()));
-                    p.os = os;
-                }
-                if (t.contains("arch")) {
-                    auto const arch = toolchain::parse_arch(t.at("arch").as_string());
-                    if (arch == toolchain::Arch::Unknown)
-                        throw std::runtime_error(std::format(
-                            "unknown arch '{}' in [package].platforms; known: x86_64, aarch64, wasm32",
-                            t.at("arch").as_string()));
-                    p.arch = arch;
-                }
-                if (!toolchain::platform_has_os(p) && !toolchain::platform_has_arch(p))
-                    throw std::runtime_error(
-                        "[package].platforms entry must have at least 'os' or 'arch'");
-                m.platforms.push_back(std::move(p));
-            }
+            parse_platforms(pkg.at("platforms").as_array(), m.platforms);
+            m.has_platforms = true;
         }
     }
 
     if (table.contains("workspace")) {
+        m.has_workspace = true;
         auto const& ws = table.at("workspace").as_table();
         if (ws.contains("members")) {
             for (auto const& member : ws.at("members").as_array()) {
                 m.workspace_members.push_back(member.as_string());
             }
+        }
+        if (ws.contains("package") && ws.at("package").is_table()) {
+            WorkspaceDefaults defaults;
+            auto const& pkg = ws.at("package").as_table();
+            if (pkg.contains("version")) {
+                defaults.package.version = pkg.at("version").as_string();
+                defaults.package.has_version = true;
+            }
+            if (pkg.contains("authors")) {
+                for (auto const& a : pkg.at("authors").as_array())
+                    defaults.package.authors.push_back(a.as_string());
+                defaults.package.has_authors = true;
+            }
+            if (pkg.contains("license")) {
+                defaults.package.license = pkg.at("license").as_string();
+                defaults.package.has_license = true;
+            }
+            if (pkg.contains("type")) {
+                defaults.package.type = pkg.at("type").as_string();
+                defaults.package.has_type = true;
+            }
+            if (pkg.contains("standard")) {
+                defaults.package.standard = static_cast<int>(pkg.at("standard").as_integer());
+                defaults.package.has_standard = true;
+            }
+            if (pkg.contains("platforms")) {
+                parse_platforms(pkg.at("platforms").as_array(), defaults.package.platforms);
+                defaults.package.has_platforms = true;
+            }
+            if (pkg.contains("build-system")) {
+                defaults.package.build_system = pkg.at("build-system").as_string();
+                if (defaults.package.build_system != "exon" &&
+                    defaults.package.build_system != "cmake") {
+                    throw std::runtime_error(std::format(
+                        "workspace build-system must be \"exon\" or \"cmake\", got \"{}\"",
+                        defaults.package.build_system));
+                }
+                defaults.package.has_build_system = true;
+            }
+            m.workspace_defaults = std::move(defaults);
+        }
+        if (ws.contains("build") && ws.at("build").is_table()) {
+            if (!m.workspace_defaults)
+                m.workspace_defaults.emplace();
+            auto const& bt = ws.at("build").as_table();
+            parse_build_table(bt, m.workspace_defaults->build);
+            if (bt.contains("debug") && bt.at("debug").is_table())
+                parse_build_table(bt.at("debug").as_table(), m.workspace_defaults->build_debug);
+            if (bt.contains("release") && bt.at("release").is_table())
+                parse_build_table(bt.at("release").as_table(), m.workspace_defaults->build_release);
         }
     }
 
@@ -418,19 +530,6 @@ Manifest from_toml(toml::Table const& table) {
         }
     }
 
-    auto parse_build_table = [](toml::Table const& bt, Build& out) {
-        if (bt.contains("cxxflags")) {
-            auto const& arr = bt.at("cxxflags").as_array();
-            for (auto const& v : arr)
-                out.cxxflags.push_back(v.as_string());
-        }
-        if (bt.contains("ldflags")) {
-            auto const& arr = bt.at("ldflags").as_array();
-            for (auto const& v : arr)
-                out.ldflags.push_back(v.as_string());
-        }
-    };
-
     if (table.contains("build")) {
         auto const& bt = table.at("build").as_table();
         parse_build_table(bt, m.build);
@@ -541,6 +640,45 @@ Manifest resolve_all_targets(Manifest m) {
     for (auto const& ts : m.target_sections)
         merge_section_into(m, ts);
     return m;
+}
+
+void prepend_build_flags(Build& dst, Build const& defaults) {
+    auto prepend = [](std::vector<std::string>& values,
+                      std::vector<std::string> const& defaults_values) {
+        if (defaults_values.empty())
+            return;
+        auto merged = defaults_values;
+        merged.insert(merged.end(), values.begin(), values.end());
+        values = std::move(merged);
+    };
+    prepend(dst.cxxflags, defaults.cxxflags);
+    prepend(dst.ldflags, defaults.ldflags);
+}
+
+Manifest apply_workspace_defaults(Manifest member, Manifest const& workspace) {
+    if (!workspace.workspace_defaults)
+        return member;
+
+    auto const& defaults = *workspace.workspace_defaults;
+    if (!member.has_version && defaults.package.has_version)
+        member.version = defaults.package.version;
+    if (!member.has_authors && defaults.package.has_authors)
+        member.authors = defaults.package.authors;
+    if (!member.has_license && defaults.package.has_license)
+        member.license = defaults.package.license;
+    if (!member.has_type && defaults.package.has_type)
+        member.type = defaults.package.type;
+    if (!member.has_standard && defaults.package.has_standard)
+        member.standard = defaults.package.standard;
+    if (!member.has_platforms && defaults.package.has_platforms)
+        member.platforms = defaults.package.platforms;
+    if (!member.has_build_system && defaults.package.has_build_system)
+        member.build_system = defaults.package.build_system;
+
+    prepend_build_flags(member.build, defaults.build);
+    prepend_build_flags(member.build_debug, defaults.build_debug);
+    prepend_build_flags(member.build_release, defaults.build_release);
+    return member;
 }
 
 bool dependency_exists(Manifest const& m, std::string const& name) {

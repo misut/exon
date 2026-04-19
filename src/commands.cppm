@@ -38,16 +38,20 @@ int command_error(std::string_view msg, std::string_view hint) {
 std::string usage_text() {
     return cli::usage("exon", {
         cli::Section{"commands", {
-            {"init [--lib] [name]",                "create a new exon.toml"},
+            {"init [--lib|--workspace] [name]",    "create a new package or workspace"},
+            {"new --lib|--bin <name>",             "create a new workspace member"},
             {"info",                               "show package information"},
-            {"build [--release] [--target <t>] [--output raw|wrapped]",
+            {"build [--release] [--target <t>] [--member a,b] [--exclude x,y] "
+             "[--output raw|wrapped]",
                                                    "build the project"},
-            {"check [--release] [--target <t>]",   "check syntax without linking"},
-            {"run [--release] [--target <t>] [args]", "build and run the project"},
-            {"test [--release] [--target <t>] [--timeout <sec>] "
+            {"check [--release] [--target <t>] [--member a,b] [--exclude x,y]",
+                                                   "check syntax without linking"},
+            {"run [--release] [--target <t>] [--member <name>] [args]",
+                                                   "build and run the project"},
+            {"test [--release] [--target <t>] [--member a,b] [--exclude x,y] [--timeout <sec>] "
              "[--output raw|wrapped] [--show-output failed|all|none]",
                                                    "build and run tests"},
-            {"clean",                              "remove build artifacts"},
+            {"clean [--member a,b] [--exclude x,y]","remove build artifacts"},
             {"add [--dev] <pkg> <ver>",            "add a git dependency"},
             {"add [--dev] --path <name> <path>",   "add a local path dependency"},
             {"add [--dev] --workspace <name>",     "add a workspace member dependency"},
@@ -56,8 +60,9 @@ std::string usage_text() {
             {"add [--dev] --git <repo> --version <ver> --subdir <dir> [--name <n>]",
                                                    "add a git dep pointing to a subdirectory"},
             {"remove <pkg>",                       "remove a dependency"},
-            {"update",                             "update dependencies to latest compatible versions"},
-            {"sync",                               "sync CMakeLists.txt with exon.toml"},
+            {"update [--member a,b] [--exclude x,y]",
+                                                   "update dependencies to latest compatible versions"},
+            {"sync [--member a,b] [--exclude x,y]","sync CMakeLists.txt with exon.toml"},
             {"fmt",                                "format source files with clang-format"},
             {"version",                            "show exon version"},
         }},
@@ -79,21 +84,419 @@ manifest::Manifest load_manifest() {
     return load_manifest(std::filesystem::current_path());
 }
 
-// run a function in each workspace member directory
-int run_for_workspace(std::filesystem::path const& workspace_root,
-                      manifest::Manifest const& m,
-                      std::function<int(std::filesystem::path const&)> fn) {
-    for (auto const& member : m.workspace_members) {
+toolchain::Platform effective_platform(std::string_view target);
+manifest::Manifest resolve_manifest(manifest::Manifest m, std::string_view target = {});
+bool check_platform(manifest::Manifest const& m, std::string_view target = {});
+std::string read_text(std::filesystem::path const& path);
+void write_text(std::filesystem::path const& path, std::string const& content);
+
+struct WorkspaceMember {
+    std::string name;
+    std::filesystem::path path;
+    manifest::Manifest raw_manifest;
+    manifest::Manifest resolved_manifest;
+    std::set<std::string> workspace_dep_names;
+    std::set<std::string> dev_workspace_dep_names;
+    bool runnable = false;
+};
+
+struct WorkspaceSelection {
+    std::vector<WorkspaceMember> members;
+    bool explicitly_selected = false;
+};
+
+std::vector<cli::ArgDef> workspace_select_defs(std::vector<cli::ArgDef> defs = {}) {
+    defs.push_back(cli::ListOption{"--member"});
+    defs.push_back(cli::ListOption{"--exclude"});
+    return defs;
+}
+
+std::filesystem::path workspace_build_root(std::filesystem::path const& workspace_root,
+                                           bool release, std::string_view target = {}) {
+    auto profile = release ? "release" : "debug";
+    auto base = workspace_root / ".exon" / "workspace";
+    if (!target.empty())
+        base /= target;
+    return base / profile;
+}
+
+std::string sanitize_workspace_name(std::string_view name) {
+    auto value = std::string{name};
+    if (value.empty())
+        value = "workspace";
+    for (auto& ch : value) {
+        if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '_'))
+            ch = '_';
+    }
+    if (!std::isalpha(static_cast<unsigned char>(value.front())) && value.front() != '_')
+        value.insert(value.begin(), '_');
+    return value;
+}
+
+std::string quote_cmake_path(std::filesystem::path const& path) {
+    return std::format("\"{}\"", path.generic_string());
+}
+
+std::string workspace_display_name(WorkspaceMember const& member,
+                                   std::filesystem::path const& workspace_root) {
+    auto rel = std::filesystem::relative(member.path, workspace_root);
+    return std::format("{} ({})", member.name, rel.generic_string());
+}
+
+bool manifest_has_any_dependencies(manifest::Manifest const& m) {
+    return !m.dependencies.empty() || !m.path_deps.empty() || !m.workspace_deps.empty() ||
+           !m.vcpkg_deps.empty() || !m.subdir_deps.empty() || !m.featured_deps.empty() ||
+           !m.cmake_deps.empty() || !m.dev_dependencies.empty() || !m.dev_path_deps.empty() ||
+           !m.dev_workspace_deps.empty() || !m.dev_vcpkg_deps.empty() ||
+           !m.dev_subdir_deps.empty() || !m.dev_featured_deps.empty() ||
+           !m.dev_cmake_deps.empty() || !m.find_deps.empty() || !m.dev_find_deps.empty();
+}
+
+WorkspaceMember load_workspace_member(std::filesystem::path const& workspace_root,
+                                      manifest::Manifest const& workspace_manifest,
+                                      std::filesystem::path const& member_path,
+                                      std::string_view target) {
+    auto raw_member = manifest::apply_workspace_defaults(load_manifest(member_path), workspace_manifest);
+    if (!check_platform(raw_member, target))
+        throw std::runtime_error(std::format(
+            "workspace member '{}' does not support target '{}'",
+            raw_member.name.empty() ? member_path.filename().string() : raw_member.name,
+            target.empty() ? toolchain::detect_host_platform().to_string() : std::string{target}));
+    auto resolved_member = resolve_manifest(raw_member, target);
+    auto workspace_dep_names = resolved_member.workspace_deps;
+    auto dev_workspace_dep_names = resolved_member.dev_workspace_deps;
+    auto runnable = resolved_member.type != "lib";
+    return {
+        .name = resolved_member.name,
+        .path = member_path,
+        .raw_manifest = std::move(raw_member),
+        .resolved_manifest = std::move(resolved_member),
+        .workspace_dep_names = std::move(workspace_dep_names),
+        .dev_workspace_dep_names = std::move(dev_workspace_dep_names),
+        .runnable = runnable,
+    };
+}
+
+std::vector<WorkspaceMember> load_workspace_members(std::filesystem::path const& workspace_root,
+                                                    manifest::Manifest const& workspace_manifest,
+                                                    std::string_view target) {
+    auto members = std::vector<WorkspaceMember>{};
+    auto seen_names = std::set<std::string>{};
+    for (auto const& member : workspace_manifest.workspace_members) {
         auto member_path = workspace_root / member;
-        if (!std::filesystem::exists(member_path / "exon.toml")) {
-            std::println(std::cerr, "error: {} has no exon.toml", member);
-            return 1;
+        if (!std::filesystem::exists(member_path / "exon.toml"))
+            throw std::runtime_error(std::format("{} has no exon.toml", member));
+        auto info = load_workspace_member(workspace_root, workspace_manifest, member_path, target);
+        if (info.name.empty())
+            throw std::runtime_error(std::format(
+                "workspace member '{}' is missing [package].name", member_path.string()));
+        if (!seen_names.insert(info.name).second)
+            throw std::runtime_error(std::format(
+                "duplicate workspace member package name '{}'", info.name));
+        members.push_back(std::move(info));
+    }
+    return members;
+}
+
+WorkspaceSelection select_workspace_members(std::filesystem::path const& workspace_root,
+                                            manifest::Manifest const& workspace_manifest,
+                                            std::string_view target,
+                                            std::vector<std::string> const& requested_members,
+                                            std::vector<std::string> const& excluded_members,
+                                            bool include_dependencies = false,
+                                            bool include_dev_workspace = false) {
+    auto members = load_workspace_members(workspace_root, workspace_manifest, target);
+    auto by_name = std::map<std::string, WorkspaceMember const*>{};
+    for (auto const& member : members)
+        by_name.emplace(member.name, &member);
+
+    auto excluded = std::set<std::string>{excluded_members.begin(), excluded_members.end()};
+    for (auto const& name : excluded) {
+        if (!by_name.contains(name))
+            throw std::runtime_error(std::format("workspace member '{}' not found", name));
+    }
+
+    auto requested = std::vector<std::string>{};
+    if (!requested_members.empty()) {
+        for (auto const& name : requested_members) {
+            if (!by_name.contains(name))
+                throw std::runtime_error(std::format("workspace member '{}' not found", name));
+            requested.push_back(name);
         }
-        std::println("--- {} ---", member);
-        int rc = fn(member_path);
+    } else {
+        for (auto const& member : members) {
+            if (!excluded.contains(member.name))
+                requested.push_back(member.name);
+        }
+    }
+
+    auto selected_names = std::set<std::string>{};
+    auto add_with_dependencies = [&](this auto const& self, std::string const& name) -> void {
+        if (excluded.contains(name))
+            throw std::runtime_error(std::format(
+                "workspace member '{}' is excluded but required by the current selection", name));
+        if (!selected_names.insert(name).second)
+            return;
+        auto const& member = *by_name.at(name);
+        for (auto const& dep : member.workspace_dep_names)
+            self(dep);
+        if (include_dev_workspace) {
+            for (auto const& dep : member.dev_workspace_dep_names)
+                self(dep);
+        }
+    };
+
+    if (include_dependencies) {
+        for (auto const& name : requested)
+            add_with_dependencies(name);
+    } else {
+        selected_names.insert(requested.begin(), requested.end());
+    }
+
+    for (auto const& name : excluded)
+        selected_names.erase(name);
+    if (selected_names.empty())
+        throw std::runtime_error("no workspace members selected");
+
+    auto ordered_names = std::vector<std::string>{};
+    auto states = std::map<std::string, int>{};
+    auto visit = [&](this auto const& self, std::string const& name) -> void {
+        auto state = states[name];
+        if (state == 2)
+            return;
+        if (state == 1)
+            throw std::runtime_error(std::format(
+                "workspace dependency cycle detected at '{}'", name));
+        states[name] = 1;
+        auto const& member = *by_name.at(name);
+        for (auto const& dep : member.workspace_dep_names) {
+            if (selected_names.contains(dep))
+                self(dep);
+        }
+        if (include_dev_workspace) {
+            for (auto const& dep : member.dev_workspace_dep_names) {
+                if (selected_names.contains(dep))
+                    self(dep);
+            }
+        }
+        states[name] = 2;
+        ordered_names.push_back(name);
+    };
+    for (auto const& name : requested) {
+        if (selected_names.contains(name))
+            visit(name);
+    }
+    for (auto const& name : selected_names) {
+        if (!states.contains(name))
+            visit(name);
+    }
+
+    WorkspaceSelection selection{
+        .explicitly_selected = !requested_members.empty(),
+    };
+    for (auto const& name : ordered_names) {
+        auto it = std::ranges::find_if(members, [&](WorkspaceMember const& member) {
+            return member.name == name;
+        });
+        if (it != members.end())
+            selection.members.push_back(*it);
+    }
+    return selection;
+}
+
+int run_selected_workspace_members(std::filesystem::path const& workspace_root,
+                                   WorkspaceSelection const& selection,
+                                   std::function<int(WorkspaceMember const&)> fn) {
+    for (auto const& member : selection.members) {
+        std::println("--- {} ---", workspace_display_name(member, workspace_root));
+        auto rc = fn(member);
         if (rc != 0)
             return rc;
     }
+    return 0;
+}
+
+void update_workspace_members_list(std::filesystem::path const& workspace_root,
+                                   std::string_view member_name) {
+    auto manifest_path = workspace_root / "exon.toml";
+    auto content = read_text(manifest_path);
+    auto workspace_manifest = load_manifest(workspace_root);
+    auto member_text = std::string{member_name};
+    if (std::ranges::find(workspace_manifest.workspace_members, member_text) !=
+        workspace_manifest.workspace_members.end()) {
+        return;
+    }
+
+    auto marker = std::string{"members = ["};
+    auto pos = content.find(marker);
+    if (pos == std::string::npos) {
+        if (!content.empty() && content.back() != '\n')
+            content += '\n';
+        content += std::format("\n[workspace]\nmembers = [\"{}\"]\n", member_name);
+        write_text(manifest_path, content);
+        return;
+    }
+
+    auto insert_pos = content.find(']', pos);
+    if (insert_pos == std::string::npos)
+        throw std::runtime_error("workspace members list is malformed");
+    auto before = content.substr(pos, insert_pos - pos);
+    auto needs_separator = before.find('"') != std::string::npos;
+    content.insert(insert_pos, std::format("{}\"{}\"", needs_separator ? ", " : "", member_name));
+    write_text(manifest_path, content);
+}
+
+void create_package_files(std::filesystem::path const& target_dir, std::string const& name,
+                          bool is_lib) {
+    auto manifest_path = target_dir / "exon.toml";
+    if (std::filesystem::exists(manifest_path))
+        throw std::runtime_error(std::format("{} already exists", manifest_path.string()));
+
+    std::filesystem::create_directories(target_dir / "src");
+
+    auto tmpl = std::string{is_lib ? templates::exon_toml_lib : templates::exon_toml_bin};
+    auto name_pos = tmpl.find("name = \"\"");
+    if (name_pos != std::string::npos)
+        tmpl.replace(name_pos, 9, std::format("name = \"{}\"", name));
+    write_text(manifest_path, tmpl);
+
+    auto source_path = target_dir / "src" / (is_lib ? std::format("{}.cppm", name) : "main.cpp");
+    auto source = is_lib
+        ? std::format("export module {};\nimport std;\n\n", name)
+        : "import std;\n\nint main() {\n    std::println(\"hello, world!\");\n    return 0;\n}\n";
+    write_text(source_path, source);
+}
+
+std::string generate_workspace_root_cmake(std::filesystem::path const& workspace_root,
+                                          std::filesystem::path const& cmake_root,
+                                          std::vector<WorkspaceMember> const& members) {
+    auto out = std::ostringstream{};
+    auto standard = members.empty() ? 23 : 0;
+    for (auto const& member : members)
+        standard = std::max(standard, member.resolved_manifest.standard);
+    auto project_name = sanitize_workspace_name(workspace_root.filename().string());
+    auto import_std = standard >= 23;
+
+    out << "# Generated by exon. Do not edit manually.\n\n";
+    if (import_std) {
+        out << "cmake_minimum_required(VERSION 3.30)\n\n";
+        out << std::format("set(CMAKE_CXX_STANDARD {})\n", standard);
+        out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n";
+        out << "set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "
+               "\"451f2fe2-a8a2-47c3-bc32-94786d8fc91b\")\n";
+        out << "set(CMAKE_CXX_MODULE_STD ON)\n";
+        out << std::format("project({} LANGUAGES CXX)\n\n", project_name);
+    } else {
+        out << "cmake_minimum_required(VERSION 3.28)\n";
+        out << std::format("project({} LANGUAGES CXX)\n\n", project_name);
+        out << std::format("set(CMAKE_CXX_STANDARD {})\n", standard);
+        out << "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n";
+    }
+    out << "set(CMAKE_EXPORT_COMPILE_COMMANDS ON)\n\n";
+    out << "if(MSVC)\n";
+    out << "    add_compile_options(/W4 /wd4996 /utf-8)\n";
+    out << "    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)\n";
+    out << "endif()\n\n";
+    out << "set(EXON_ENABLE_TEST_TARGETS OFF)\n\n";
+    for (auto const& member : members) {
+        auto rel = std::filesystem::relative(member.path, cmake_root).generic_string();
+        out << std::format("add_subdirectory({} ${{CMAKE_BINARY_DIR}}/members/{})\n",
+                           quote_cmake_path(rel),
+                           sanitize_workspace_name(member.name));
+    }
+    return out.str();
+}
+
+manifest::Manifest workspace_build_manifest(std::filesystem::path const& workspace_root,
+                                            std::vector<WorkspaceMember> const& members) {
+    auto manifest = manifest::Manifest{};
+    manifest.name = sanitize_workspace_name(workspace_root.filename().string());
+    manifest.type = "lib";
+    manifest.standard = members.empty() ? 23 : 0;
+    manifest.has_standard = true;
+    for (auto const& member : members)
+        manifest.standard = std::max(manifest.standard, member.resolved_manifest.standard);
+    return manifest;
+}
+
+int sync_workspace_member_cmake(WorkspaceMember const& member,
+                                std::optional<toolchain::Platform> platform = std::nullopt,
+                                bool all_targets = false) {
+    auto fetch_manifest = all_targets
+        ? manifest::resolve_all_targets(member.raw_manifest)
+        : member.resolved_manifest;
+    auto fetch_result = fetch::system::fetch_all({
+        .manifest = fetch_manifest,
+        .project_root = member.path,
+        .lock_path = member.path / "exon.lock",
+        .platform = all_targets ? std::nullopt : platform,
+    });
+    write_text(member.path / "CMakeLists.txt",
+               build::generate_portable_cmake(member.raw_manifest, member.path, fetch_result.deps));
+    std::println("synced CMakeLists.txt");
+    return 0;
+}
+
+int sync_workspace_root_cmake(std::filesystem::path const& workspace_root,
+                              manifest::Manifest const& workspace_manifest,
+                              WorkspaceSelection const& selection) {
+    if (!workspace_manifest.sync_cmake_in_root)
+        return 0;
+    write_text(workspace_root / "CMakeLists.txt",
+               generate_workspace_root_cmake(workspace_root, workspace_root, selection.members));
+    std::println("synced CMakeLists.txt");
+    return 0;
+}
+
+int run_workspace_build(std::filesystem::path const& workspace_root,
+                        manifest::Manifest const& workspace_manifest,
+                        WorkspaceSelection const& selection,
+                        bool release, std::string_view target) {
+    auto platform = target.empty()
+        ? std::optional<toolchain::Platform>{toolchain::detect_host_platform()}
+        : std::optional<toolchain::Platform>{*toolchain::platform_from_target(target)};
+    for (auto const& member : selection.members)
+        sync_workspace_member_cmake(member, platform, false);
+    sync_workspace_root_cmake(workspace_root, workspace_manifest, selection);
+
+    auto cmake_root = workspace_root / ".exon";
+    std::filesystem::create_directories(cmake_root);
+    write_text(cmake_root / "CMakeLists.txt",
+               generate_workspace_root_cmake(workspace_root, cmake_root, selection.members));
+
+    auto synthetic_manifest = workspace_build_manifest(workspace_root, selection.members);
+    auto tc = toolchain::system::detect();
+    std::string wasm_toolchain_file;
+    if (!target.empty()) {
+        auto wasm_tc = toolchain::system::detect_wasm(target);
+        wasm_toolchain_file = wasm_tc.cmake_toolchain;
+        tc.stdlib_modules_json = wasm_tc.modules_json;
+        tc.cxx_compiler = wasm_tc.scan_deps;
+        tc.sysroot.clear();
+        tc.lib_dir.clear();
+        tc.has_clang_config = false;
+        tc.needs_stdlib_flag = false;
+    }
+
+    auto build_dir = workspace_build_root(workspace_root, release, target);
+    auto configure_spec = build::configure_command(
+        tc, synthetic_manifest, build_dir, cmake_root, release, {}, {},
+        wasm_toolchain_file, false);
+    configure_spec.cwd = workspace_root;
+    std::println("configuring workspace...");
+    auto rc = build::system::run_process(configure_spec);
+    if (rc != 0)
+        return rc;
+
+    auto build_spec = build::build_command(tc, synthetic_manifest, build_dir, {}, target);
+    build_spec.cwd = workspace_root;
+    std::println("building workspace...");
+    rc = build::system::run_process(build_spec);
+    if (rc != 0)
+        return rc;
+
+    auto rel = std::filesystem::relative(build_dir, workspace_root).generic_string();
+    std::println("build succeeded: {}", rel);
     return 0;
 }
 
@@ -107,11 +510,11 @@ toolchain::Platform effective_platform(std::string_view target) {
     return toolchain::detect_host_platform();
 }
 
-manifest::Manifest resolve_manifest(manifest::Manifest m, std::string_view target = {}) {
+manifest::Manifest resolve_manifest(manifest::Manifest m, std::string_view target) {
     return manifest::resolve_for_platform(std::move(m), effective_platform(target));
 }
 
-bool check_platform(manifest::Manifest const& m, std::string_view target = {}) {
+bool check_platform(manifest::Manifest const& m, std::string_view target) {
     auto plat = effective_platform(target);
     if (!manifest::supports_platform(m, plat)) {
         std::println(std::cerr,
@@ -185,8 +588,14 @@ int cmd_version() {
 }
 
 int cmd_init(int argc, char* argv[]) {
-    auto args = cli::parse(argc, argv, 2, {cli::Flag{"--lib"}});
+    auto args = cli::parse(argc, argv, 2, {
+        cli::Flag{"--lib"},
+        cli::Flag{"--workspace"},
+    });
     bool is_lib = args.has("--lib");
+    bool is_workspace = args.has("--workspace");
+    if (is_lib && is_workspace)
+        return command_error("--lib and --workspace are mutually exclusive");
     auto& pos = args.positional();
     if (pos.size() > 1)
         return command_error(std::format("unexpected argument '{}'", pos[1]));
@@ -212,24 +621,68 @@ int cmd_init(int argc, char* argv[]) {
         std::println(std::cerr, "error: {} already exists", manifest_path.string());
         return 1;
     }
-    auto tmpl = std::string{is_lib ? templates::exon_toml_lib : templates::exon_toml_bin};
-    // Fill in the package name (template has `name = ""`).
-    auto name_pos = tmpl.find("name = \"\"");
-    if (name_pos != std::string::npos)
-        tmpl.replace(name_pos, 9, std::format("name = \"{}\"", name));
     try {
-        write_text(manifest_path, tmpl);
+        if (is_workspace) {
+            write_text(manifest_path, "[workspace]\nmembers = []\n");
+        } else {
+            create_package_files(target_dir, name, is_lib);
+        }
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
     }
-    std::println("created {} ({})", manifest_path.string(), is_lib ? "lib" : "bin");
+    std::println("created {} ({})", manifest_path.string(),
+                 is_workspace ? "workspace" : (is_lib ? "lib" : "bin"));
+    return 0;
+}
+
+int cmd_new(int argc, char* argv[]) {
+    try {
+        auto args = cli::parse(argc, argv, 2, {
+            cli::Flag{"--lib"},
+            cli::Flag{"--bin"},
+        });
+        bool is_lib = args.has("--lib");
+        bool is_bin = args.has("--bin");
+        if (is_lib == is_bin)
+            return command_error("choose exactly one of --lib or --bin");
+
+        auto const& positional = args.positional();
+        if (positional.size() != 1)
+            return command_error("usage: exon new --lib|--bin <name>");
+
+        auto workspace_root = std::filesystem::current_path();
+        auto workspace_manifest = load_manifest(workspace_root);
+        if (!manifest::is_workspace(workspace_manifest))
+            return command_error("exon new must run from a workspace root");
+
+        auto member_name = positional[0];
+        auto target_dir = workspace_root / member_name;
+        if (std::filesystem::exists(target_dir))
+            return command_error(std::format("{} already exists", target_dir.string()));
+
+        create_package_files(target_dir, member_name, is_lib);
+        update_workspace_members_list(workspace_root, member_name);
+        std::println("created {} ({})", (target_dir / "exon.toml").string(),
+                     is_lib ? "lib" : "bin");
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
     return 0;
 }
 
 int cmd_info() {
     try {
-        auto m = load_manifest();
+        auto project_root = std::filesystem::current_path();
+        auto m = load_manifest(project_root);
+        if (!manifest::is_workspace(m)) {
+            if (auto ws_root = manifest::system::find_workspace_root(project_root); ws_root &&
+                *ws_root != project_root) {
+                auto workspace_manifest = load_manifest(*ws_root);
+                m = manifest::apply_workspace_defaults(std::move(m), workspace_manifest);
+            }
+        }
         std::println("name: {}", m.name);
         std::println("version: {}", m.version);
         if (!m.description.empty())
@@ -285,23 +738,26 @@ using BuildFn = std::function<int(std::filesystem::path const&,
 
 int run_build_command(int argc, char* argv[], BuildFn fn) {
     try {
-        auto args = cli::parse(argc, argv, 2, build_defs);
+        auto args = cli::parse(argc, argv, 2, workspace_select_defs(build_defs));
         auto release = args.has("--release");
         auto target = std::string{args.get("--target")};
+        auto requested_members = args.get_list("--member");
+        auto excluded_members = args.get_list("--exclude");
         auto project_root = std::filesystem::current_path();
         auto raw_m = load_manifest(project_root);
         if (!check_platform(raw_m, target))
             return 1;
         auto m = resolve_manifest(raw_m, target);
         if (manifest::is_workspace(raw_m)) {
-            return run_for_workspace(project_root, raw_m, [&](auto const& member_path) {
-                auto raw_member = load_manifest(member_path);
-                if (!check_platform(raw_member, target))
-                    return 1;
-                auto member_m = resolve_manifest(raw_member, target);
-                return fn(member_path, raw_member, member_m, release, target);
+            auto selection = select_workspace_members(project_root, raw_m, target,
+                                                      requested_members, excluded_members,
+                                                      false, false);
+            return run_selected_workspace_members(project_root, selection, [&](auto const& member) {
+                return fn(member.path, member.raw_manifest, member.resolved_manifest, release, target);
             });
         }
+        if (!requested_members.empty() || !excluded_members.empty())
+            return command_error("--member and --exclude require a workspace root");
         if (m.name.empty())
             return command_error("package name is required in exon.toml");
         return fn(project_root, raw_m, m, release, target);
@@ -313,28 +769,28 @@ int run_build_command(int argc, char* argv[], BuildFn fn) {
 
 int cmd_build(int argc, char* argv[]) {
     try {
-        auto args = cli::parse(argc, argv, 2, {
+        auto args = cli::parse(argc, argv, 2, workspace_select_defs({
             cli::Flag{"--release"},
             cli::Option{"--target"},
             cli::Option{"--output"},
-        });
+        }));
         auto release = args.has("--release");
         auto target = std::string{args.get("--target")};
+        auto requested_members = args.get_list("--member");
+        auto excluded_members = args.get_list("--exclude");
         auto project_root = std::filesystem::current_path();
         auto raw_m = load_manifest(project_root);
         if (!check_platform(raw_m, target))
             return 1;
         auto m = resolve_manifest(raw_m, target);
         if (manifest::is_workspace(raw_m)) {
-            return run_for_workspace(project_root, raw_m, [&](auto const& member_path) {
-                auto raw_member = load_manifest(member_path);
-                if (!check_platform(raw_member, target))
-                    return 1;
-                auto member_m = resolve_manifest(raw_member, target);
-                return build::system::run(member_path, member_m, raw_member, release, target,
-                                          args.get("--output"));
-            });
+            auto selection = select_workspace_members(project_root, raw_m, target,
+                                                      requested_members, excluded_members,
+                                                      true, false);
+            return run_workspace_build(project_root, raw_m, selection, release, target);
         }
+        if (!requested_members.empty() || !excluded_members.empty())
+            return command_error("--member and --exclude require a workspace root");
         if (m.name.empty())
             return command_error("package name is required in exon.toml");
         return build::system::run(project_root, m, raw_m, release, target, args.get("--output"));
@@ -358,42 +814,75 @@ int cmd_check(int argc, char* argv[]) {
 
 int cmd_run(int argc, char* argv[]) {
     try {
-        auto args = cli::parse(argc, argv, 2, build_defs);
+        auto args = cli::parse(argc, argv, 2, workspace_select_defs(build_defs));
         auto release = args.has("--release");
         auto target = std::string{args.get("--target")};
+        auto requested_members = args.get_list("--member");
+        auto excluded_members = args.get_list("--exclude");
         auto project_root = std::filesystem::current_path();
         auto raw_m = load_manifest(project_root);
         if (!check_platform(raw_m, target))
             return 1;
         auto m = resolve_manifest(raw_m, target);
-        if (m.name.empty())
+        auto member_root = project_root;
+        auto raw_target_manifest = raw_m;
+        auto target_manifest = m;
+        if (manifest::is_workspace(raw_m)) {
+            auto selection = select_workspace_members(project_root, raw_m, target,
+                                                      requested_members, excluded_members,
+                                                      false, false);
+            auto runnable = std::vector<WorkspaceMember>{};
+            for (auto const& member : selection.members) {
+                if (member.runnable)
+                    runnable.push_back(member);
+            }
+            if (requested_members.empty()) {
+                if (runnable.size() != 1) {
+                    return command_error(
+                        "workspace run requires exactly one runnable member; pass --member <name>");
+                }
+            } else {
+                if (selection.members.size() != 1)
+                    return command_error("--member for run must select exactly one workspace member");
+                if (!selection.members.front().runnable)
+                    return command_error("cannot run a library package");
+                runnable = {selection.members.front()};
+            }
+            auto const& member = runnable.front();
+            member_root = member.path;
+            raw_target_manifest = member.raw_manifest;
+            target_manifest = member.resolved_manifest;
+        } else if (!requested_members.empty() || !excluded_members.empty()) {
+            return command_error("--member and --exclude require a workspace root");
+        }
+        if (target_manifest.name.empty())
             return command_error("package name is required in exon.toml");
-        if (m.type == "lib")
+        if (target_manifest.type == "lib")
             return command_error("cannot run a library package");
         bool is_wasm = !target.empty();
-        int rc = build::system::run(project_root, m, raw_m, release, target);
+        int rc = build::system::run(member_root, target_manifest, raw_target_manifest, release, target);
         if (rc != 0)
             return rc;
 
-        auto project = build::project_context(project_root, release, target);
+        auto project = build::project_context(member_root, release, target);
         core::ProcessSpec spec{
-            .cwd = project_root,
+            .cwd = member_root,
         };
         if (is_wasm) {
             auto wasm_runtime = toolchain::system::detect_wasm_runtime();
             if (wasm_runtime.empty())
                 throw std::runtime_error(
                     "wasmtime not found on PATH (install: https://wasmtime.dev)");
-            auto wasm_file = project.build_dir / m.name;
+            auto wasm_file = project.build_dir / target_manifest.name;
             spec.program = wasm_runtime;
             spec.args.push_back(wasm_file.string());
         } else {
-            auto exe = project.build_dir / (m.name + std::string{toolchain::exe_suffix});
+            auto exe = project.build_dir / (target_manifest.name + std::string{toolchain::exe_suffix});
             spec.program = exe.string();
         }
         for (auto const& a : args.positional())
             spec.args.push_back(a);
-        std::println("running {}...\n", m.name);
+        std::println("running {}...\n", target_manifest.name);
         return build::system::run_process(spec);
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
@@ -411,27 +900,30 @@ int cmd_test(int argc, char* argv[]) {
             cli::Option{"--output"},
             cli::Option{"--show-output"},
         };
-        auto args = cli::parse(argc, argv, 2, test_defs);
+        auto args = cli::parse(argc, argv, 2, workspace_select_defs(test_defs));
         auto release = args.has("--release");
         auto target = std::string{args.get("--target")};
         auto filter = std::string{args.get("--filter")};
         auto timeout = parse_timeout(args.get("--timeout"));
+        auto requested_members = args.get_list("--member");
+        auto excluded_members = args.get_list("--exclude");
         auto project_root = std::filesystem::current_path();
         auto raw_m = load_manifest(project_root);
         if (!check_platform(raw_m, target))
             return 1;
         auto m = resolve_manifest(raw_m, target);
         if (manifest::is_workspace(raw_m)) {
-            return run_for_workspace(project_root, raw_m, [&](auto const& member_path) {
-                auto raw_member = load_manifest(member_path);
-                if (!check_platform(raw_member, target))
-                    return 1;
-                auto member_m = resolve_manifest(raw_member, target);
-                return build::system::run_test(member_path, member_m, raw_member, release,
+            auto selection = select_workspace_members(project_root, raw_m, target,
+                                                      requested_members, excluded_members,
+                                                      false, false);
+            return run_selected_workspace_members(project_root, selection, [&](auto const& member) {
+                return build::system::run_test(member.path, member.resolved_manifest, member.raw_manifest, release,
                                                target, filter, timeout, args.get("--output"),
                                                args.get("--show-output"));
             });
         }
+        if (!requested_members.empty() || !excluded_members.empty())
+            return command_error("--member and --exclude require a workspace root");
         if (m.name.empty())
             return command_error("package name is required in exon.toml");
         return build::system::run_test(project_root, m, raw_m, release, target, filter,
@@ -443,23 +935,42 @@ int cmd_test(int argc, char* argv[]) {
     }
 }
 
-int cmd_clean() {
+int cmd_clean(int argc, char* argv[]) {
     auto project_root = std::filesystem::current_path();
     try {
+        auto args = cli::parse(argc, argv, 2, workspace_select_defs());
         if (std::filesystem::exists(project_root / "exon.toml")) {
             auto m = load_manifest(project_root);
             if (manifest::is_workspace(m)) {
-                return run_for_workspace(project_root, m, [](auto const& member_path) {
-                    auto dir = member_path / ".exon";
+                auto selection = select_workspace_members(project_root, m, {},
+                                                          args.get_list("--member"),
+                                                          args.get_list("--exclude"),
+                                                          false, false);
+                auto rc = run_selected_workspace_members(project_root, selection, [](auto const& member) {
+                    auto dir = member.path / ".exon";
                     if (std::filesystem::exists(dir)) {
                         std::filesystem::remove_all(dir);
                         std::println("cleaned .exon/");
+                    } else {
+                        std::println("nothing to clean");
                     }
                     return 0;
                 });
+                if (rc != 0)
+                    return rc;
+                auto workspace_exon_dir = project_root / ".exon";
+                if (std::filesystem::exists(workspace_exon_dir)) {
+                    std::filesystem::remove_all(workspace_exon_dir);
+                    std::println("cleaned workspace .exon/");
+                }
+                return 0;
             }
         }
-    } catch (...) {
+        if (!args.get_list("--member").empty() || !args.get_list("--exclude").empty())
+            return command_error("--member and --exclude require a workspace root");
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
     }
     auto exon_dir = project_root / ".exon";
     if (std::filesystem::exists(exon_dir)) {
@@ -710,22 +1221,40 @@ int cmd_remove(int argc, char* argv[]) {
     }
 }
 
-int cmd_update() {
+int cmd_update(int argc, char* argv[]) {
     try {
+        auto args = cli::parse(argc, argv, 2, workspace_select_defs());
         auto project_root = std::filesystem::current_path();
         auto manifest_path = project_root / "exon.toml";
         if (!std::filesystem::exists(manifest_path)) {
             std::println(std::cerr, "error: exon.toml not found. run 'exon init' first");
             return 1;
         }
+        auto m = load_manifest(project_root);
+        if (manifest::is_workspace(m)) {
+            auto selection = select_workspace_members(project_root, m, {},
+                                                      args.get_list("--member"),
+                                                      args.get_list("--exclude"),
+                                                      false, false);
+            return run_selected_workspace_members(project_root, selection, [&](auto const& member) {
+                auto lock_path = member.path / "exon.lock";
+                if (std::filesystem::exists(lock_path))
+                    std::filesystem::remove(lock_path);
+                if (!manifest_has_any_dependencies(member.raw_manifest)) {
+                    std::println("no dependencies to update");
+                    return 0;
+                }
+                return build::system::run(member.path, member.resolved_manifest, member.raw_manifest);
+            });
+        }
+        if (!args.get_list("--member").empty() || !args.get_list("--exclude").empty())
+            return command_error("--member and --exclude require a workspace root");
 
         auto lock_path = project_root / "exon.lock";
-        if (std::filesystem::exists(lock_path)) {
+        if (std::filesystem::exists(lock_path))
             std::filesystem::remove(lock_path);
-        }
 
-        auto m = load_manifest(project_root);
-        if (m.dependencies.empty()) {
+        if (!manifest_has_any_dependencies(m)) {
             std::println("no dependencies to update");
             return 0;
         }
@@ -737,26 +1266,27 @@ int cmd_update() {
     }
 }
 
-int cmd_sync() {
+int cmd_sync(int argc, char* argv[]) {
     try {
+        auto args = cli::parse(argc, argv, 2, workspace_select_defs());
         auto project_root = std::filesystem::current_path();
         auto raw_m = load_manifest(project_root);
         // for sync: merge ALL target sections for fetching, but keep raw for CMake generation
         auto fetch_m = manifest::resolve_all_targets(raw_m);
         if (manifest::is_workspace(raw_m)) {
-            return run_for_workspace(project_root, raw_m, [](auto const& member_path) {
-                auto raw_member = load_manifest(member_path);
-                auto fetch_member = manifest::resolve_all_targets(raw_member);
-                auto lock_path = (member_path / "exon.lock").string();
-                auto fetch_result = fetch::system::fetch_all({
-                    .manifest = fetch_member,
-                    .project_root = member_path,
-                    .lock_path = std::filesystem::path{lock_path},
-                });
-                build::system::sync_root_cmake(member_path, raw_member, fetch_result.deps);
-                return 0;
+            auto selection = select_workspace_members(project_root, raw_m, {},
+                                                      args.get_list("--member"),
+                                                      args.get_list("--exclude"),
+                                                      true, false);
+            auto rc = run_selected_workspace_members(project_root, selection, [&](auto const& member) {
+                return sync_workspace_member_cmake(member, std::nullopt, true);
             });
+            if (rc != 0)
+                return rc;
+            return sync_workspace_root_cmake(project_root, raw_m, selection);
         }
+        if (!args.get_list("--member").empty() || !args.get_list("--exclude").empty())
+            return command_error("--member and --exclude require a workspace root");
         auto lock_path = (project_root / "exon.lock").string();
         auto fetch_result = fetch::system::fetch_all({
             .manifest = fetch_m,

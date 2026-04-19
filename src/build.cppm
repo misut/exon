@@ -1061,6 +1061,9 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
     detail::emit_cmake_preamble(out, m, import_std);
     detail::emit_msvc_options(out);
     detail::emit_windows_asan_runtime_support(out, m);
+    out << "if(NOT DEFINED EXON_ENABLE_TEST_TARGETS)\n";
+    out << "    set(EXON_ENABLE_TEST_TARGETS ON)\n";
+    out << "endif()\n\n";
 
     auto root = project_root;
 
@@ -1078,14 +1081,39 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
     // [dependencies.cmake] — raw CMake projects
     if (!m.cmake_deps.empty() || !m.dev_cmake_deps.empty()) {
         out << "include(FetchContent)\n";
-        detail::emit_cmake_deps(out, m, true);
+        auto emit_cmake_dep = [&](std::string const& name, manifest::CmakeDep const& dep,
+                                  std::string_view indent) {
+            for (auto const& [k, v] : dep.options)
+                out << std::format("{}set({} {})\n", indent, k, v);
+            out << std::format("{}FetchContent_Declare({}\n", indent, name);
+            out << std::format("{}    GIT_REPOSITORY {}\n", indent, dep.git);
+            out << std::format("{}    GIT_TAG {}\n", indent, dep.tag);
+            if (dep.shallow)
+                out << std::format("{}    GIT_SHALLOW ON\n", indent);
+            out << std::format("{}    GIT_SUBMODULES \"\"\n", indent);
+            out << std::format("{}    EXCLUDE_FROM_ALL\n", indent);
+            out << std::format("{})\n", indent);
+            out << std::format("{}FetchContent_MakeAvailable({})\n\n", indent, name);
+        };
+        for (auto const& [name, dep] : m.cmake_deps)
+            emit_cmake_dep(name, dep, "");
+        if (!m.dev_cmake_deps.empty()) {
+            out << "if(EXON_ENABLE_TEST_TARGETS)\n";
+            for (auto const& [name, dep] : m.dev_cmake_deps)
+                emit_cmake_dep(name, dep, "    ");
+            out << "endif()\n";
+        }
     }
 
     // emit find_package() calls
     for (auto const& [pkg, _] : m.find_deps)
         out << std::format("find_package({} REQUIRED)\n", pkg);
-    for (auto const& [pkg, _] : m.dev_find_deps)
-        out << std::format("find_package({} REQUIRED)\n", pkg);
+    if (!m.dev_find_deps.empty()) {
+        out << "if(EXON_ENABLE_TEST_TARGETS)\n";
+        for (auto const& [pkg, _] : m.dev_find_deps)
+            out << std::format("    find_package({} REQUIRED)\n", pkg);
+        out << "endif()\n";
+    }
     if (!m.find_deps.empty() || !m.dev_find_deps.empty())
         out << "\n";
 
@@ -1112,17 +1140,19 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             auto git_url = std::format("https://{}.git", dep->key);
             auto tag = dep->version.starts_with("v") ? dep->version
                                                       : std::format("v{}", dep->version);
-            out << std::format("FetchContent_Declare({}\n", actual_target);
-            out << std::format("    GIT_REPOSITORY {}\n", git_url);
-            out << std::format("    GIT_TAG {}\n", tag);
-            out << "    GIT_SHALLOW ON\n";
+            out << std::format("if(NOT TARGET {})\n", actual_target);
+            out << std::format("    FetchContent_Declare({}\n", actual_target);
+            out << std::format("        GIT_REPOSITORY {}\n", git_url);
+            out << std::format("        GIT_TAG {}\n", tag);
+            out << "        GIT_SHALLOW ON\n";
             if (!dep->subdir.empty())
-                out << std::format("    SOURCE_SUBDIR {}\n", dep->subdir);
-            out << ")\n";
+                out << std::format("        SOURCE_SUBDIR {}\n", dep->subdir);
+            out << "    )\n";
+            out << std::format("    FetchContent_MakeAvailable({})\n", actual_target);
+            out << "endif()\n";
         }
         for (auto const* dep : dep_list) {
             auto actual_target = detail::upstream_target_name(*dep);
-            out << std::format("FetchContent_MakeAvailable({})\n", actual_target);
             detail::emit_target_alias(out, *dep, emitted_dependency_targets);
         }
     };
@@ -1131,8 +1161,10 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
         out << "include(FetchContent)\n";
         emit_fetch(p_git_regular);
         if (!p_git_dev.empty()) {
-            out << "\n# dev-dependencies (test-only)\n";
+            out << "\nif(EXON_ENABLE_TEST_TARGETS)\n";
+            out << "# dev-dependencies (test-only)\n";
             emit_fetch(p_git_dev);
+            out << "endif()\n";
         }
         out << "\n";
     }
@@ -1143,9 +1175,11 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             auto actual_target = detail::upstream_target_name(*dep);
             detail::reserve_target_name(emitted_dependency_targets, actual_target);
             auto rel = std::filesystem::relative(dep->path, root).generic_string();
-            out << std::format("add_subdirectory(${{CMAKE_CURRENT_SOURCE_DIR}}/{} "
+            out << std::format("if(NOT TARGET {})\n", actual_target);
+            out << std::format("    add_subdirectory(${{CMAKE_CURRENT_SOURCE_DIR}}/{} "
                                "${{CMAKE_BINARY_DIR}}/_deps/{}-build)\n",
                                rel, actual_target);
+            out << "endif()\n";
             detail::emit_target_alias(out, *dep, emitted_dependency_targets);
         }
     };
@@ -1153,8 +1187,10 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
     if (!p_path_regular.empty() || !p_path_dev.empty()) {
         emit_subdirs(p_path_regular);
         if (!p_path_dev.empty()) {
-            out << "\n# dev-dependencies (test-only)\n";
+            out << "\nif(EXON_ENABLE_TEST_TARGETS)\n";
+            out << "# dev-dependencies (test-only)\n";
             emit_subdirs(p_path_dev);
+            out << "endif()\n";
         }
         out << "\n";
     }
@@ -1398,6 +1434,7 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
     auto tests_dir = root / "tests";
     if (std::filesystem::exists(tests_dir)) {
         auto test_sf = detail::collect_sources(tests_dir);
+        out << "\nif(EXON_ENABLE_TEST_TARGETS)\n";
         for (auto const& test_cpp : test_sf.cpp) {
             auto test_stem = std::filesystem::path{test_cpp}.stem().string();
             auto test_name = std::format("test-{}", test_stem);
@@ -1430,6 +1467,7 @@ std::string generate_portable_cmake(manifest::Manifest const& m,
             if (detail::build_has_windows_asan(m))
                 out << std::format("exon_copy_windows_asan_runtime({})\n", test_name);
         }
+        out << "endif()\n";
     }
 
     return out.str();
