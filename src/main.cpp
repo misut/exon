@@ -32,6 +32,8 @@ int main(int argc, char* argv[]) {
         return commands::cmd_check(argc, argv);
     if (command == "run")
         return commands::cmd_run(argc, argv);
+    if (command == "debug")
+        return commands::cmd_debug(argc, argv);
     if (command == "test")
         return commands::cmd_test(argc, argv);
     if (command == "clean")

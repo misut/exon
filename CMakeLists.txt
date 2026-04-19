@@ -35,6 +35,8 @@ target_sources(exon-modules
     ${CMAKE_CURRENT_SOURCE_DIR}/src/cli.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/commands.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/debug.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/debug.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/fetch.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/fetch.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/lock.cppm
@@ -67,6 +69,8 @@ set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/cli.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/commands.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/debug.cppm
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/debug.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/fetch.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/fetch.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/lock.cppm
@@ -115,6 +119,14 @@ target_sources(test-test_commands PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_commands.cpp
 )
 target_link_libraries(test-test_commands PRIVATE
+    exon-modules
+)
+
+add_executable(test-test_debug)
+target_sources(test-test_debug PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_debug.cpp
+)
+target_link_libraries(test-test_debug PRIVATE
     exon-modules
 )
 
