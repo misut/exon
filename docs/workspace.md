@@ -187,6 +187,27 @@ running app...
 hello from core (42)
 ```
 
+## Runnable example in this repo
+
+This repository includes a checked-in workspace example at `examples/workspace/`:
+
+- `libs/foundation` exports shared helpers and package defaults
+- `libs/greeting` depends on `foundation`
+- `apps/hello` depends on `greeting`, so the build graph is `hello -> greeting -> foundation`
+- `apps/report` depends directly on `foundation`
+- `apps/inspect` depends on both `greeting` and `foundation`
+
+From `examples/workspace/`:
+
+```sh
+exon sync
+exon build
+exon run --member hello
+```
+
+Run `exon run --release --member hello` to see the workspace root's
+`[workspace.build.release]` flags change the profile label printed by `hello`.
+
 ## CLI
 
 Add a workspace dep from inside a member:

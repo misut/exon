@@ -1,0 +1,6 @@
+[package]
+name = "report"
+type = "bin"
+
+[dependencies.workspace]
+foundation = true

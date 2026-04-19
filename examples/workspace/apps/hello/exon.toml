@@ -1,0 +1,6 @@
+[package]
+name = "hello"
+type = "bin"
+
+[dependencies.workspace]
+greeting = true

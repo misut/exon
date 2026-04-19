@@ -1,0 +1,7 @@
+[package]
+name = "inspect"
+type = "bin"
+
+[dependencies.workspace]
+foundation = true
+greeting = true
