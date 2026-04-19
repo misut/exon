@@ -922,6 +922,50 @@ void test_generate_portable_cmake_subdir_dep_aliases_upstream_target() {
     std::filesystem::remove_all(temp);
 }
 
+void test_generate_portable_cmake_guards_existing_dependency_targets() {
+    auto temp = std::filesystem::temp_directory_path() / "exon_test_portable_target_guards";
+    std::filesystem::remove_all(temp);
+    std::filesystem::create_directories(temp / "src");
+    std::filesystem::create_directories(temp / ".." / "core");
+    {
+        auto f = std::ofstream{temp / "src" / "main.cpp"};
+        f << "int main() { return 0; }\n";
+    }
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "0.1.0";
+    m.standard = 23;
+    m.type = "bin";
+
+    std::vector<fetch::FetchedDep> deps = {
+        {
+            .key = "core",
+            .name = "core",
+            .package_name = "core",
+            .path = temp.parent_path() / "core",
+            .is_path = true,
+        },
+        {
+            .key = "github.com/user/repo",
+            .name = "dep",
+            .package_name = "dep",
+            .version = "0.1.0",
+            .commit = "abc123",
+            .path = temp / "_unused",
+        },
+    };
+
+    auto cmake = build::generate_portable_cmake(m, temp, deps);
+
+    check(cmake.contains("if(NOT TARGET dep)\n    FetchContent_Declare(dep"),
+          "portable guards: git dependency wrapped in target guard");
+    check(cmake.contains("if(NOT TARGET core)\n    add_subdirectory("),
+          "portable guards: path dependency wrapped in target guard");
+
+    std::filesystem::remove_all(temp);
+}
+
 void test_generate_cmake_target_section_build() {
     // Per-target build flags should appear inside an if(<cmake-cond>)
     // block emitted from the existing target_sections loop.
@@ -1522,6 +1566,8 @@ int main() {
         test_generate_cmake_subdir_dep_aliases_upstream_target);
     run("test_generate_portable_cmake_subdir_dep_aliases_upstream_target",
         test_generate_portable_cmake_subdir_dep_aliases_upstream_target);
+    run("test_generate_portable_cmake_guards_existing_dependency_targets",
+        test_generate_portable_cmake_guards_existing_dependency_targets);
     run("test_generate_cmake_target_section_build",
         test_generate_cmake_target_section_build);
     run("test_generate_cmake_windows_asan_runtime_copy_for_exec_and_tests",

@@ -22,6 +22,8 @@ int main(int argc, char* argv[]) {
         return commands::cmd_version();
     if (command == "init")
         return commands::cmd_init(argc, argv);
+    if (command == "new")
+        return commands::cmd_new(argc, argv);
     if (command == "info")
         return commands::cmd_info();
     if (command == "build")
@@ -33,15 +35,15 @@ int main(int argc, char* argv[]) {
     if (command == "test")
         return commands::cmd_test(argc, argv);
     if (command == "clean")
-        return commands::cmd_clean();
+        return commands::cmd_clean(argc, argv);
     if (command == "add")
         return commands::cmd_add(argc, argv);
     if (command == "remove")
         return commands::cmd_remove(argc, argv);
     if (command == "update")
-        return commands::cmd_update();
+        return commands::cmd_update(argc, argv);
     if (command == "sync")
-        return commands::cmd_sync();
+        return commands::cmd_sync(argc, argv);
     if (command == "fmt")
         return commands::cmd_fmt();
 

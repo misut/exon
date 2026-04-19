@@ -77,21 +77,22 @@ hello, world!
 
 | Command | Description |
 |---------|-------------|
-| `exon init [--lib] [name]` | Create a new project (in `name/` if given, else in current dir) |
+| `exon init [--lib\|--workspace] [name]` | Create a new package or workspace |
+| `exon new --lib\|--bin <name>` | Create a new workspace member from the workspace root |
 | `exon info` | Show package information |
-| `exon build [--release] [--target <t>] [--output raw|wrapped]` | Build the project |
-| `exon check [--release] [--target <t>]` | Check syntax without linking |
-| `exon run [--release] [--target <t>]` | Build and run |
-| `exon test [--release] [--target <t>] [--timeout <sec>] [--output raw|wrapped] [--show-output failed|all|none]` | Build and run tests |
-| `exon clean` | Remove build artifacts |
+| `exon build [--release] [--target <t>] [--member a,b] [--exclude x,y] [--output raw\|wrapped]` | Build the project or selected workspace members |
+| `exon check [--release] [--target <t>] [--member a,b] [--exclude x,y]` | Check syntax without linking |
+| `exon run [--release] [--target <t>] [--member <name>]` | Build and run |
+| `exon test [--release] [--target <t>] [--member a,b] [--exclude x,y] [--timeout <sec>] [--output raw\|wrapped] [--show-output failed\|all\|none]` | Build and run tests |
+| `exon clean [--member a,b] [--exclude x,y]` | Remove build artifacts |
 | `exon add [--dev] <pkg> <ver>` | Add a git dependency |
 | `exon add [--dev] --path <name> <path>` | Add a local path dependency |
 | `exon add [--dev] --workspace <name>` | Add a workspace member dependency |
 | `exon add [--dev] --vcpkg <name> <ver> [--features a,b]` | Add a vcpkg dependency |
 | `exon add [--dev] --git <repo> --version <v> --subdir <dir>` | Add a git subdir dependency |
 | `exon remove <pkg>` | Remove a dependency |
-| `exon update` | Update dependencies |
-| `exon sync` | Sync CMakeLists.txt with exon.toml |
+| `exon update [--member a,b] [--exclude x,y]` | Update dependencies |
+| `exon sync [--member a,b] [--exclude x,y]` | Sync CMakeLists.txt with exon.toml |
 | `exon fmt` | Format source files |
 
 ## exon.toml
@@ -173,6 +174,40 @@ The `[sync]` section controls what `exon sync` outputs.
 [sync]
 cmake-in-root = false    # exon-only project, no root CMakeLists.txt needed
 ```
+
+### Workspace root manifests
+
+A workspace root declares members in `[workspace]` and may provide shared defaults for members:
+
+```toml
+[workspace]
+members = ["core", "util", "app"]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["misut"]
+license = "MIT"
+standard = 23
+build-system = "exon"
+
+[workspace.build]
+cxxflags = ["-Wall"]
+
+[workspace.build.debug]
+cxxflags = ["-fsanitize=address"]
+ldflags = ["-fsanitize=address"]
+```
+
+`[workspace.package]` only fills missing member package fields; an explicit member value wins. `[workspace.build]`, `[workspace.build.debug]`, and `[workspace.build.release]` prepend shared flags to each selected member's own build flags.
+
+Workspace roots are not runnable packages themselves. From the root:
+
+- `exon build`, `exon check`, `exon test`, `exon sync`, `exon clean`, and `exon update` accept `--member a,b` and `--exclude x,y`
+- `exon run --member <name>` runs a member package
+- root builds use a unified graph under `.exon/workspace/<profile>` (or `.exon/workspace/<target>/<profile>` for cross-target builds)
+- member execution order follows workspace dependency order, not the declaration order in `members = [...]`
+
+Use `exon init --workspace` to create the root, then `exon new --lib <name>` or `exon new --bin <name>` from the root to add members.
 
 ### Build flags
 
@@ -257,7 +292,7 @@ exon add github.com/misut/tomlcpp 0.2.0
 exon add --dev github.com/user/testlib 0.1.0
 ```
 
-**Depending on a workspace member** (monorepo layout): use inline-table syntax with `subdir`. The TOML key becomes the CMake target name.
+**Depending on a package inside a remote monorepo**: use inline-table syntax with `subdir`. The TOML key becomes the CMake target name.
 
 ```toml
 [dependencies]
@@ -452,7 +487,7 @@ int main() {
 - **Build profiles** — debug (default) and release (`--release`, statically links libc++ for portable binaries)
 - **Dev dependencies** — `[dev-dependencies.*]` for test-only packages, excluded from builds
 - **Five dependency kinds** — git, find_package, local path, workspace sibling, vcpkg
-- **Workspaces** — monorepos with `[workspace] members = [...]` and member-to-member references
+- **Workspaces** — monorepos with `[workspace] members = [...]`, shared `[workspace.package]` / `[workspace.build.*]` defaults, dependency-ordered root commands, and unified workspace builds
 - **Compile definitions** — built-in (`EXON_PKG_NAME`, `EXON_PKG_VERSION`) and user-defined via `[defines]`
 - **CMakeLists.txt sync** — `exon sync` generates a portable CMakeLists.txt for plain cmake builds (opt-out with `[sync] cmake-in-root = false`)
 - **Custom cmake packages** — `build-system = "cmake"` delegates to a hand-written CMakeLists.txt instead of scanning `src/`

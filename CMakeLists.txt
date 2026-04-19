@@ -110,6 +110,14 @@ target_link_libraries(test-test_cli PRIVATE
     exon-modules
 )
 
+add_executable(test-test_commands)
+target_sources(test-test_commands PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_commands.cpp
+)
+target_link_libraries(test-test_commands PRIVATE
+    exon-modules
+)
+
 add_executable(test-test_fetch)
 target_sources(test-test_fetch PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fetch.cpp
