@@ -50,9 +50,9 @@ std::string usage_text() {
                                                    "check syntax without linking"},
             {"run [--release] [--target <t>] [--member <name>] [args]",
                                                    "build and run the project"},
-            {"debug [--release] [--debugger auto|lldb|gdb|<path>] "
+            {"debug [--release] [--debugger auto|lldb|gdb|devenv|cdb|<path>] "
              "[--member <name>] [--exclude x,y] [args]",
-                                                   "build and open the project in a native CLI debugger"},
+                                                   "build and open the project in a native debugger"},
             {"test [--release] [--target <t>] [--member a,b] [--exclude x,y] [--timeout <sec>] "
              "[--output raw|wrapped] [--show-output failed|all|none]",
                                                    "build and run tests"},
@@ -941,9 +941,20 @@ int cmd_debug(int argc, char* argv[]) {
                 "exon debug currently supports native host executables only; --target is not supported yet");
         }
 
+        auto program_args = std::vector<std::string>{};
+        for (auto const& arg : args.positional())
+            program_args.push_back(arg);
+
         auto debugger_request = std::string{args.get("--debugger")};
         if (debugger_request.empty())
             debugger_request = "auto";
+        auto requested_kind = debug::classify_debugger_program(debugger_request);
+        if (requested_kind == debug::DebuggerKind::devenv &&
+            debug::has_devenv_unsafe_program_args(program_args)) {
+            return command_error(
+                "devenv cannot safely launch programs whose arguments start with '/'",
+                "use --debugger cdb, lldb, gdb, or a different debugger path for this command");
+        }
 
         auto requested_members = args.get_list("--member");
         auto excluded_members = args.get_list("--exclude");
@@ -957,9 +968,22 @@ int cmd_debug(int argc, char* argv[]) {
         if (!runnable_target)
             return command_error(runnable_target.error());
 
-        auto debugger_program = debug::system::resolve_debugger(debugger_request);
+        auto host = toolchain::detect_host_platform();
+        auto skipped_auto_kinds = std::vector<debug::DebuggerKind>{};
+        auto skipped_devenv_for_args = debugger_request == "auto" &&
+            debug::has_devenv_unsafe_program_args(program_args);
+        if (skipped_devenv_for_args)
+            skipped_auto_kinds.push_back(debug::DebuggerKind::devenv);
+        auto debugger_program = skipped_devenv_for_args
+            ? debug::system::resolve_debugger(debugger_request, host, skipped_auto_kinds)
+            : debug::system::resolve_debugger(debugger_request, host);
         if (!debugger_program)
-            return command_error(debugger_program.error());
+            return skipped_devenv_for_args
+                ? command_error(
+                    debugger_program.error(),
+                    "devenv was skipped because Visual Studio may treat '/'-prefixed "
+                    "program arguments as its own switches")
+                : command_error(debugger_program.error());
 
         auto rc = build::system::run(runnable_target->root,
                                      runnable_target->resolved_manifest,
@@ -971,10 +995,6 @@ int cmd_debug(int argc, char* argv[]) {
         auto project = build::project_context(runnable_target->root, release, {});
         auto executable = project.build_dir /
             (runnable_target->resolved_manifest.name + std::string{toolchain::exe_suffix});
-        auto program_args = std::vector<std::string>{};
-        for (auto const& arg : args.positional())
-            program_args.push_back(arg);
-
         auto spec = debug::debugger_launch_spec(*debugger_program, executable,
                                                 program_args, runnable_target->root);
         std::println("starting {} for {}...\n",
