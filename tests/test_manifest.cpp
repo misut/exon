@@ -629,6 +629,33 @@ platforms = [
     check(!toolchain::platform_has_arch(m.platforms[2]), "platforms[2]: arch wildcard");
 }
 
+void test_platforms_android() {
+    auto input = R"(
+[package]
+name = "app"
+version = "1.0.0"
+platforms = [
+    { os = "android", arch = "aarch64" },
+]
+)";
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    check(m.platforms.size() == 1, "android: 1 entry");
+    check(toolchain::platform_os_name(m.platforms[0]) == "android",
+          "android: platforms[0] os");
+    check(toolchain::platform_arch_name(m.platforms[0]) == "aarch64",
+          "android: platforms[0] arch");
+
+    // cfg(os = "android") evaluates correctly at runtime.
+    auto android_arm = toolchain::make_platform("android", "aarch64");
+    check(manifest::eval_predicate(R"(cfg(os = "android"))", android_arm),
+          "cfg(os = android) matches Platform{Android, AArch64}");
+    check(!manifest::eval_predicate(R"(cfg(os = "android"))",
+                                     toolchain::make_platform("linux", "aarch64")),
+          "cfg(os = android) does not match linux-aarch64");
+}
+
 void test_platforms_wildcard_match() {
     auto input = R"(
 [package]
@@ -940,6 +967,7 @@ int main() {
     test_subdir_deps();
     test_subdir_deps_missing_fields();
     test_platforms_specific();
+    test_platforms_android();
     test_platforms_wildcard_match();
     test_platforms_omitted();
     test_platforms_errors();

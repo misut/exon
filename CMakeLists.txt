@@ -21,7 +21,7 @@ include(FetchContent)
 if(NOT TARGET cppx)
     FetchContent_Declare(cppx
         GIT_REPOSITORY https://github.com/misut/cppx.git
-        GIT_TAG v1.3.0
+        GIT_TAG v1.7.0
         GIT_SHALLOW ON
     )
     FetchContent_MakeAvailable(cppx)

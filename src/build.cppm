@@ -29,6 +29,9 @@ struct BuildRequest {
     bool configured = false;
     bool any_cmake_deps = false;
     std::string wasm_toolchain_file;
+    std::string android_toolchain_file;
+    std::string android_abi;      // e.g. "arm64-v8a"
+    std::string android_platform; // e.g. "android-33"
     std::filesystem::path vcpkg_toolchain;
     std::vector<std::string> build_targets;
     std::vector<std::string> test_names;
@@ -331,6 +334,9 @@ core::ProcessSpec configure_cmd(toolchain::Toolchain const& tc,
                                 std::string_view vcpkg_toolchain = {},
                                 std::filesystem::path const& vcpkg_manifest_dir = {},
                                 std::string_view wasm_toolchain = {},
+                                std::string_view android_toolchain = {},
+                                std::string_view android_abi = {},
+                                std::string_view android_platform = {},
                                 bool any_cmake_deps = false) {
     auto build_type = release ? "Release" : "Debug";
     core::ProcessSpec spec{
@@ -382,6 +388,40 @@ core::ProcessSpec configure_cmd(toolchain::Toolchain const& tc,
         // WASI: let dlmalloc/sbrk manage heap growth via memory.grow.
         // Do NOT use --initial-heap or --initial-memory; these corrupt the
         // allocator's heap metadata and cause abort on the first allocation.
+        return spec;
+    }
+
+    if (!android_toolchain.empty()) {
+        // Android cross-compilation: the NDK toolchain file wires up --target,
+        // --sysroot, and linker flags. `import std;` compiles via the NDK's
+        // host clang-scan-deps + libc++.modules.json (passed through
+        // stdlib_modules_json, same plumbing as WASI).
+        spec.args.push_back(std::format("-DCMAKE_TOOLCHAIN_FILE={}", android_toolchain));
+        if (!android_abi.empty())
+            spec.args.push_back(std::format("-DANDROID_ABI={}", android_abi));
+        if (!android_platform.empty())
+            spec.args.push_back(std::format("-DANDROID_PLATFORM={}", android_platform));
+        if (!tc.cxx_compiler.empty())
+            spec.args.push_back(std::format("-DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS={}",
+                                            tc.cxx_compiler));
+        if (!tc.stdlib_modules_json.empty() && m.standard >= 23)
+            spec.args.push_back(std::format("-DCMAKE_CXX_STDLIB_MODULES_JSON={}",
+                                            tc.stdlib_modules_json));
+        // NDK bundles libc++ std.cppm, but Bionic's <ctype.h> defines the
+        // classification functions (isdigit, isalpha, ...) as `static inline`
+        // which the std module cannot re-export. Forcing them to `inline`
+        // (external linkage) sidesteps the bug until the NDK ships a fix.
+        // TODO(android): drop once https://github.com/android/ndk/issues/... is resolved.
+        std::string android_cxx = "-D__BIONIC_CTYPE_INLINE=inline";
+        auto android_extra_cxx = user_cxxflags();
+        if (!android_extra_cxx.empty()) {
+            android_cxx += ' ';
+            android_cxx += android_extra_cxx;
+        }
+        spec.args.push_back(std::format("-DCMAKE_CXX_FLAGS={}", android_cxx));
+        auto android_extra_ld = user_ldflags();
+        if (!android_extra_ld.empty())
+            spec.args.push_back(std::format("-DCMAKE_EXE_LINKER_FLAGS={}", android_extra_ld));
         return spec;
     }
 
@@ -560,9 +600,13 @@ core::ProcessSpec configure_command(toolchain::Toolchain const& tc,
                                     std::string_view vcpkg_toolchain = {},
                                     std::filesystem::path const& vcpkg_manifest_dir = {},
                                     std::string_view wasm_toolchain = {},
+                                    std::string_view android_toolchain = {},
+                                    std::string_view android_abi = {},
+                                    std::string_view android_platform = {},
                                     bool any_cmake_deps = false) {
     return detail::configure_cmd(tc, m, build_dir, source_dir, release, vcpkg_toolchain,
-                                 vcpkg_manifest_dir, wasm_toolchain, any_cmake_deps);
+                                 vcpkg_manifest_dir, wasm_toolchain, android_toolchain,
+                                 android_abi, android_platform, any_cmake_deps);
 }
 
 std::optional<std::string> stale_self_host_bootstrap_message(
@@ -672,7 +716,13 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
                            bool release = false, std::string_view target = {}) {
     std::ostringstream out;
 
-    bool import_std = (m.standard >= 23 &&
+    // Android cannot use CMake's CXX_MODULE_STD path: the NDK toolchain file
+    // injects --target/--sysroot late, so CMake's stdlib detection runs without
+    // them and fails to identify libc++. Emit a classic preamble (no experimental
+    // import-std hook) and let user code fall back to `#include`.
+    // TODO(android): switch back to import_std once CMake resolves the scan.
+    bool is_android_target = !target.empty() && target.ends_with("-linux-android");
+    bool import_std = (m.standard >= 23 && !is_android_target &&
                        (!tc.stdlib_modules_json.empty() || tc.native_import_std));
 
     detail::emit_cmake_preamble(out, m, import_std);
@@ -1527,7 +1577,8 @@ BuildPlan base_plan(BuildRequest const& request, bool with_tests = false) {
                           request.project.build_dir, request.project.exon_dir,
                           request.release, request.vcpkg_toolchain.string(),
                           request.project.exon_dir, request.wasm_toolchain_file,
-                          request.any_cmake_deps);
+                          request.android_toolchain_file, request.android_abi,
+                          request.android_platform, request.any_cmake_deps);
     plan.configure_steps.back().spec.cwd = request.project.root;
 
     return plan;
@@ -1592,6 +1643,10 @@ BuildPlan plan_test(BuildRequest const& request) {
     plan.test_names = request.test_names;
     plan.wasm_runtime = request.wasm_runtime;
 
+    bool is_android = !request.project.target.empty()
+                       && request.project.target.ends_with("-linux-android");
+    bool is_wasm_target = request.project.is_wasm && !is_android;
+
     for (std::size_t i = 0; i < request.build_targets.size(); ++i) {
         plan.build_steps.push_back({
             .spec = {
@@ -1608,11 +1663,19 @@ BuildPlan plan_test(BuildRequest const& request) {
         plan.build_steps.back().spec.cwd = request.project.root;
     }
 
+    if (is_android) {
+        // Android test binaries must be run on a device/emulator; the host
+        // cannot execute aarch64 Linux/Android ELFs. Verifying the build is
+        // still useful (detects compile/link regressions).
+        plan.success_message = "android test build succeeded; deploy to device to run";
+        return plan;
+    }
+
     auto exe_suffix = std::string{request.project.is_wasm ? "" : toolchain::exe_suffix};
     for (auto const& name : request.test_names) {
         auto exe = request.project.build_dir / (name + exe_suffix);
         core::ProcessSpec run_spec;
-        if (request.project.is_wasm) {
+        if (is_wasm_target) {
             run_spec.program = request.wasm_runtime;
             run_spec.args = {"-W", "exceptions=y", exe.string()};
         } else {
