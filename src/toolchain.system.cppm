@@ -353,6 +353,82 @@ toolchain::WasmToolchain detect_wasm(std::string_view triple) {
     return wt;
 }
 
+toolchain::AndroidToolchain detect_android(std::string_view triple) {
+    // supported ABI map
+    std::string abi;
+    if (triple == "aarch64-linux-android") {
+        abi = "arm64-v8a";
+    } else {
+        throw std::runtime_error(std::format(
+            "unsupported Android target '{}' (supported: aarch64-linux-android)", triple));
+    }
+
+    // find android-ndk: intron -> ANDROID_NDK_HOME -> ANDROID_NDK_ROOT
+    auto ndk = detail::find_intron_latest("android-ndk");
+    if (ndk.empty()) {
+        if (auto const* env = std::getenv("ANDROID_NDK_HOME"); env && *env)
+            ndk = env;
+    }
+    if (ndk.empty()) {
+        if (auto const* env = std::getenv("ANDROID_NDK_ROOT"); env && *env)
+            ndk = env;
+    }
+    if (ndk.empty())
+        throw std::runtime_error(
+            "android-ndk not found (install: intron install android-ndk <version>, "
+            "or set ANDROID_NDK_HOME / ANDROID_NDK_ROOT)");
+
+    auto ndk_path = std::filesystem::path{ndk};
+
+    auto toolchain_file = ndk_path / "build" / "cmake" / "android.toolchain.cmake";
+    if (!std::filesystem::exists(toolchain_file))
+        throw std::runtime_error(std::format(
+            "android-ndk toolchain file not found: {}", toolchain_file.string()));
+
+    // NDK's prebuilt LLVM host folder contains libc++.modules.json and the scan-deps binary.
+    // Google ships a single macOS host (darwin-x86_64, universal), linux-x86_64, and windows-x86_64.
+    auto prebuilt_root = ndk_path / "toolchains" / "llvm" / "prebuilt";
+    std::filesystem::path host_root;
+    if (std::filesystem::exists(prebuilt_root)) {
+        for (auto const& entry : std::filesystem::directory_iterator(prebuilt_root)) {
+            if (entry.is_directory()) {
+                host_root = entry.path();
+                break;
+            }
+        }
+    }
+    if (host_root.empty())
+        throw std::runtime_error(std::format(
+            "android-ndk prebuilt host toolchain not found under {}", prebuilt_root.string()));
+
+    auto modules_json = host_root / "lib" / "libc++.modules.json";
+
+    // NDK ships its own clang-scan-deps; prefer it over host fallback for consistency
+    std::string scan_deps;
+    auto ndk_scan = host_root / "bin" / "clang-scan-deps";
+    if (detail::exists_bin(ndk_scan))
+        scan_deps = detail::canonical_bin(ndk_scan).string();
+    if (scan_deps.empty()) {
+        auto intron_llvm = detail::find_intron_latest("llvm");
+        if (!intron_llvm.empty()) {
+            auto p = std::filesystem::path{intron_llvm} / "bin" / "clang-scan-deps";
+            if (detail::exists_bin(p))
+                scan_deps = detail::canonical_bin(p).string();
+        }
+    }
+
+    toolchain::AndroidToolchain at;
+    at.triple = std::string{triple};
+    at.ndk_path = ndk_path.string();
+    at.cmake_toolchain = std::filesystem::canonical(toolchain_file).string();
+    if (std::filesystem::exists(modules_json))
+        at.modules_json = std::filesystem::canonical(modules_json).string();
+    at.abi = std::move(abi);
+    at.platform = "android-33";
+    at.scan_deps = std::move(scan_deps);
+    return at;
+}
+
 std::string detect_wasm_runtime() {
     auto rt = detail::find_in_path("wasmtime");
     if (rt != "wasmtime")

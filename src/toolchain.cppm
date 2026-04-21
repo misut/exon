@@ -109,6 +109,16 @@ struct WasmToolchain {
     std::string scan_deps;       // host clang-scan-deps (wasi-sdk lacks it)
 };
 
+struct AndroidToolchain {
+    std::string triple;          // e.g. "aarch64-linux-android"
+    std::string ndk_path;        // android-ndk root directory
+    std::string cmake_toolchain; // absolute path to android.toolchain.cmake
+    std::string modules_json;    // absolute path to libc++.modules.json
+    std::string abi;             // CMake ANDROID_ABI (e.g. "arm64-v8a")
+    std::string platform;        // CMake ANDROID_PLATFORM (e.g. "android-33")
+    std::string scan_deps;       // host clang-scan-deps
+};
+
 inline auto platform_from_target(std::string_view triple) -> std::optional<Platform> {
     return cppx::platform::platform_from_target_triple(triple);
 }
