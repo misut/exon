@@ -236,7 +236,7 @@ Manifest from_toml(toml::Table const& table) {
                 auto const os = toolchain::parse_os(t.at("os").as_string());
                 if (os == toolchain::OS::Unknown)
                     throw std::runtime_error(std::format(
-                        "unknown os '{}' in [package].platforms; known: linux, macos, windows, wasi",
+                        "unknown os '{}' in [package].platforms; known: linux, macos, windows, wasi, android",
                         t.at("os").as_string()));
                 p.os = os;
             }
@@ -878,6 +878,7 @@ std::string predicate_to_cmake(std::string_view pred) {
             if (value == "macos") return "CMAKE_SYSTEM_NAME STREQUAL \"Darwin\"";
             if (value == "windows") return "WIN32";
             if (value == "wasi") return "CMAKE_SYSTEM_NAME STREQUAL \"WASI\"";
+            if (value == "android") return "CMAKE_SYSTEM_NAME STREQUAL \"Android\"";
         } else if (key == "arch") {
             if (value == "x86_64") return "CMAKE_SYSTEM_PROCESSOR MATCHES \"x86_64|AMD64\"";
             if (value == "aarch64") return "CMAKE_SYSTEM_PROCESSOR MATCHES \"aarch64|ARM64\"";

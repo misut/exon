@@ -337,7 +337,9 @@ build::BuildRequest do_prepare_request(
     build::ensure_fresh_self_host_bootstrap(build_manifest, project_root);
     ensure_intron_tools(project_root);
 
-    bool is_wasm = !target.empty();
+    bool is_cross = !target.empty();
+    bool is_wasm = is_cross && target.starts_with("wasm32");
+    bool is_android = is_cross && target.ends_with("-linux-android");
     if (is_wasm)
         validate_wasm_dependencies(build_manifest);
 
@@ -345,6 +347,11 @@ build::BuildRequest do_prepare_request(
     auto tc = toolchain::system::detect();
 
     std::string wasm_toolchain_file;
+    std::string android_toolchain_file;
+    std::string android_abi;
+    std::string android_platform;
+    std::string android_clang_target;
+    std::string android_sysroot;
     std::string wasm_runtime;
     if (is_wasm) {
         auto wasm_tc = toolchain::system::detect_wasm(target);
@@ -362,6 +369,19 @@ build::BuildRequest do_prepare_request(
                 throw std::runtime_error(
                     "wasmtime not found on PATH (install: https://wasmtime.dev)");
         }
+    } else if (is_android) {
+        auto android_tc = toolchain::system::detect_android(target);
+        android_toolchain_file = android_tc.cmake_toolchain;
+        android_abi = android_tc.abi;
+        android_platform = android_tc.platform;
+        android_clang_target = android_tc.clang_target;
+        android_sysroot = android_tc.sysroot;
+        tc.stdlib_modules_json = android_tc.modules_json;
+        tc.cxx_compiler = android_tc.scan_deps;
+        tc.sysroot.clear();
+        tc.lib_dir.clear();
+        tc.has_clang_config = false;
+        tc.needs_stdlib_flag = false;
     }
 
     auto platform = target.empty()
@@ -393,6 +413,11 @@ build::BuildRequest do_prepare_request(
         .configured = std::filesystem::exists(project.build_dir / "build.ninja"),
         .any_cmake_deps = any_cmake_deps,
         .wasm_toolchain_file = std::move(wasm_toolchain_file),
+        .android_toolchain_file = std::move(android_toolchain_file),
+        .android_abi = std::move(android_abi),
+        .android_platform = std::move(android_platform),
+        .android_clang_target = std::move(android_clang_target),
+        .android_sysroot = std::move(android_sysroot),
         .vcpkg_toolchain = std::move(vcpkg_toolchain),
         .filter = std::string{filter},
         .wasm_runtime = std::move(wasm_runtime),

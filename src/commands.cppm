@@ -74,6 +74,7 @@ std::string usage_text() {
         }},
         cli::Section{"targets", {
             {"wasm32-wasi", "WebAssembly (requires wasi-sdk via intron or WASI_SDK_PATH)"},
+            {"aarch64-linux-android", "Android arm64 (requires android-ndk via intron or ANDROID_NDK_HOME)"},
         }},
     });
 }
@@ -518,11 +519,31 @@ WorkspaceBuildExecution prepare_workspace_build_execution(
     auto synthetic_manifest = workspace_build_manifest(workspace_root, selection.members);
     auto tc = toolchain::system::detect();
     std::string wasm_toolchain_file;
-    if (!target.empty()) {
+    std::string android_toolchain_file;
+    std::string android_abi;
+    std::string android_platform;
+    std::string android_clang_target;
+    std::string android_sysroot;
+    bool is_wasm = !target.empty() && target.starts_with("wasm32");
+    bool is_android = !target.empty() && target.ends_with("-linux-android");
+    if (is_wasm) {
         auto wasm_tc = toolchain::system::detect_wasm(target);
         wasm_toolchain_file = wasm_tc.cmake_toolchain;
         tc.stdlib_modules_json = wasm_tc.modules_json;
         tc.cxx_compiler = wasm_tc.scan_deps;
+        tc.sysroot.clear();
+        tc.lib_dir.clear();
+        tc.has_clang_config = false;
+        tc.needs_stdlib_flag = false;
+    } else if (is_android) {
+        auto android_tc = toolchain::system::detect_android(target);
+        android_toolchain_file = android_tc.cmake_toolchain;
+        android_abi = android_tc.abi;
+        android_platform = android_tc.platform;
+        android_clang_target = android_tc.clang_target;
+        android_sysroot = android_tc.sysroot;
+        tc.stdlib_modules_json = android_tc.modules_json;
+        tc.cxx_compiler = android_tc.scan_deps;
         tc.sysroot.clear();
         tc.lib_dir.clear();
         tc.has_clang_config = false;
@@ -544,6 +565,11 @@ WorkspaceBuildExecution prepare_workspace_build_execution(
         .release = release,
         .configured = std::filesystem::exists(build_dir / "build.ninja"),
         .wasm_toolchain_file = wasm_toolchain_file,
+        .android_toolchain_file = android_toolchain_file,
+        .android_abi = android_abi,
+        .android_platform = android_platform,
+        .android_clang_target = android_clang_target,
+        .android_sysroot = android_sysroot,
     };
 
     build::BuildPlan plan{
@@ -564,7 +590,8 @@ WorkspaceBuildExecution prepare_workspace_build_execution(
 
     auto configure_spec = build::configure_command(
         tc, synthetic_manifest, build_dir, cmake_root, release, {}, {},
-        wasm_toolchain_file, false);
+        wasm_toolchain_file, android_toolchain_file, android_abi, android_platform,
+        android_clang_target, android_sysroot, false);
     configure_spec.cwd = workspace_root;
     plan.configure_steps.push_back({
         .spec = std::move(configure_spec),
@@ -1095,13 +1122,19 @@ int cmd_run(int argc, char* argv[]) {
                                                                requested_members, excluded_members);
         if (!runnable_target)
             return command_error(runnable_target.error());
-        bool is_wasm = !target.empty();
+        bool is_wasm = !target.empty() && target.starts_with("wasm32");
+        bool is_android = !target.empty() && target.ends_with("-linux-android");
         int rc = build::system::run(runnable_target->root,
                                     runnable_target->resolved_manifest,
                                     runnable_target->raw_manifest,
                                     release, target);
         if (rc != 0)
             return rc;
+
+        if (is_android)
+            throw std::runtime_error(
+                "cannot `exon run` an Android target on the host; deploy the produced library "
+                "to a device or emulator instead");
 
         auto project = build::project_context(runnable_target->root, release, target);
         core::ProcessSpec spec{

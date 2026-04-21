@@ -421,7 +421,7 @@ void test_configure_command_macos_uses_system_runtime() {
 
     auto cmd =
         build::configure_command(make_macos_tc(), m, proj.root / "build", proj.root, true,
-                                 {}, {}, {}, true);
+                                 {}, {}, {}, {}, {}, {}, {}, {}, true);
     auto text = command_text(cmd);
 
     check(text.contains("-DCMAKE_OSX_SYSROOT=/fake/MacOSX.sdk"), "macos: sysroot emitted");
@@ -446,7 +446,7 @@ void test_configure_command_linux_cmake_deps_keep_toolchain_runtime() {
 
     auto cmd =
         build::configure_command(make_linux_tc(), m, proj.root / "build", proj.root, false,
-                                 {}, {}, {}, true);
+                                 {}, {}, {}, {}, {}, {}, {}, {}, true);
     auto text = command_text(cmd);
 
     check(text.contains("-DCMAKE_CXX_FLAGS=-stdlib=libc++"),
