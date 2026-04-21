@@ -111,11 +111,14 @@ struct WasmToolchain {
 
 struct AndroidToolchain {
     std::string triple;          // e.g. "aarch64-linux-android"
+    std::string clang_target;    // clang --target= triple with API (e.g. "aarch64-none-linux-android33")
     std::string ndk_path;        // android-ndk root directory
+    std::string sysroot;         // $NDK/toolchains/llvm/prebuilt/<host>/sysroot
     std::string cmake_toolchain; // absolute path to android.toolchain.cmake
     std::string modules_json;    // absolute path to libc++.modules.json
     std::string abi;             // CMake ANDROID_ABI (e.g. "arm64-v8a")
     std::string platform;        // CMake ANDROID_PLATFORM (e.g. "android-33")
+    int api_level = 33;          // Android API level used in clang --target
     std::string scan_deps;       // host clang-scan-deps
 };
 

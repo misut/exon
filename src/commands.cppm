@@ -522,6 +522,8 @@ WorkspaceBuildExecution prepare_workspace_build_execution(
     std::string android_toolchain_file;
     std::string android_abi;
     std::string android_platform;
+    std::string android_clang_target;
+    std::string android_sysroot;
     bool is_wasm = !target.empty() && target.starts_with("wasm32");
     bool is_android = !target.empty() && target.ends_with("-linux-android");
     if (is_wasm) {
@@ -538,6 +540,8 @@ WorkspaceBuildExecution prepare_workspace_build_execution(
         android_toolchain_file = android_tc.cmake_toolchain;
         android_abi = android_tc.abi;
         android_platform = android_tc.platform;
+        android_clang_target = android_tc.clang_target;
+        android_sysroot = android_tc.sysroot;
         tc.stdlib_modules_json = android_tc.modules_json;
         tc.cxx_compiler = android_tc.scan_deps;
         tc.sysroot.clear();
@@ -564,6 +568,8 @@ WorkspaceBuildExecution prepare_workspace_build_execution(
         .android_toolchain_file = android_toolchain_file,
         .android_abi = android_abi,
         .android_platform = android_platform,
+        .android_clang_target = android_clang_target,
+        .android_sysroot = android_sysroot,
     };
 
     build::BuildPlan plan{
@@ -584,7 +590,8 @@ WorkspaceBuildExecution prepare_workspace_build_execution(
 
     auto configure_spec = build::configure_command(
         tc, synthetic_manifest, build_dir, cmake_root, release, {}, {},
-        wasm_toolchain_file, android_toolchain_file, android_abi, android_platform, false);
+        wasm_toolchain_file, android_toolchain_file, android_abi, android_platform,
+        android_clang_target, android_sysroot, false);
     configure_spec.cwd = workspace_root;
     plan.configure_steps.push_back({
         .spec = std::move(configure_spec),

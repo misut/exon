@@ -417,14 +417,30 @@ toolchain::AndroidToolchain detect_android(std::string_view triple) {
         }
     }
 
+    // sysroot lives alongside the host toolchain; we inject it into CMAKE_CXX_FLAGS
+    // so CMake's stdlib detection probe (which ignores the Android toolchain file's
+    // --target/--sysroot injection) can find <version> and correctly identify libc++.
+    auto sysroot = host_root / "sysroot";
+
+    constexpr int android_api_level = 33;
+
+    // clang's canonical Android target triple for use with --target=
+    // (NDK r29+ uses `aarch64-none-linux-android<api>` as the effective triple).
+    auto const arch = std::string_view{triple}.substr(0, std::string_view{triple}.find('-'));
+    auto clang_target = std::format("{}-none-linux-android{}", arch, android_api_level);
+
     toolchain::AndroidToolchain at;
     at.triple = std::string{triple};
+    at.clang_target = std::move(clang_target);
     at.ndk_path = ndk_path.string();
+    if (std::filesystem::exists(sysroot))
+        at.sysroot = std::filesystem::canonical(sysroot).string();
     at.cmake_toolchain = std::filesystem::canonical(toolchain_file).string();
     if (std::filesystem::exists(modules_json))
         at.modules_json = std::filesystem::canonical(modules_json).string();
     at.abi = std::move(abi);
-    at.platform = "android-33";
+    at.platform = std::format("android-{}", android_api_level);
+    at.api_level = android_api_level;
     at.scan_deps = std::move(scan_deps);
     return at;
 }
