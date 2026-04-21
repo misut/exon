@@ -30,8 +30,10 @@ struct BuildRequest {
     bool any_cmake_deps = false;
     std::string wasm_toolchain_file;
     std::string android_toolchain_file;
-    std::string android_abi;      // e.g. "arm64-v8a"
-    std::string android_platform; // e.g. "android-33"
+    std::string android_abi;          // e.g. "arm64-v8a"
+    std::string android_platform;     // e.g. "android-33"
+    std::string android_clang_target; // e.g. "aarch64-none-linux-android33"
+    std::string android_sysroot;      // $NDK/toolchains/llvm/prebuilt/<host>/sysroot
     std::filesystem::path vcpkg_toolchain;
     std::vector<std::string> build_targets;
     std::vector<std::string> test_names;
@@ -337,6 +339,8 @@ core::ProcessSpec configure_cmd(toolchain::Toolchain const& tc,
                                 std::string_view android_toolchain = {},
                                 std::string_view android_abi = {},
                                 std::string_view android_platform = {},
+                                std::string_view android_clang_target = {},
+                                std::string_view android_sysroot = {},
                                 bool any_cmake_deps = false) {
     auto build_type = release ? "Release" : "Debug";
     core::ProcessSpec spec{
@@ -392,10 +396,12 @@ core::ProcessSpec configure_cmd(toolchain::Toolchain const& tc,
     }
 
     if (!android_toolchain.empty()) {
-        // Android cross-compilation: the NDK toolchain file wires up --target,
-        // --sysroot, and linker flags. `import std;` compiles via the NDK's
-        // host clang-scan-deps + libc++.modules.json (passed through
-        // stdlib_modules_json, same plumbing as WASI).
+        // Android cross-compilation. The NDK toolchain file handles --target /
+        // --sysroot / linker flags for the actual compile, but CMake's stdlib
+        // detection probe runs BEFORE the toolchain file injects those flags
+        // and so cannot resolve <version>. We duplicate --target / --sysroot
+        // into CMAKE_CXX_FLAGS so the probe sees them and correctly identifies
+        // libc++, which in turn unblocks `import std;` via CXX_MODULE_STD.
         spec.args.push_back(std::format("-DCMAKE_TOOLCHAIN_FILE={}", android_toolchain));
         if (!android_abi.empty())
             spec.args.push_back(std::format("-DANDROID_ABI={}", android_abi));
@@ -407,18 +413,32 @@ core::ProcessSpec configure_cmd(toolchain::Toolchain const& tc,
         if (!tc.stdlib_modules_json.empty() && m.standard >= 23)
             spec.args.push_back(std::format("-DCMAKE_CXX_STDLIB_MODULES_JSON={}",
                                             tc.stdlib_modules_json));
-        // NDK bundles libc++ std.cppm, but Bionic's <ctype.h> defines the
-        // classification functions (isdigit, isalpha, ...) as `static inline`
-        // which the std module cannot re-export. Forcing them to `inline`
-        // (external linkage) sidesteps the bug until the NDK ships a fix.
-        // TODO(android): drop once https://github.com/android/ndk/issues/... is resolved.
-        std::string android_cxx = "-D__BIONIC_CTYPE_INLINE=inline";
+
+        std::string android_cxx;
+        auto append = [&](std::string_view flag) {
+            if (!android_cxx.empty()) android_cxx += ' ';
+            android_cxx += flag;
+        };
+        // Make the detection probe see the cross-compile target + sysroot.
+        if (!android_clang_target.empty())
+            append(std::format("--target={}", android_clang_target));
+        if (!android_sysroot.empty())
+            append(std::format("--sysroot={}", android_sysroot));
+        // NDK r29/r30 ship libc++ std.cppm that re-exports Bionic's ctype /
+        // fortify inline wrappers via `using std::isdigit;` and friends.
+        // Bionic marks those as `static inline` (internal linkage), which
+        // the std module cannot export. Force them to external-linkage
+        // `inline` and disable _FORTIFY_SOURCE so the fortify headers don't
+        // reintroduce the same pattern. TODO(android): drop once the NDK
+        // ships an upstream fix.
+        append("-D__BIONIC_CTYPE_INLINE=inline");
+        append("-U_FORTIFY_SOURCE");
+        append("-D_FORTIFY_SOURCE=0");
         auto android_extra_cxx = user_cxxflags();
-        if (!android_extra_cxx.empty()) {
-            android_cxx += ' ';
-            android_cxx += android_extra_cxx;
-        }
+        if (!android_extra_cxx.empty())
+            append(android_extra_cxx);
         spec.args.push_back(std::format("-DCMAKE_CXX_FLAGS={}", android_cxx));
+
         auto android_extra_ld = user_ldflags();
         if (!android_extra_ld.empty())
             spec.args.push_back(std::format("-DCMAKE_EXE_LINKER_FLAGS={}", android_extra_ld));
@@ -603,10 +623,13 @@ core::ProcessSpec configure_command(toolchain::Toolchain const& tc,
                                     std::string_view android_toolchain = {},
                                     std::string_view android_abi = {},
                                     std::string_view android_platform = {},
+                                    std::string_view android_clang_target = {},
+                                    std::string_view android_sysroot = {},
                                     bool any_cmake_deps = false) {
     return detail::configure_cmd(tc, m, build_dir, source_dir, release, vcpkg_toolchain,
                                  vcpkg_manifest_dir, wasm_toolchain, android_toolchain,
-                                 android_abi, android_platform, any_cmake_deps);
+                                 android_abi, android_platform, android_clang_target,
+                                 android_sysroot, any_cmake_deps);
 }
 
 std::optional<std::string> stale_self_host_bootstrap_message(
@@ -716,13 +739,7 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
                            bool release = false, std::string_view target = {}) {
     std::ostringstream out;
 
-    // Android cannot use CMake's CXX_MODULE_STD path: the NDK toolchain file
-    // injects --target/--sysroot late, so CMake's stdlib detection runs without
-    // them and fails to identify libc++. Emit a classic preamble (no experimental
-    // import-std hook) and let user code fall back to `#include`.
-    // TODO(android): switch back to import_std once CMake resolves the scan.
-    bool is_android_target = !target.empty() && target.ends_with("-linux-android");
-    bool import_std = (m.standard >= 23 && !is_android_target &&
+    bool import_std = (m.standard >= 23 &&
                        (!tc.stdlib_modules_json.empty() || tc.native_import_std));
 
     detail::emit_cmake_preamble(out, m, import_std);
@@ -1578,7 +1595,8 @@ BuildPlan base_plan(BuildRequest const& request, bool with_tests = false) {
                           request.release, request.vcpkg_toolchain.string(),
                           request.project.exon_dir, request.wasm_toolchain_file,
                           request.android_toolchain_file, request.android_abi,
-                          request.android_platform, request.any_cmake_deps);
+                          request.android_platform, request.android_clang_target,
+                          request.android_sysroot, request.any_cmake_deps);
     plan.configure_steps.back().spec.cwd = request.project.root;
 
     return plan;

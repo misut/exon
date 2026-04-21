@@ -350,6 +350,8 @@ build::BuildRequest do_prepare_request(
     std::string android_toolchain_file;
     std::string android_abi;
     std::string android_platform;
+    std::string android_clang_target;
+    std::string android_sysroot;
     std::string wasm_runtime;
     if (is_wasm) {
         auto wasm_tc = toolchain::system::detect_wasm(target);
@@ -372,6 +374,8 @@ build::BuildRequest do_prepare_request(
         android_toolchain_file = android_tc.cmake_toolchain;
         android_abi = android_tc.abi;
         android_platform = android_tc.platform;
+        android_clang_target = android_tc.clang_target;
+        android_sysroot = android_tc.sysroot;
         tc.stdlib_modules_json = android_tc.modules_json;
         tc.cxx_compiler = android_tc.scan_deps;
         tc.sysroot.clear();
@@ -412,6 +416,8 @@ build::BuildRequest do_prepare_request(
         .android_toolchain_file = std::move(android_toolchain_file),
         .android_abi = std::move(android_abi),
         .android_platform = std::move(android_platform),
+        .android_clang_target = std::move(android_clang_target),
+        .android_sysroot = std::move(android_sysroot),
         .vcpkg_toolchain = std::move(vcpkg_toolchain),
         .filter = std::string{filter},
         .wasm_runtime = std::move(wasm_runtime),
