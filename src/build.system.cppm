@@ -875,8 +875,9 @@ public:
         if (!active() || thread_.joinable())
             return;
         tracker_ = &tracker;
-        thread_ = std::jthread([this](std::stop_token stop_token) {
-            while (!stop_token.stop_requested()) {
+        stop_requested_.store(false, std::memory_order_relaxed);
+        thread_ = std::thread([this] {
+            while (!stop_requested_.load(std::memory_order_relaxed)) {
                 render_once();
                 std::this_thread::sleep_for(std::chrono::milliseconds{100});
             }
@@ -891,7 +892,7 @@ public:
 
     void stop() {
         if (thread_.joinable()) {
-            thread_.request_stop();
+            stop_requested_.store(true, std::memory_order_relaxed);
             thread_.join();
         }
 
@@ -963,7 +964,8 @@ private:
 
     LiveProgressRenderMode mode_ = LiveProgressRenderMode::disabled;
     NinjaProgressTracker* tracker_ = nullptr;
-    std::jthread thread_;
+    std::thread thread_;
+    std::atomic<bool> stop_requested_ = false;
     std::size_t spinner_index_ = 0;
     std::size_t last_width_ = 0;
     bool cursor_hidden_ = false;
