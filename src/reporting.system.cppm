@@ -20,6 +20,9 @@ import reporting;
 export namespace reporting::system {
 
 ProcessResult run_process(core::ProcessSpec const& spec, StreamMode mode);
+using OutputObserver = std::function<void(std::string_view chunk, bool stderr_stream)>;
+ProcessResult run_process(core::ProcessSpec const& spec, StreamMode mode,
+                          OutputObserver observer);
 
 } // namespace reporting::system
 
@@ -85,8 +88,11 @@ std::wstring make_command_line(core::ProcessSpec const& spec) {
 }
 
 void append_and_maybe_tee(std::string& sink, char const* data, std::size_t size,
-                          bool tee, bool stderr_stream) {
+                          bool tee, bool stderr_stream,
+                          OutputObserver const* observer = nullptr) {
     sink.append(data, size);
+    if (observer && *observer)
+        (*observer)(std::string_view{data, size}, stderr_stream);
     if (!tee || size == 0)
         return;
 
@@ -105,7 +111,8 @@ void append_and_maybe_tee(std::string& sink, char const* data, std::size_t size,
     }
 }
 
-void drain_pipe(HANDLE pipe, std::string& sink, bool tee, bool stderr_stream) {
+void drain_pipe(HANDLE pipe, std::string& sink, bool tee, bool stderr_stream,
+                OutputObserver const* observer = nullptr) {
     std::array<char, 4096> buffer{};
     while (true) {
         DWORD read = 0;
@@ -118,7 +125,7 @@ void drain_pipe(HANDLE pipe, std::string& sink, bool tee, bool stderr_stream) {
         }
         if (read == 0)
             break;
-        append_and_maybe_tee(sink, buffer.data(), read, tee, stderr_stream);
+        append_and_maybe_tee(sink, buffer.data(), read, tee, stderr_stream, observer);
     }
 }
 #else
@@ -144,8 +151,11 @@ void write_all(int fd, char const* data, std::size_t size) {
 }
 
 void append_and_maybe_tee(std::string& sink, char const* data, std::size_t size,
-                          bool tee, bool stderr_stream) {
+                          bool tee, bool stderr_stream,
+                          OutputObserver const* observer = nullptr) {
     sink.append(data, size);
+    if (observer && *observer)
+        (*observer)(std::string_view{data, size}, stderr_stream);
     if (!tee || size == 0)
         return;
     write_all(stderr_stream ? STDERR_FILENO : STDOUT_FILENO, data, size);
@@ -316,7 +326,8 @@ ProcessResult run_passthrough(core::ProcessSpec const& spec) {
     return result;
 }
 
-ProcessResult run_captured(core::ProcessSpec const& spec, bool tee) {
+ProcessResult run_captured(core::ProcessSpec const& spec, bool tee,
+                           OutputObserver observer = {}) {
     auto started = std::chrono::steady_clock::now();
     ProcessResult result;
 
@@ -397,10 +408,10 @@ ProcessResult run_captured(core::ProcessSpec const& spec, bool tee) {
     }
 
     std::thread stdout_thread([&] {
-        drain_pipe(stdout_read, result.stdout_text, tee, false);
+        drain_pipe(stdout_read, result.stdout_text, tee, false, &observer);
     });
     std::thread stderr_thread([&] {
-        drain_pipe(stderr_read, result.stderr_text, tee, true);
+        drain_pipe(stderr_read, result.stderr_text, tee, true, &observer);
     });
 
     auto remaining = spec.timeout
@@ -548,7 +559,7 @@ ProcessResult run_captured(core::ProcessSpec const& spec, bool tee) {
                 auto read = ::read(fd.fd, buffer.data(), buffer.size());
                 if (read > 0) {
                     append_and_maybe_tee(sink, buffer.data(), static_cast<std::size_t>(read), tee,
-                                         stderr_stream);
+                                         stderr_stream, &observer);
                     continue;
                 }
                 if (read == 0) {
@@ -587,13 +598,18 @@ ProcessResult run_captured(core::ProcessSpec const& spec, bool tee) {
 } // namespace detail
 
 ProcessResult run_process(core::ProcessSpec const& spec, StreamMode mode) {
+    return run_process(spec, mode, {});
+}
+
+ProcessResult run_process(core::ProcessSpec const& spec, StreamMode mode,
+                          OutputObserver observer) {
     switch (mode) {
     case StreamMode::passthrough:
         return detail::run_passthrough(spec);
     case StreamMode::tee:
-        return detail::run_captured(spec, true);
+        return detail::run_captured(spec, true, std::move(observer));
     case StreamMode::capture:
-        return detail::run_captured(spec, false);
+        return detail::run_captured(spec, false, std::move(observer));
     }
     return detail::run_passthrough(spec);
 }

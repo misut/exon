@@ -199,6 +199,10 @@ void test_readme_output_docs_match_usage() {
           "README documents test human output mode");
     check(readme.find("default to `human` output") != std::string::npos,
           "README documents human default");
+    check(readme.find("interactive terminal") != std::string::npos,
+          "README documents interactive live progress");
+    check(readme.find("When stdout is not a TTY") != std::string::npos,
+          "README documents non-tty fallback");
     check(readme.find("`wrapped` adds the same headers while still showing the underlying "
                       "CMake/Ninja/test output") != std::string::npos,
           "README documents wrapped behavior");

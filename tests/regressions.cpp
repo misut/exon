@@ -934,6 +934,37 @@ void test_reporting_capture_collects_stdout_and_stderr() {
     check(result.stderr_text.contains("err"), "capture: stderr captured");
 }
 
+void test_reporting_capture_observer_receives_chunks() {
+#if defined(_WIN32)
+    core::ProcessSpec spec{
+        .program = "cmd",
+        .args = {"/c", "(echo observer-out & echo observer-err 1>&2 & exit 0)"},
+    };
+#else
+    core::ProcessSpec spec{
+        .program = "sh",
+        .args = {"-c", "printf 'observer-out\\n'; printf 'observer-err\\n' 1>&2"},
+    };
+#endif
+
+    auto observed_stdout = std::string{};
+    auto observed_stderr = std::string{};
+    auto result = reporting::system::run_process(
+        spec, reporting::StreamMode::capture,
+        [&](std::string_view chunk, bool stderr_stream) {
+            if (stderr_stream)
+                observed_stderr.append(chunk);
+            else
+                observed_stdout.append(chunk);
+        });
+
+    check(result.exit_code == 0, "observer: exit code");
+    check(observed_stdout.contains("observer-out"), "observer: stdout chunk seen");
+    check(observed_stderr.contains("observer-err"), "observer: stderr chunk seen");
+    check(result.stdout_text == observed_stdout, "observer: stdout matches capture");
+    check(result.stderr_text == observed_stderr, "observer: stderr matches capture");
+}
+
 void test_reporting_tee_collects_output() {
 #if defined(_WIN32)
     core::ProcessSpec spec{
@@ -971,6 +1002,46 @@ void test_reporting_timeout_marks_result() {
     auto result = reporting::system::run_process(spec, reporting::StreamMode::capture);
     check(result.timed_out, "timeout: result flagged");
     check(result.exit_code == 124, "timeout: uses 124 exit code");
+}
+
+void test_ninja_progress_helpers() {
+    auto progress = build::system::detail::parse_ninja_progress_prefix(
+        "[12/56 21%] Building CXX object foo.o");
+    check(progress.has_value(), "progress parser: prefix parsed");
+    check(progress && progress->finished == 12, "progress parser: finished count");
+    check(progress && progress->total == 56, "progress parser: total count");
+    check(progress && progress->percent == 21, "progress parser: percent");
+    check(!build::system::detail::parse_ninja_progress_prefix("Building CXX object foo.o"),
+          "progress parser: non-progress line ignored");
+
+    auto stripped = build::system::detail::strip_ninja_progress_prefix(
+        "[12/56 21%] Building CXX object foo.o");
+    check(stripped == "Building CXX object foo.o", "progress strip: prefix removed");
+
+    auto sanitized = build::system::detail::sanitize_ninja_progress_output(
+        "[1/4 25%] Building CXX object foo.o\n"
+        "[2/4 50%] \n"
+        "plain stdout\n");
+    check(!sanitized.contains("[1/4 25%]"), "progress sanitize: progress prefix removed");
+    check(sanitized.contains("Building CXX object foo.o"),
+          "progress sanitize: line body preserved");
+    check(sanitized.contains("plain stdout"),
+          "progress sanitize: non-progress output preserved");
+}
+
+void test_live_progress_frame_format() {
+    auto frame0 = build::system::detail::format_live_progress_frame({
+        .finished = 12,
+        .total = 56,
+        .percent = 21,
+    }, 0);
+    auto frame1 = build::system::detail::format_live_progress_frame({
+        .finished = 12,
+        .total = 56,
+        .percent = 21,
+    }, 1);
+    check(frame0 == "  [|] [12/56 21%]", "progress frame: first spinner frame");
+    check(frame1 == "  [/] [12/56 21%]", "progress frame: second spinner frame");
 }
 
 void test_human_build_success_output() {
@@ -1286,8 +1357,11 @@ int main(int argc, char* argv[]) {
     test_run_process_returns_child_exit_code();
     test_system_run_process_honors_cwd();
     test_reporting_capture_collects_stdout_and_stderr();
+    test_reporting_capture_observer_receives_chunks();
     test_reporting_tee_collects_output();
     test_reporting_timeout_marks_result();
+    test_ninja_progress_helpers();
+    test_live_progress_frame_format();
     test_human_build_success_output();
     test_human_build_cached_output();
     test_human_build_failure_output();
