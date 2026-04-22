@@ -279,7 +279,7 @@ ldflags = ["/fsanitize=address"]
 
 When these flags are present, exon now copies `clang_rt.asan_dynamic-x86_64.dll` next to each built executable and test binary. This makes direct execution from `.exon/debug/` work without manually editing `PATH`.
 
-`exon build` and `exon test` default to `human` output. `human` keeps the console focused on stage headers and final summaries, `wrapped` adds the same headers while still showing the underlying CMake/Ninja/test output, and `raw` keeps exon wrapping to a minimum.
+`exon build` and `exon test` default to `human` output. In an interactive terminal, `human` shows a live spinner plus `[finished/total percent%]` build progress while keeping the console focused on stage headers and final summaries. When stdout is not a TTY, `human` falls back to the same static stage-oriented summaries. `wrapped` adds the same headers while still showing the underlying CMake/Ninja/test output, and `raw` keeps exon wrapping to a minimum.
 
 `exon test --show-output failed` (default) only shows captured stdout/stderr for failing or timed-out test binaries. Use `--show-output all` to always print captured output, or `--show-output none` to suppress it entirely.
 

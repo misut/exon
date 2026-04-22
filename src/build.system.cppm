@@ -1,5 +1,11 @@
 module;
 #include <cstdio>
+#if defined(_WIN32)
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 export module build.system;
 import std;
@@ -670,15 +676,331 @@ struct TestRunRecord {
 };
 
 reporting::ProcessResult run_step(core::ProcessStep const& step, reporting::StreamMode mode,
-                                  bool use_ninja_status);
+                                  std::string_view ninja_status_format = {},
+                                  reporting::system::OutputObserver observer = {});
 void maybe_print_windows_native_toolchain_warning(build::BuildRequest const& request);
 void maybe_print_windows_native_toolchain_failure_hint(build::BuildRequest const& request,
                                                        reporting::ProcessResult const& result);
 
+enum class LiveProgressRenderMode {
+    disabled,
+    carriage_return,
+    vt,
+};
+
+struct NinjaProgressUpdate {
+    int finished = 0;
+    int total = 0;
+    int percent = 0;
+};
+
+constexpr auto progress_spinner_frames =
+    std::array<std::string_view, 4>{"|", "/", "-", "\\"};
+constexpr auto wrapped_ninja_status_format = std::string_view{"[%f/%t] "};
+constexpr auto human_ninja_status_format = std::string_view{"[%f/%t %p%%] "};
+
+std::optional<int> parse_decimal(std::string_view text, std::size_t& pos) {
+    if (pos >= text.size() ||
+        !std::isdigit(static_cast<unsigned char>(text[pos]))) {
+        return std::nullopt;
+    }
+
+    int value = 0;
+    while (pos < text.size() && std::isdigit(static_cast<unsigned char>(text[pos]))) {
+        value = value * 10 + (text[pos] - '0');
+        ++pos;
+    }
+    return value;
+}
+
+std::optional<NinjaProgressUpdate> parse_ninja_progress_prefix(std::string_view line) {
+    auto pos = std::size_t{0};
+    if (pos >= line.size() || line[pos] != '[')
+        return std::nullopt;
+    ++pos;
+
+    auto finished = parse_decimal(line, pos);
+    if (!finished || pos >= line.size() || line[pos] != '/')
+        return std::nullopt;
+    ++pos;
+
+    auto total = parse_decimal(line, pos);
+    if (!total || *total <= 0 || pos >= line.size() || line[pos] != ' ')
+        return std::nullopt;
+    ++pos;
+
+    auto percent = parse_decimal(line, pos);
+    if (!percent || *percent < 0 || *percent > 100 ||
+        pos >= line.size() || line[pos] != '%') {
+        return std::nullopt;
+    }
+    ++pos;
+
+    if (pos >= line.size() || line[pos] != ']')
+        return std::nullopt;
+
+    return NinjaProgressUpdate{
+        .finished = *finished,
+        .total = *total,
+        .percent = *percent,
+    };
+}
+
+std::string_view strip_ninja_progress_prefix_view(std::string_view line) {
+    if (!parse_ninja_progress_prefix(line))
+        return line;
+
+    auto closing = line.find(']');
+    if (closing == std::string_view::npos)
+        return line;
+
+    auto rest = line.substr(closing + 1);
+    if (!rest.empty() && rest.front() == ' ')
+        rest.remove_prefix(1);
+    return rest;
+}
+
+std::string strip_ninja_progress_prefix(std::string_view line) {
+    return std::string{strip_ninja_progress_prefix_view(line)};
+}
+
+bool has_visible_text(std::string_view text) {
+    return std::ranges::any_of(text, [](unsigned char ch) {
+        return !std::isspace(ch);
+    });
+}
+
+void append_sanitized_progress_line(std::string& out, std::string_view line, bool append_newline) {
+    auto stripped = strip_ninja_progress_prefix_view(line);
+    if (!has_visible_text(stripped))
+        return;
+
+    out.append(stripped);
+    if (append_newline)
+        out.push_back('\n');
+}
+
+std::string sanitize_ninja_progress_output(std::string_view text) {
+    auto out = std::string{};
+    auto current = std::string{};
+    current.reserve(text.size());
+
+    for (auto ch : text) {
+        if (ch == '\n' || ch == '\r') {
+            append_sanitized_progress_line(out, current, true);
+            current.clear();
+            continue;
+        }
+        current.push_back(ch);
+    }
+
+    append_sanitized_progress_line(out, current, false);
+    return out;
+}
+
+std::string format_live_progress_frame(NinjaProgressUpdate const& progress,
+                                       std::size_t frame_index) {
+    return std::format("  [{}] [{}/{} {}%]",
+                       progress_spinner_frames[frame_index % progress_spinner_frames.size()],
+                       progress.finished, progress.total, progress.percent);
+}
+
+class NinjaProgressTracker {
+public:
+    void observe(std::string_view chunk, bool stderr_stream) {
+        if (stderr_stream || chunk.empty())
+            return;
+
+        auto lock = std::lock_guard{mutex_};
+        for (auto ch : chunk) {
+            if (ch == '\n' || ch == '\r') {
+                consume_pending_locked();
+                continue;
+            }
+            pending_.push_back(ch);
+        }
+    }
+
+    void finish() {
+        auto lock = std::lock_guard{mutex_};
+        consume_pending_locked();
+    }
+
+    std::optional<NinjaProgressUpdate> snapshot() const {
+        auto lock = std::lock_guard{mutex_};
+        return latest_;
+    }
+
+private:
+    void consume_pending_locked() {
+        if (pending_.empty())
+            return;
+        if (auto parsed = parse_ninja_progress_prefix(pending_))
+            latest_ = *parsed;
+        pending_.clear();
+    }
+
+    mutable std::mutex mutex_;
+    std::string pending_;
+    std::optional<NinjaProgressUpdate> latest_;
+};
+
+class LiveProgressRenderer {
+public:
+    explicit LiveProgressRenderer(LiveProgressRenderMode mode
+#if defined(_WIN32)
+                                  ,
+                                  HANDLE handle = nullptr,
+                                  DWORD original_console_mode = 0,
+                                  bool restore_console_mode = false
+#endif
+                                  )
+        : mode_(mode)
+#if defined(_WIN32)
+        , handle_(handle)
+        , original_console_mode_(original_console_mode)
+        , restore_console_mode_(restore_console_mode)
+#endif
+    {}
+
+    ~LiveProgressRenderer() {
+        stop();
+    }
+
+    bool active() const {
+        return mode_ != LiveProgressRenderMode::disabled;
+    }
+
+    void start(NinjaProgressTracker& tracker) {
+        if (!active() || thread_.joinable())
+            return;
+        tracker_ = &tracker;
+        thread_ = std::jthread([this](std::stop_token stop_token) {
+            while (!stop_token.stop_requested()) {
+                render_once();
+                std::this_thread::sleep_for(std::chrono::milliseconds{100});
+            }
+        });
+    }
+
+    void refresh() {
+        if (!active())
+            return;
+        render_once();
+    }
+
+    void stop() {
+        if (thread_.joinable()) {
+            thread_.request_stop();
+            thread_.join();
+        }
+
+        clear_line();
+
+#if defined(_WIN32)
+        if (restore_console_mode_ && handle_ != INVALID_HANDLE_VALUE && handle_ != nullptr) {
+            SetConsoleMode(handle_, original_console_mode_);
+            restore_console_mode_ = false;
+        }
+#endif
+    }
+
+private:
+    void render_once() {
+        if (!tracker_)
+            return;
+
+        auto progress = tracker_->snapshot();
+        if (!progress)
+            return;
+
+        auto text = format_live_progress_frame(*progress, spinner_index_++);
+        if (mode_ == LiveProgressRenderMode::vt) {
+            if (!cursor_hidden_) {
+                write_stream(stdout, "\x1b[?25l");
+                cursor_hidden_ = true;
+            }
+            write_stream(stdout, "\r\x1b[2K");
+            write_stream(stdout, text);
+            std::fflush(stdout);
+            last_width_ = 0;
+            return;
+        }
+
+        write_stream(stdout, "\r");
+        write_stream(stdout, text);
+        if (text.size() < last_width_) {
+            auto padding = std::string(last_width_ - text.size(), ' ');
+            write_stream(stdout, padding);
+        }
+        std::fflush(stdout);
+        last_width_ = text.size();
+    }
+
+    void clear_line() {
+        if (!active())
+            return;
+
+        if (mode_ == LiveProgressRenderMode::vt) {
+            if (!cursor_hidden_)
+                return;
+            write_stream(stdout, "\r\x1b[2K\x1b[?25h");
+            std::fflush(stdout);
+            cursor_hidden_ = false;
+            return;
+        }
+
+        if (last_width_ == 0)
+            return;
+
+        write_stream(stdout, "\r");
+        auto padding = std::string(last_width_, ' ');
+        write_stream(stdout, padding);
+        write_stream(stdout, "\r");
+        std::fflush(stdout);
+        last_width_ = 0;
+    }
+
+    LiveProgressRenderMode mode_ = LiveProgressRenderMode::disabled;
+    NinjaProgressTracker* tracker_ = nullptr;
+    std::jthread thread_;
+    std::size_t spinner_index_ = 0;
+    std::size_t last_width_ = 0;
+    bool cursor_hidden_ = false;
+#if defined(_WIN32)
+    HANDLE handle_ = nullptr;
+    DWORD original_console_mode_ = 0;
+    bool restore_console_mode_ = false;
+#endif
+};
+
+std::unique_ptr<LiveProgressRenderer> make_live_progress_renderer() {
+#if defined(_WIN32)
+    auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (handle == INVALID_HANDLE_VALUE || handle == nullptr)
+        return {};
+
+    DWORD mode = 0;
+    if (!GetConsoleMode(handle, &mode))
+        return {};
+
+    auto vt_mode = mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    if (SetConsoleMode(handle, vt_mode)) {
+        return std::make_unique<LiveProgressRenderer>(LiveProgressRenderMode::vt, handle,
+                                                      mode, true);
+    }
+    return std::make_unique<LiveProgressRenderer>(LiveProgressRenderMode::carriage_return);
+#else
+    if (::isatty(STDOUT_FILENO) == 0)
+        return {};
+    return std::make_unique<LiveProgressRenderer>(LiveProgressRenderMode::carriage_return);
+#endif
+}
+
 void print_failure_excerpt(core::ProcessStep const& step,
                            reporting::ProcessResult const& result) {
-    auto stderr_excerpt = tail_excerpt(result.stderr_text);
-    auto stdout_excerpt = tail_excerpt(result.stdout_text);
+    auto stderr_excerpt = tail_excerpt(sanitize_ninja_progress_output(result.stderr_text));
+    auto stdout_excerpt = tail_excerpt(sanitize_ninja_progress_output(result.stdout_text));
     if (stderr_excerpt.empty() && stdout_excerpt.empty())
         return;
 
@@ -699,7 +1021,32 @@ std::optional<StepFailure> run_steps_human(std::vector<core::ProcessStep> const&
                                            bool use_ninja_status = false) {
     print_stage(stage);
     for (auto const& step : steps) {
-        auto result = run_step(step, reporting::StreamMode::capture, use_ninja_status);
+        auto observer = reporting::system::OutputObserver{};
+        auto renderer = std::unique_ptr<LiveProgressRenderer>{};
+        auto tracker = NinjaProgressTracker{};
+        auto enable_live_progress = false;
+        if (use_ninja_status) {
+            renderer = make_live_progress_renderer();
+            enable_live_progress = renderer && renderer->active();
+            if (enable_live_progress) {
+                observer = [&tracker](std::string_view chunk, bool stderr_stream) {
+                    tracker.observe(chunk, stderr_stream);
+                };
+                renderer->start(tracker);
+            }
+        }
+
+        auto result = run_step(step, reporting::StreamMode::capture,
+                               enable_live_progress ? human_ninja_status_format
+                                                    : std::string_view{},
+                               std::move(observer));
+
+        if (enable_live_progress) {
+            tracker.finish();
+            renderer->refresh();
+            renderer->stop();
+        }
+
         if (result.exit_code != 0)
             return StepFailure{.step = step, .result = std::move(result)};
     }
@@ -711,7 +1058,7 @@ std::optional<StepFailure> run_configure_steps_human(std::vector<core::ProcessSt
     print_stage("configure");
     maybe_print_windows_native_toolchain_warning(request);
     for (auto const& step : steps) {
-        auto result = run_step(step, reporting::StreamMode::capture, false);
+        auto result = run_step(step, reporting::StreamMode::capture);
         if (result.exit_code != 0)
             return StepFailure{.step = step, .result = std::move(result)};
     }
@@ -886,11 +1233,12 @@ struct EnvVarGuard {
 };
 
 reporting::ProcessResult run_step(core::ProcessStep const& step, reporting::StreamMode mode,
-                                  bool use_ninja_status = false) {
+                                  std::string_view ninja_status_format,
+                                  reporting::system::OutputObserver observer) {
     auto ninja_status = std::optional<EnvVarGuard>{};
-    if (use_ninja_status)
-        ninja_status.emplace("NINJA_STATUS", "[%f/%t] ");
-    return reporting::system::run_process(step.spec, mode);
+    if (!ninja_status_format.empty())
+        ninja_status.emplace("NINJA_STATUS", std::string{ninja_status_format});
+    return reporting::system::run_process(step.spec, mode, std::move(observer));
 }
 
 reporting::OutputMode parse_output_mode_text(std::string_view value) {
@@ -929,7 +1277,9 @@ int run_steps_wrapped(std::vector<core::ProcessStep> const& steps, std::string_v
                       bool use_ninja_status = false) {
     print_stage(stage);
     for (auto const& step : steps) {
-        auto result = run_step(step, reporting::StreamMode::tee, use_ninja_status);
+        auto result = run_step(step, reporting::StreamMode::tee,
+                               use_ninja_status ? wrapped_ninja_status_format
+                                                : std::string_view{});
         if (result.exit_code != 0)
             return result.exit_code;
     }
@@ -947,7 +1297,7 @@ int run_configure_steps_wrapped(std::vector<core::ProcessStep> const& steps,
     print_stage("configure");
     maybe_print_windows_native_toolchain_warning(request);
     for (auto const& step : steps) {
-        auto result = run_step(step, reporting::StreamMode::tee, false);
+        auto result = run_step(step, reporting::StreamMode::tee);
         if (result.exit_code != 0) {
             maybe_print_windows_native_toolchain_failure_hint(request, result);
             return result.exit_code;
@@ -994,7 +1344,7 @@ int run_tests_wrapped(std::vector<core::ProcessStep> const& steps,
     int failed = 0;
     int timed_out = 0;
     for (auto const& step : steps) {
-        auto result = run_step(step, reporting::StreamMode::capture, false);
+        auto result = run_step(step, reporting::StreamMode::capture);
         write_formatted_line(stdout, "  {} ... {}", step.label, reporting::test_status(result));
         print_captured_output(step.label, result, show_output);
         if (result.timed_out) {
@@ -1066,7 +1416,7 @@ int run_build_human(build::BuildRequest const& request, build::BuildPlan const& 
         write_line(stdout, "  cached");
     }
 
-    if (auto failure = run_steps_human(plan.build_steps, "build"))
+    if (auto failure = run_steps_human(plan.build_steps, "build", true))
         return finish_human_failure(verb, "build", request, failure->step,
                                     failure->result, started);
 
@@ -1135,7 +1485,7 @@ int run_test_human(build::BuildRequest const& request, build::BuildPlan const& p
         write_line(stdout, "  cached");
     }
 
-    if (auto failure = run_steps_human(plan.build_steps, "build"))
+    if (auto failure = run_steps_human(plan.build_steps, "build", true))
         return finish_human_failure("test", "build", request, failure->step,
                                     failure->result, started);
 
@@ -1147,7 +1497,7 @@ int run_test_human(build::BuildRequest const& request, build::BuildPlan const& p
     print_stage("run");
     write_formatted_line(stdout, "  collected {} test binaries", plan.run_steps.size());
     for (auto const& step : plan.run_steps) {
-        auto result = run_step(step, reporting::StreamMode::capture, false);
+        auto result = run_step(step, reporting::StreamMode::capture);
         write_formatted_line(stdout, "  {:<7} {}", reporting::test_status(result), step.label);
         if (result.timed_out) {
             ++timed_out;
