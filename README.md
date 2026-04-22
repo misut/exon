@@ -29,18 +29,20 @@ mise use "vfox:misut/mise-exon@latest"
 <details>
 <summary>Build from source</summary>
 
-Requires LLVM with libc++ modules: [Homebrew LLVM](https://formulae.brew.sh/formula/llvm) (macOS) or [LLVM 20+](https://apt.llvm.org/) (Linux). On **Windows**, `intron install` uses this repo's `.intron.toml` to provision MSVC, CMake, and Ninja.
+`intron` provisions the same toolchain that CI uses (LLVM, CMake, Ninja pinned in `.intron.toml`). On **Windows**, `intron install` uses this repo's `.intron.toml` to provision MSVC, CMake, and Ninja.
 
 ```sh
-# bootstrap (uses FetchContent for tomlcpp)
-cmake -B build -G Ninja
-cmake --build build --target exon
+# install pinned toolchain into ~/.intron/toolchains
+intron install
+
+# bootstrap with the same flags CI uses (FetchContent for cppx and tomlcpp)
+bash scripts/bootstrap.sh
 
 # self-host
 ./build/exon build
 ```
 
-On macOS, use `cmake --build build --target exon --parallel 1` for the bootstrap build. Self-hosted `exon build`, `exon check`, and `exon test` serialize the build automatically on macOS when `import std;` is enabled. If you change `src/build.cppm`, `src/toolchain.cppm`, or `exon.toml` in the `exon` repo, rebuild `build/exon` before self-hosting again. If `build/` still points at an older source tree, remove it and rerun the bootstrap commands.
+`scripts/bootstrap.sh` wires `CMAKE_CXX_COMPILER`, `CMAKE_CXX_STDLIB_MODULES_JSON`, and `CMAKE_OSX_SYSROOT` from the intron-managed toolchain so local and CI bootstraps stay byte-equivalent. Self-hosted `exon build`, `exon check`, and `exon test` serialize the build automatically on macOS when `import std;` is enabled. If you change `src/build.cppm`, `src/toolchain.cppm`, or `exon.toml` in the `exon` repo, rebuild `build/exon` before self-hosting again. If `build/` still points at an older source tree, remove it and rerun the bootstrap commands.
 
 On Windows, a regular PowerShell session is enough:
 

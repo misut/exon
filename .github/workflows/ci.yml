@@ -61,29 +61,7 @@ jobs:
           fi
 
       - name: Bootstrap build
-        run: |
-          eval "$(intron env)"
-          LLVM_ROOT="$HOME/.intron/toolchains/llvm/22.1.2"
-          MODULES_JSON=$(find "$LLVM_ROOT" -name "libc++.modules.json" -print -quit)
-          CMAKE_ARGS="-Wno-dev -B build -G Ninja"
-          CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CXX_COMPILER=$LLVM_ROOT/bin/clang++"
-          if [ -n "$MODULES_JSON" ]; then
-            CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CXX_STDLIB_MODULES_JSON=$MODULES_JSON"
-          fi
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_OSX_SYSROOT=$(xcrun --show-sdk-path)"
-          fi
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            LIBCXX_DIR=$(dirname "$(find "$LLVM_ROOT" -name "libc++.so" -print -quit)")
-            CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_CXX_FLAGS=-stdlib=libc++"
-            CMAKE_ARGS="$CMAKE_ARGS \"-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -lc++abi -Wl,-rpath,$LIBCXX_DIR\""
-          fi
-          eval cmake $CMAKE_ARGS
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            cmake --build build --target exon --parallel 1
-          else
-            cmake --build build --target exon
-          fi
+        run: bash scripts/bootstrap.sh
 
       - name: Self-host build
         run: |
