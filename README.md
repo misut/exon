@@ -84,7 +84,7 @@ hello, world!
 | `exon info` | Show package information |
 | `exon build [--release] [--target <t>] [--member a,b] [--exclude x,y] [--output human\|wrapped\|raw]` | Build the project or selected workspace members |
 | `exon check [--release] [--target <t>] [--member a,b] [--exclude x,y]` | Check syntax without linking |
-| `exon run [--release] [--target <t>] [--member <name>]` | Build and run |
+| `exon run [--release] [--target <t>] [--member <name>] [args]` | Build and run |
 | `exon debug [--release] [--debugger auto\|lldb\|gdb\|devenv\|cdb\|<path>] [--member <name>] [--exclude x,y] [-- <args...>]` | Build and open the selected native executable in a native debugger |
 | `exon test [--release] [--target <t>] [--member a,b] [--exclude x,y] [--timeout <sec>] [--output human\|wrapped\|raw] [--show-output failed\|all\|none]` | Build and run tests |
 | `exon clean [--member a,b] [--exclude x,y]` | Remove build artifacts |
@@ -92,11 +92,12 @@ hello, world!
 | `exon add [--dev] --path <name> <path>` | Add a local path dependency |
 | `exon add [--dev] --workspace <name>` | Add a workspace member dependency |
 | `exon add [--dev] --vcpkg <name> <ver> [--features a,b]` | Add a vcpkg dependency |
-| `exon add [--dev] --git <repo> --version <v> --subdir <dir>` | Add a git subdir dependency |
+| `exon add [--dev] --git <repo> --version <v> --subdir <dir> [--name <n>]` | Add a git dep pointing to a subdirectory |
 | `exon remove <pkg>` | Remove a dependency |
 | `exon update [--member a,b] [--exclude x,y]` | Update dependencies |
 | `exon sync [--member a,b] [--exclude x,y]` | Sync CMakeLists.txt with exon.toml |
-| `exon fmt` | Format source files |
+| `exon fmt` | Format source files with clang-format |
+| `exon version` | Show exon version |
 
 ### Native debugging
 
@@ -281,7 +282,11 @@ ldflags = ["/fsanitize=address"]
 
 When these flags are present, exon now copies `clang_rt.asan_dynamic-x86_64.dll` next to each built executable and test binary. This makes direct execution from `.exon/debug/` work without manually editing `PATH`.
 
-`exon build` and `exon test` default to `human` output. In an interactive terminal, `human` shows a live spinner plus `[finished/total percent%]` build progress while keeping the console focused on stage headers and final summaries. When stdout is not a TTY, `human` falls back to the same static stage-oriented summaries. `wrapped` adds the same headers while still showing the underlying CMake/Ninja/test output, and `raw` keeps exon wrapping to a minimum.
+`exon build` and `exon test` default to `human` output. In an interactive terminal, `human` shows a live spinner plus `[finished/total percent%]` progress while keeping the console focused on stage headers and final summaries. The same path also adds minimal ANSI styling for `error:` diagnostics and failing `FAILED` / `TIMEOUT` test statuses. When stdout is not a TTY, `human` falls back to the same static stage-oriented summaries. `wrapped` adds the same headers while still showing the underlying CMake/Ninja/test output, and `raw` keeps exon wrapping to a minimum.
+
+Set `NO_COLOR=1` to force plain output and disable the interactive progress renderer even in a TTY session.
+
+Workspace builds and tests also keep the active member inline in each stage header. For example, a selected member can render stages such as `==> [hello (apps/hello)] fetch` and `==> [hello (apps/hello)] build` instead of a separate member divider.
 
 `exon test --show-output failed` (default) only shows captured stdout/stderr for failing or timed-out test binaries. Use `--show-output all` to always print captured output, or `--show-output none` to suppress it entirely.
 
