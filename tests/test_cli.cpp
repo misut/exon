@@ -189,6 +189,10 @@ void test_commands_reporting_defaults() {
 void test_readme_output_docs_match_usage() {
     auto readme = read_text(std::filesystem::current_path() / "README.md");
     check(readme.find(
+              "`exon run [--release] [--target <t>] [--member <name>] [args]`") !=
+              std::string::npos,
+          "README documents run args");
+    check(readme.find(
               "`exon build [--release] [--target <t>] [--member a,b] [--exclude x,y] "
               "[--output human\\|wrapped\\|raw]`") != std::string::npos,
           "README documents build human output mode");
@@ -197,12 +201,22 @@ void test_readme_output_docs_match_usage() {
               "[--timeout <sec>] [--output human\\|wrapped\\|raw] "
               "[--show-output failed\\|all\\|none]`") != std::string::npos,
           "README documents test human output mode");
+    check(readme.find(
+              "`exon add [--dev] --git <repo> --version <v> --subdir <dir> [--name <n>]`") !=
+              std::string::npos,
+          "README documents git subdir add name override");
+    check(readme.find("`exon version`") != std::string::npos,
+          "README documents version command");
     check(readme.find("default to `human` output") != std::string::npos,
           "README documents human default");
     check(readme.find("interactive terminal") != std::string::npos,
           "README documents interactive live progress");
     check(readme.find("When stdout is not a TTY") != std::string::npos,
           "README documents non-tty fallback");
+    check(readme.find("NO_COLOR=1") != std::string::npos,
+          "README documents NO_COLOR override");
+    check(readme.find("==> [hello (apps/hello)] build") != std::string::npos,
+          "README documents workspace member stage labels");
     check(readme.find("`wrapped` adds the same headers while still showing the underlying "
                       "CMake/Ninja/test output") != std::string::npos,
           "README documents wrapped behavior");
