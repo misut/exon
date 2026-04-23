@@ -3,6 +3,8 @@ import std;
 import fetch;
 import manifest;
 import manifest.system;
+import reporting;
+import reporting.system;
 import toolchain;
 import toolchain.system;
 import lock;
@@ -593,6 +595,34 @@ DependencySpec decode_root(fetch::FetchRoot const& root, std::filesystem::path c
 
 } // namespace detail
 
+struct FetchProgressCounter {
+    std::atomic<int> done{0};
+    std::atomic<int> total{0};
+    std::atomic<bool> discovery_phase{true};
+};
+
+reporting::ProgressSource as_progress_source(FetchProgressCounter const& counter) {
+    return reporting::ProgressSource{
+        .poll = [&counter]() -> std::optional<reporting::ProgressSnapshot> {
+            auto done = counter.done.load(std::memory_order_relaxed);
+            auto total = counter.total.load(std::memory_order_relaxed);
+            auto discovering = counter.discovery_phase.load(std::memory_order_relaxed);
+            if (discovering)
+                return reporting::ProgressSnapshot{.label = "discover"};
+            if (total <= 0)
+                return reporting::ProgressSnapshot{.label = "resolve"};
+            auto percent = static_cast<int>(
+                (static_cast<std::int64_t>(done) * 100) / total);
+            return reporting::ProgressSnapshot{
+                .done = done,
+                .total = total,
+                .percent = percent,
+                .label = "resolve",
+            };
+        },
+    };
+}
+
 fetch::FetchResult fetch_all(fetch::FetchRequest const& request) {
     fetch::FetchResult result;
     if (!fetch::has_dependencies(request.manifest, request.include_dev))
@@ -604,7 +634,15 @@ fetch::FetchResult fetch_all(fetch::FetchRequest const& request) {
         .platform = request.platform,
     };
 
-    std::println("fetching dependencies...");
+    if (reporting::current_stage_context.empty())
+        std::println("==> fetch");
+    else
+        std::println("==> [{}] fetch", reporting::current_stage_context);
+    auto counter = FetchProgressCounter{};
+    auto renderer = reporting::system::make_live_progress_renderer();
+    if (renderer && renderer->active())
+        renderer->start(as_progress_source(counter));
+
     auto fetch_plan = fetch::plan(request);
 
     std::optional<std::filesystem::path> ws_root;
@@ -627,13 +665,20 @@ fetch::FetchResult fetch_all(fetch::FetchRequest const& request) {
     auto selected = detail::select_candidates(state.candidates);
     auto order = detail::topo_sort_selected(selected, state.candidates);
 
+    counter.total.store(static_cast<int>(order.size()), std::memory_order_relaxed);
+    counter.discovery_phase.store(false, std::memory_order_relaxed);
+
     for (auto const& package_name : order) {
         auto const& candidate = state.candidates[selected.at(package_name)];
         result.deps.push_back(detail::make_fetched_dep(candidate));
+        counter.done.fetch_add(1, std::memory_order_relaxed);
     }
 
     result.lock_file = detail::build_selected_lock(result.deps);
     lock::system::save(result.lock_file, request.lock_path.string());
+
+    if (renderer)
+        renderer->stop();
     return result;
 }
 
