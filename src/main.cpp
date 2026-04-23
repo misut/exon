@@ -1,6 +1,7 @@
 #include <cstdio> // stdout/stderr/_IONBF macros (not exported by import std;)
 import std;
 import commands;
+import reporting.system;
 
 int main(int argc, char* argv[]) {
     // Disable stdout/stderr buffering so prints from exon appear in the
@@ -10,6 +11,8 @@ int main(int argc, char* argv[]) {
     // writing to the terminal.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::setvbuf(stderr, nullptr, _IONBF, 0);
+
+    reporting::system::enable_vt_on_windows();
 
     if (argc < 2) {
         std::print("{}", commands::usage_text());

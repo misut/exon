@@ -16,6 +16,7 @@ import fetch.system;
 import lock;
 import lock.system;
 import reporting;
+import reporting.system;
 import templates;
 import toolchain;
 import toolchain.system;
@@ -28,14 +29,18 @@ export namespace commands {
 constexpr auto version = EXON_PKG_VERSION;
 
 int command_error(std::string_view msg) {
-    std::println(std::cerr, "error: {}", msg);
-    return 1;
+    return reporting::emit(
+        reporting::Diagnostic{.message = std::string{msg}},
+        reporting::system::stderr_is_tty());
 }
 
 int command_error(std::string_view msg, std::string_view hint) {
-    std::println(std::cerr, "error: {}", msg);
-    std::println(std::cerr, "hint: {}", hint);
-    return 1;
+    return reporting::emit(
+        reporting::Diagnostic{
+            .message = std::string{msg},
+            .hints = {std::string{hint}},
+        },
+        reporting::system::stderr_is_tty());
 }
 
 std::string usage_text() {
@@ -315,7 +320,8 @@ int run_selected_workspace_members(std::filesystem::path const& workspace_root,
                                    WorkspaceSelection const& selection,
                                    std::function<int(WorkspaceMember const&)> fn) {
     for (auto const& member : selection.members) {
-        std::println("--- {} ---", workspace_display_name(member, workspace_root));
+        auto guard = reporting::ScopedStageContext{
+            workspace_display_name(member, workspace_root)};
         auto rc = fn(member);
         if (rc != 0)
             return rc;

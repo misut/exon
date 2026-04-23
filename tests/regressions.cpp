@@ -1030,13 +1030,13 @@ void test_ninja_progress_helpers() {
 }
 
 void test_live_progress_frame_format() {
-    auto frame0 = build::system::detail::format_live_progress_frame({
-        .finished = 12,
+    auto frame0 = reporting::system::format_progress_frame({
+        .done = 12,
         .total = 56,
         .percent = 21,
     }, 0);
-    auto frame1 = build::system::detail::format_live_progress_frame({
-        .finished = 12,
+    auto frame1 = reporting::system::format_progress_frame({
+        .done = 12,
         .total = 56,
         .percent = 21,
     }, 1);
