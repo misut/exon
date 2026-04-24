@@ -304,6 +304,50 @@ standard = 23
           "cmd run android: rejected before build output");
 }
 
+void test_cmd_add_cmake_dependency() {
+    TmpDir tmp{"exon_test_add_cmake_dependency"};
+    tmp.write("exon.toml", R"([package]
+name = "app"
+version = "0.1.0"
+type = "bin"
+standard = 23
+)");
+
+    CwdGuard cwd{tmp.root};
+    auto rc = run_command(commands::cmd_add, {
+        "exon", "add", "--cmake", "glfw",
+        "--repo", "https://github.com/glfw/glfw.git",
+        "--tag", "3.4",
+        "--targets", "glfw",
+        "--option", "GLFW_BUILD_TESTS=OFF",
+        "--option", "GLFW_BUILD_EXAMPLES=OFF",
+        "--shallow", "false",
+    });
+
+    check(rc == 0, "cmd add cmake: succeeds");
+    auto content = read_text(tmp.root / "exon.toml");
+    check(content.contains("[dependencies.cmake.glfw]"),
+          "cmd add cmake: dependency section written");
+    check(content.contains("shallow = false"),
+          "cmd add cmake: shallow flag written");
+    check(content.contains("[dependencies.cmake.glfw.options]"),
+          "cmd add cmake: options section written");
+
+    auto m = manifest::system::load((tmp.root / "exon.toml").string());
+    check(m.cmake_deps.contains("glfw"), "cmd add cmake: parsed dependency");
+    if (m.cmake_deps.contains("glfw")) {
+        auto const& dep = m.cmake_deps.at("glfw");
+        check(dep.git == "https://github.com/glfw/glfw.git",
+              "cmd add cmake: repo parsed");
+        check(dep.tag == "3.4", "cmd add cmake: tag parsed");
+        check(dep.targets == "glfw", "cmd add cmake: targets parsed");
+        check(!dep.shallow, "cmd add cmake: shallow parsed");
+        check(dep.options.contains("GLFW_BUILD_TESTS") &&
+                  dep.options.at("GLFW_BUILD_TESTS") == "OFF",
+              "cmd add cmake: option parsed");
+    }
+}
+
 int main() {
     test_apply_workspace_defaults_for_member_package_and_build();
     test_select_workspace_members_orders_dependency_closure();
@@ -311,6 +355,7 @@ int main() {
     test_generate_workspace_root_cmake_uses_single_member_entries();
     test_dependency_graph_paths_and_dedupe();
     test_cmd_run_rejects_android_before_build();
+    test_cmd_add_cmake_dependency();
 
     if (failures > 0) {
         std::println("{} test(s) failed", failures);

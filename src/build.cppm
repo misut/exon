@@ -471,11 +471,11 @@ core::ProcessSpec configure_cmd(toolchain::Toolchain const& tc,
     auto cxx = combine(flags.cxx_flags, extra_cxx);
     auto ld = combine(flags.linker_flags, extra_ld);
 
-    // When cmake deps are present (e.g. Dawn) and the toolchain has a
+    // When raw CMake deps are present and the toolchain has a
     // clang config that resolves -lc++ to the system libc++, the
     // system libc++ may lack newer C++23 symbols. Add -L and -rpath to
     // the toolchain's lib dir so the linker finds the matching version,
-    // plus -lc++abi (the config doesn't include it but Dawn needs it).
+    // plus -lc++abi (some raw CMake projects need it explicitly).
     if (any_cmake_deps && tc.has_clang_config && !tc.lib_dir.empty() &&
         !use_system_macos_runtime(tc)) {
         ld = combine(ld, std::format("-L{0} -Wl,-rpath,{0} -lc++abi", tc.lib_dir));
@@ -537,7 +537,7 @@ void emit_msvc_options(std::ostringstream& out) {
 }
 
 // Emit FetchContent blocks for [dependencies.cmake] entries. These are
-// raw CMake projects (like Dawn) that need custom options + targets.
+// raw CMake projects that need custom options + targets.
 // Emitted BEFORE regular FetchContent deps so their targets are available.
 void emit_cmake_deps(std::ostringstream& out, manifest::Manifest const& m, bool with_dev) {
     bool any = !m.cmake_deps.empty() || (with_dev && !m.dev_cmake_deps.empty());
@@ -551,8 +551,8 @@ void emit_cmake_deps(std::ostringstream& out, manifest::Manifest const& m, bool 
         out << std::format("    GIT_TAG {}\n", dep.tag);
         if (dep.shallow)
             out << "    GIT_SHALLOW ON\n";
-        // Skip submodule update — projects like Dawn use their own
-        // dependency fetching (DAWN_FETCH_DEPENDENCIES) instead.
+        // Keep raw CMake bridge clones small; projects that need submodules
+        // can fetch their own dependencies from configured CMake options.
         out << "    GIT_SUBMODULES \"\"\n";
         out << "    EXCLUDE_FROM_ALL\n";
         out << ")\n";
@@ -781,7 +781,7 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         resolved_dep_manifests.emplace(dep.path.string(), std::move(dep_m));
     }
 
-    // [dependencies.cmake] — raw CMake projects (e.g. Dawn). Includes
+    // [dependencies.cmake] — raw CMake projects. Includes
     // cmake deps from path dependencies so their targets are available.
     {
         bool any = !all_cmake_deps.empty() || (with_tests && !all_dev_cmake_deps.empty());

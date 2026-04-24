@@ -94,6 +94,7 @@ hello, world!
 | `exon add [--dev] --path <name> <path>` | Add a local path dependency |
 | `exon add [--dev] --workspace <name>` | Add a workspace member dependency |
 | `exon add [--dev] --vcpkg <name> <ver> [--features a,b]` | Add a vcpkg dependency |
+| `exon add [--dev] --cmake <name> --repo <url> --tag <tag> --targets <targets> [--option K=V] [--shallow false]` | Add a raw CMake dependency |
 | `exon add [--dev] --git <repo> --version <v> --subdir <dir> [--name <n>]` | Add a git dep pointing to a subdirectory |
 | `exon remove <pkg>` | Remove a dependency |
 | `exon outdated [pkg...] [--member a,b] [--exclude x,y] [--output human\|json]` | Check git dependencies for newer semver tags |
@@ -437,6 +438,41 @@ target_link_libraries(my-app-modules PUBLIC
     fmt::fmt-header-only
 )
 ```
+
+### Raw CMake dependencies
+
+Use `[dependencies.cmake]` for external projects that should be fetched with
+CMake `FetchContent` and linked by CMake target name. This is useful for
+upstream projects that already publish CMake targets but do not have an
+`exon.toml`.
+
+```toml
+[dependencies.cmake.glfw]
+git = "https://github.com/glfw/glfw.git"
+tag = "3.4"
+targets = "glfw"
+shallow = false
+
+[dependencies.cmake.glfw.options]
+GLFW_BUILD_DOCS = "OFF"
+GLFW_BUILD_TESTS = "OFF"
+GLFW_BUILD_EXAMPLES = "OFF"
+```
+
+```sh
+exon add --cmake glfw \
+  --repo https://github.com/glfw/glfw.git \
+  --tag 3.4 \
+  --targets glfw \
+  --option GLFW_BUILD_DOCS=OFF \
+  --option GLFW_BUILD_TESTS=OFF \
+  --option GLFW_BUILD_EXAMPLES=OFF \
+  --shallow false
+```
+
+`targets` is the whitespace-separated list of CMake targets to link. `tag` may
+be a tag, branch, or commit; a commit hash is the most reproducible choice for
+clean builds because branch and tag names can move in remote repositories.
 
 ### Path dependencies
 

@@ -182,6 +182,10 @@ void test_commands_usage_lists_human_output_mode() {
     check(usage.find("add [--dev] <pkg> <ver> [--features a,b] "
                      "[--no-default-features]") != std::string::npos,
           "usage lists git dependency feature options");
+    check(usage.find("add [--dev] --cmake <name> --repo <url> --tag <tag> "
+                     "--targets <targets> [--option K=V] [--shallow false]") !=
+              std::string::npos,
+          "usage lists raw CMake dependency options");
     check(usage.find("outdated [pkg...] [--member a,b] [--exclude x,y] "
                      "[--output human|json]") != std::string::npos,
           "usage lists outdated command");
@@ -260,6 +264,15 @@ void test_readme_output_docs_match_usage() {
               "`exon add [--dev] <pkg> <ver> [--features a,b] [--no-default-features]`") !=
               std::string::npos,
           "README documents git dependency feature options");
+    check(readme.find(
+              "`exon add [--dev] --cmake <name> --repo <url> --tag <tag> --targets <targets> [--option K=V] [--shallow false]`") !=
+              std::string::npos,
+          "README documents raw CMake dependency options");
+    check(readme.find("[dependencies.cmake.glfw]") != std::string::npos,
+          "README documents raw CMake dependency table");
+    check(readme.find("commit hash is the most reproducible choice") !=
+              std::string::npos,
+          "README documents reproducible CMake dependency refs");
     check(readme.find(
               "`exon outdated [pkg...] [--member a,b] [--exclude x,y] [--output human\\|json]`") !=
               std::string::npos,

@@ -76,6 +76,8 @@ std::string usage_text() {
             {"add [--dev] --workspace <name>",     "add a workspace member dependency"},
             {"add [--dev] --vcpkg <name> <ver> [--features a,b,c]",
                                                    "add a vcpkg dependency"},
+            {"add [--dev] --cmake <name> --repo <url> --tag <tag> --targets <targets> [--option K=V] [--shallow false]",
+                                                   "add a raw CMake dependency"},
             {"add [--dev] --git <repo> --version <ver> --subdir <dir> [--name <n>]",
                                                    "add a git dep pointing to a subdirectory"},
             {"remove <pkg>",                       "remove a dependency"},
@@ -2087,35 +2089,71 @@ int cmd_clean(int argc, char* argv[]) {
     return 0;
 }
 
+std::string toml_string_literal(std::string_view value) {
+    std::string out = "\"";
+    for (char c : value) {
+        switch (c) {
+        case '\\': out += "\\\\"; break;
+        case '"': out += "\\\""; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default: out += c; break;
+        }
+    }
+    out += '"';
+    return out;
+}
+
+std::pair<std::string, std::string> parse_key_value_option(std::string_view value) {
+    auto eq = value.find('=');
+    if (eq == std::string_view::npos || eq == 0)
+        throw std::runtime_error(std::format("invalid --option '{}'; expected K=V", value));
+    return {std::string{value.substr(0, eq)}, std::string{value.substr(eq + 1)}};
+}
+
 int cmd_add(int argc, char* argv[]) {
     try {
     auto args = cli::parse(argc, argv, 2, {
         cli::Flag{"--dev"}, cli::Flag{"--path"}, cli::Flag{"--workspace"}, cli::Flag{"--vcpkg"},
-        cli::Flag{"--no-default-features"},
+        cli::Flag{"--cmake"}, cli::Flag{"--no-default-features"},
         cli::Option{"--git"}, cli::Option{"--subdir"}, cli::Option{"--version"},
-        cli::Option{"--name"}, cli::ListOption{"--features"},
+        cli::Option{"--name"}, cli::Option{"--repo"}, cli::Option{"--tag"},
+        cli::Option{"--targets"}, cli::Option{"--shallow"}, cli::ListOption{"--features"},
+        cli::ListOption{"--option"},
     });
     bool dev = args.has("--dev");
     bool is_path = args.has("--path");
     bool is_workspace_dep = args.has("--workspace");
     bool is_vcpkg = args.has("--vcpkg");
+    bool is_cmake = args.has("--cmake");
     bool is_git_subdir = !args.get("--git").empty();
     bool no_default_features = args.has("--no-default-features");
     auto features = args.get_list("--features");
+    auto cmake_options = args.get_list("--option");
     auto git_repo = std::string{args.get("--git")};
     auto git_version = std::string{args.get("--version")};
     auto git_subdir = std::string{args.get("--subdir")};
     auto git_name = std::string{args.get("--name")};
+    auto cmake_repo = std::string{args.get("--repo")};
+    auto cmake_tag = std::string{args.get("--tag")};
+    auto cmake_targets = std::string{args.get("--targets")};
+    auto cmake_shallow = std::string{args.get("--shallow")};
     auto& positional = args.positional();
 
-    if (!features.empty() && (is_path || is_workspace_dep || is_git_subdir))
-        return command_error("--features is not valid with --path, --workspace, or --git");
+    if (!features.empty() && (is_path || is_workspace_dep || is_git_subdir || is_cmake))
+        return command_error("--features is not valid with --path, --workspace, --git, or --cmake");
     if (no_default_features && features.empty())
         return command_error("--no-default-features requires --features");
+    if (!is_cmake && (!cmake_repo.empty() || !cmake_tag.empty() || !cmake_targets.empty() ||
+                      !cmake_options.empty() || !cmake_shallow.empty())) {
+        return command_error("--repo, --tag, --targets, --option, and --shallow require --cmake");
+    }
 
-    int exclusive_count = int(is_path) + int(is_workspace_dep) + int(is_vcpkg) + int(is_git_subdir);
+    int exclusive_count = int(is_path) + int(is_workspace_dep) + int(is_vcpkg) +
+                          int(is_cmake) + int(is_git_subdir);
     if (exclusive_count > 1)
-        return command_error("--path, --workspace, --vcpkg, --git are mutually exclusive");
+        return command_error("--path, --workspace, --vcpkg, --cmake, --git are mutually exclusive");
 
     if (!std::filesystem::exists("exon.toml")) {
         std::println(std::cerr, "error: exon.toml not found. run 'exon init' first");
@@ -2132,6 +2170,8 @@ int cmd_add(int argc, char* argv[]) {
     std::string section;
     std::string dep_line;
     std::string display;
+    std::string options_section;
+    std::string options_lines;
 
     if (is_path) {
         if (positional.size() < 2) {
@@ -2206,6 +2246,35 @@ int cmd_add(int argc, char* argv[]) {
             display = std::format("vcpkg dep {} = {{ version = \"{}\", features = [{}] }}",
                                    name, value, feat_list);
         }
+    } else if (is_cmake) {
+        if (positional.size() < 1 || cmake_repo.empty() || cmake_tag.empty() ||
+            cmake_targets.empty()) {
+            std::println(std::cerr,
+                         "usage: exon add [--dev] --cmake <name> --repo <url> "
+                         "--tag <tag> --targets <targets> [--option K=V] [--shallow false]");
+            return 1;
+        }
+        if (!cmake_shallow.empty() && cmake_shallow != "true" && cmake_shallow != "false")
+            return command_error("--shallow must be true or false");
+
+        name = positional[0];
+        section = section_prefix + ".cmake." + name;
+        dep_line = std::format("git = {}\ntag = {}\ntargets = {}\n",
+                               toml_string_literal(cmake_repo),
+                               toml_string_literal(cmake_tag),
+                               toml_string_literal(cmake_targets));
+        if (cmake_shallow == "false")
+            dep_line += "shallow = false\n";
+        if (!cmake_options.empty()) {
+            options_section = section + ".options";
+            for (auto const& option : cmake_options) {
+                auto [key, option_value] = parse_key_value_option(option);
+                options_lines += std::format("{} = {}\n", key,
+                                             toml_string_literal(option_value));
+            }
+        }
+        display = std::format("cmake dep {} = {{ git = \"{}\", tag = \"{}\", targets = \"{}\" }}",
+                              name, cmake_repo, cmake_tag, cmake_targets);
     } else {
         if (positional.size() < 2) {
             std::println(std::cerr,
@@ -2213,6 +2282,8 @@ int cmd_add(int argc, char* argv[]) {
                          "       exon add [--dev] --path <name> <path>\n"
                          "       exon add [--dev] --workspace <name>\n"
                          "       exon add [--dev] --vcpkg <name> <version>\n"
+                         "       exon add [--dev] --cmake <name> --repo <url> "
+                         "--tag <tag> --targets <targets> [--option K=V] [--shallow false]\n"
                          "       exon add [--dev] --git <repo> --version <ver> --subdir <dir> "
                          "[--name <name>]");
             return 1;
@@ -2252,6 +2323,8 @@ int cmd_add(int argc, char* argv[]) {
     }
 
     manifest::insert_into_section(content, section, dep_line);
+    if (!options_section.empty())
+        manifest::insert_into_section(content, options_section, options_lines);
 
     try {
         write_text(manifest_path, content);
