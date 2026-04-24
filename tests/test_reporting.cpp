@@ -13,6 +13,8 @@ void check(bool cond, std::string_view msg) {
 void test_parse_output_mode() {
     check(reporting::parse_output_mode("human") == reporting::OutputMode::human,
           "parse output human");
+    check(reporting::parse_output_mode("json") == reporting::OutputMode::json,
+          "parse output json");
     check(reporting::parse_output_mode("raw") == reporting::OutputMode::raw,
           "parse output raw");
     check(reporting::parse_output_mode("wrapped") == reporting::OutputMode::wrapped,
@@ -27,15 +29,33 @@ void test_default_output_mode() {
           "default output mode is human");
     check(options.show_output == reporting::ShowOutput::failed,
           "default show_output is failed");
+    check(!options.color.has_value(), "default color capability is env/default");
+    check(!options.progress.has_value(), "default progress capability is env/default");
 }
 
 void test_output_mode_strings() {
     check(reporting::to_string(reporting::OutputMode::human) == "human",
           "output mode string human");
+    check(reporting::to_string(reporting::OutputMode::json) == "json",
+          "output mode string json");
     check(reporting::to_string(reporting::OutputMode::raw) == "raw",
           "output mode string raw");
     check(reporting::to_string(reporting::OutputMode::wrapped) == "wrapped",
           "output mode string wrapped");
+}
+
+void test_parse_capability_setting() {
+    check(reporting::parse_capability_setting("auto") ==
+              reporting::CapabilitySetting::auto_detect,
+          "parse capability auto");
+    check(reporting::parse_capability_setting("always") ==
+              reporting::CapabilitySetting::always,
+          "parse capability always");
+    check(reporting::parse_capability_setting("never") ==
+              reporting::CapabilitySetting::never,
+          "parse capability never");
+    check(!reporting::parse_capability_setting("sometimes").has_value(),
+          "parse capability rejects unknown");
 }
 
 void test_parse_show_output() {
@@ -53,6 +73,9 @@ void test_stream_mode_for_output_mode() {
     check(reporting::stream_mode_for(reporting::OutputMode::human) ==
               reporting::StreamMode::capture,
           "human uses capture");
+    check(reporting::stream_mode_for(reporting::OutputMode::json) ==
+              reporting::StreamMode::capture,
+          "json uses capture");
     check(reporting::stream_mode_for(reporting::OutputMode::raw) ==
               reporting::StreamMode::passthrough,
           "raw uses passthrough");
@@ -79,15 +102,22 @@ void test_format_duration() {
           "format second duration");
 }
 
+void test_json_escape() {
+    check(reporting::json_escape("a\"b\\c\n") == "a\\\"b\\\\c\\n",
+          "json escape quotes slashes and newlines");
+}
+
 int main() {
     std::cout << "test_reporting:\n";
     test_parse_output_mode();
     test_default_output_mode();
     test_output_mode_strings();
+    test_parse_capability_setting();
     test_parse_show_output();
     test_stream_mode_for_output_mode();
     test_should_show_output();
     test_format_duration();
+    test_json_escape();
 
     if (failures > 0) {
         std::println("test_reporting: {} FAILED", failures);

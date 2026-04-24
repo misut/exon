@@ -12,13 +12,24 @@ A quick reference of every exon subcommand.
 
 ## Build
 
-- `exon build [--release] [--target <t>]` — fetch, configure, build
+- `exon build [--release] [--target <t>] [--output human|json|wrapped|raw]`
+  — fetch, configure, build
+- `exon status [--output human|json]` — inspect the current package or
+  workspace, detected tools, build cache, and terminal capability policy
+- `exon doctor [--output human|json]` — alias for `status`
 - `exon check [--target <t>]` — parse and type-check only (no linking)
 - `exon run [--release] [-- args...]` — build then run the first
   runnable target, forwarding trailing args
 - `exon debug` — run under the debugger configured in the toolchain
 - `exon test [--filter f]` — build and run all test targets
 - `exon clean` — remove `.exon/` build output
+
+`build` and `test` default to `--output human`. Use `--output json`
+for JSON Lines events (`stage`, `diagnostic`, `artifact`,
+`test-result`, and `summary`). Terminal rendering can be controlled with
+`--color`, `--progress`, `--unicode`, and `--hyperlinks`, each accepting
+`auto`, `always`, or `never`; the matching environment variables are
+`EXON_COLOR`, `EXON_PROGRESS`, `EXON_UNICODE`, and `EXON_HYPERLINKS`.
 
 ## Dependencies
 

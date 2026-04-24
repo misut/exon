@@ -4,11 +4,13 @@ module;
 #define NOMINMAX
 #include <windows.h>
 #else
+#include <sys/ioctl.h>
 #include <unistd.h>
 #endif
 
 export module terminal.system;
 import std;
+import reporting;
 import terminal;
 
 export namespace terminal::system {
@@ -25,8 +27,13 @@ enum class LiveProgressRenderMode {
 
 void enable_vt_on_windows();
 bool no_color_requested();
+bool stdout_is_terminal();
+bool stderr_is_terminal();
 bool stdout_is_tty();
 bool stderr_is_tty();
+bool stdout_hyperlinks_enabled();
+bool stdout_unicode_enabled();
+std::size_t terminal_width();
 
 class LiveProgressRenderer {
 public:
@@ -59,6 +66,7 @@ private:
     std::size_t spinner_index_ = 0;
     std::size_t last_width_ = 0;
     bool cursor_hidden_ = false;
+    std::chrono::steady_clock::time_point started_{};
 #if defined(_WIN32)
     HANDLE handle_ = nullptr;
     DWORD original_console_mode_ = 0;
@@ -75,6 +83,81 @@ namespace terminal::system {
 bool no_color_requested() {
     auto const* value = std::getenv("NO_COLOR");
     return value != nullptr && value[0] != '\0';
+}
+
+bool env_is_set(std::string_view name) {
+    auto key = std::string{name};
+    auto const* value = std::getenv(key.c_str());
+    return value != nullptr && value[0] != '\0';
+}
+
+bool term_is_dumb() {
+    auto const* value = std::getenv("TERM");
+    return value != nullptr && std::string_view{value} == "dumb";
+}
+
+bool github_actions() {
+    return env_is_set("GITHUB_ACTIONS");
+}
+
+bool generic_ci() {
+    return env_is_set("CI");
+}
+
+bool color_enabled_for_stdout() {
+    auto setting = reporting::resolve_capability(reporting::current_options.color,
+                                                 "EXON_COLOR");
+    if (setting == reporting::CapabilitySetting::always)
+        return true;
+    if (setting == reporting::CapabilitySetting::never)
+        return false;
+    return stdout_is_terminal() && !no_color_requested() && !term_is_dumb();
+}
+
+bool color_enabled_for_stderr() {
+    auto setting = reporting::resolve_capability(reporting::current_options.color,
+                                                 "EXON_COLOR");
+    if (setting == reporting::CapabilitySetting::always)
+        return true;
+    if (setting == reporting::CapabilitySetting::never)
+        return false;
+    return stderr_is_terminal() && !no_color_requested() && !term_is_dumb();
+}
+
+bool progress_enabled_for_stdout() {
+    if (reporting::current_options.output == reporting::OutputMode::json)
+        return false;
+    if (github_actions())
+        return false;
+
+    auto setting = reporting::resolve_capability(reporting::current_options.progress,
+                                                 "EXON_PROGRESS");
+    if (setting == reporting::CapabilitySetting::always)
+        return stdout_is_terminal();
+    if (setting == reporting::CapabilitySetting::never)
+        return false;
+
+    return stdout_is_terminal() && !generic_ci() && !no_color_requested() && !term_is_dumb();
+}
+
+bool stdout_hyperlinks_enabled() {
+    auto setting = reporting::resolve_capability(reporting::current_options.hyperlinks,
+                                                 "EXON_HYPERLINKS");
+    if (setting == reporting::CapabilitySetting::always)
+        return true;
+    if (setting == reporting::CapabilitySetting::never)
+        return false;
+    return stdout_is_terminal() && !term_is_dumb();
+}
+
+bool stdout_unicode_enabled() {
+    auto setting = reporting::resolve_capability(reporting::current_options.unicode,
+                                                 "EXON_UNICODE");
+    if (setting == reporting::CapabilitySetting::always)
+        return true;
+    if (setting == reporting::CapabilitySetting::never)
+        return false;
+    return stdout_is_terminal() && !term_is_dumb();
 }
 
 #if defined(_WIN32)
@@ -94,9 +177,7 @@ void enable_vt_on_windows() {
     enable(STD_ERROR_HANDLE);
 }
 
-bool stdout_is_tty() {
-    if (no_color_requested())
-        return false;
+bool stdout_is_terminal() {
     auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
     if (handle == INVALID_HANDLE_VALUE || handle == nullptr)
         return false;
@@ -104,9 +185,7 @@ bool stdout_is_tty() {
     return GetConsoleMode(handle, &mode) != 0;
 }
 
-bool stderr_is_tty() {
-    if (no_color_requested())
-        return false;
+bool stderr_is_terminal() {
     auto handle = GetStdHandle(STD_ERROR_HANDLE);
     if (handle == INVALID_HANDLE_VALUE || handle == nullptr)
         return false;
@@ -114,20 +193,50 @@ bool stderr_is_tty() {
     return GetConsoleMode(handle, &mode) != 0;
 }
 
+bool stdout_is_tty() {
+    return color_enabled_for_stdout();
+}
+
+bool stderr_is_tty() {
+    return color_enabled_for_stderr();
+}
+
+std::size_t terminal_width() {
+    auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (handle == INVALID_HANDLE_VALUE || handle == nullptr)
+        return 0;
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    if (!GetConsoleScreenBufferInfo(handle, &info))
+        return 0;
+    return static_cast<std::size_t>(
+        std::max<SHORT>(0, info.srWindow.Right - info.srWindow.Left + 1));
+}
+
 #else
 
 void enable_vt_on_windows() {}
 
-bool stdout_is_tty() {
-    if (no_color_requested())
-        return false;
+bool stdout_is_terminal() {
     return ::isatty(STDOUT_FILENO) != 0;
 }
 
-bool stderr_is_tty() {
-    if (no_color_requested())
-        return false;
+bool stderr_is_terminal() {
     return ::isatty(STDERR_FILENO) != 0;
+}
+
+bool stdout_is_tty() {
+    return color_enabled_for_stdout();
+}
+
+bool stderr_is_tty() {
+    return color_enabled_for_stderr();
+}
+
+std::size_t terminal_width() {
+    winsize size{};
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) != 0 || size.ws_col == 0)
+        return 0;
+    return static_cast<std::size_t>(size.ws_col);
 }
 
 #endif
@@ -136,6 +245,17 @@ namespace progress_detail {
 
 void write_raw(std::string_view text) {
     std::fwrite(text.data(), 1, text.size(), stdout);
+}
+
+std::string fit_to_terminal_width(std::string text) {
+    auto width = terminal_width();
+    if (width == 0 || text.size() <= width)
+        return text;
+    if (width <= 3)
+        return text.substr(0, width);
+    text.resize(width - 3);
+    text += "...";
+    return text;
 }
 
 } // namespace progress_detail
@@ -174,6 +294,7 @@ void LiveProgressRenderer::start(ProgressSource source) {
     if (!active() || thread_.joinable())
         return;
     source_ = std::move(source);
+    started_ = std::chrono::steady_clock::now();
     stop_requested_.store(false, std::memory_order_relaxed);
     thread_ = std::thread([this] {
         while (!stop_requested_.load(std::memory_order_relaxed)) {
@@ -204,9 +325,23 @@ void LiveProgressRenderer::render_once() {
     auto progress = source_.poll();
     if (!progress)
         return;
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started_);
+    progress->elapsed = elapsed;
+    if (progress->total > 0 && progress->done > 0 && elapsed.count() > 0) {
+        progress->rate = static_cast<double>(progress->done) /
+                         (static_cast<double>(elapsed.count()) / 1000.0);
+        auto remaining = progress->total - progress->done;
+        if (remaining > 0 && progress->rate > 0.0) {
+            auto seconds = static_cast<double>(remaining) / progress->rate;
+            progress->remaining = std::chrono::milliseconds{
+                static_cast<long long>(seconds * 1000.0)};
+        }
+    }
 
     auto text = terminal::format_progress_frame(*progress, spinner_index_++,
                                                 stdout_is_tty());
+    text = progress_detail::fit_to_terminal_width(std::move(text));
     if (mode_ == LiveProgressRenderMode::vt) {
         if (!cursor_hidden_) {
             progress_detail::write_raw("\x1b[?25l");
@@ -255,7 +390,7 @@ void LiveProgressRenderer::clear_line() {
 
 std::unique_ptr<LiveProgressRenderer> make_live_progress_renderer() {
 #if defined(_WIN32)
-    if (!stdout_is_tty())
+    if (!progress_enabled_for_stdout())
         return {};
 
     auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -273,7 +408,7 @@ std::unique_ptr<LiveProgressRenderer> make_live_progress_renderer() {
     }
     return std::make_unique<LiveProgressRenderer>(LiveProgressRenderMode::carriage_return);
 #else
-    if (!stdout_is_tty())
+    if (!progress_enabled_for_stdout())
         return {};
     return std::make_unique<LiveProgressRenderer>(LiveProgressRenderMode::carriage_return);
 #endif

@@ -171,11 +171,17 @@ void test_commands_usage_lists_debug() {
 
 void test_commands_usage_lists_human_output_mode() {
     auto usage = commands::usage_text();
-    check(usage.find("[--output human|wrapped|raw]") != std::string::npos,
-          "usage lists human output mode");
-    check(usage.find("[--output human|wrapped|raw] [--show-output failed|all|none]") !=
+    check(usage.find("[--output human|json|wrapped|raw]") != std::string::npos,
+          "usage lists json output mode");
+    check(usage.find("[--color auto|always|never]") != std::string::npos,
+          "usage lists color capability");
+    check(usage.find("status [--output human|json]") != std::string::npos,
+          "usage lists status command");
+    check(usage.find("doctor [--output human|json]") != std::string::npos,
+          "usage lists doctor alias");
+    check(usage.find("[--output human|json|wrapped|raw] [--show-output failed|all|none]") !=
               std::string::npos,
-          "usage lists human output mode for test");
+          "usage lists json output mode for test");
 }
 
 void test_commands_reporting_defaults() {
@@ -184,6 +190,24 @@ void test_commands_reporting_defaults() {
           "commands default output mode is human");
     check(options.show_output == reporting::ShowOutput::failed,
           "commands default show-output is failed");
+    check(!options.color.has_value(), "commands default color is env/default");
+}
+
+void test_commands_reporting_capabilities() {
+    auto options = commands::parse_reporting_options(
+        "json", "none", "always", "never", "auto", "always");
+    check(options.output == reporting::OutputMode::json,
+          "commands parse json output mode");
+    check(options.show_output == reporting::ShowOutput::none,
+          "commands parse show output none");
+    check(options.color == reporting::CapabilitySetting::always,
+          "commands parse color always");
+    check(options.progress == reporting::CapabilitySetting::never,
+          "commands parse progress never");
+    check(options.unicode == reporting::CapabilitySetting::auto_detect,
+          "commands parse unicode auto");
+    check(options.hyperlinks == reporting::CapabilitySetting::always,
+          "commands parse hyperlinks always");
 }
 
 void test_commands_suggest_unknown_command() {
@@ -202,13 +226,15 @@ void test_readme_output_docs_match_usage() {
           "README documents run args");
     check(readme.find(
               "`exon build [--release] [--target <t>] [--member a,b] [--exclude x,y] "
-              "[--output human\\|wrapped\\|raw]`") != std::string::npos,
-          "README documents build human output mode");
+              "[--output human\\|json\\|wrapped\\|raw]") != std::string::npos,
+          "README documents build json output mode");
     check(readme.find(
               "`exon test [--release] [--target <t>] [--member a,b] [--exclude x,y] "
-              "[--timeout <sec>] [--output human\\|wrapped\\|raw] "
+              "[--timeout <sec>] [--output human\\|json\\|wrapped\\|raw] "
               "[--show-output failed\\|all\\|none]`") != std::string::npos,
-          "README documents test human output mode");
+          "README documents test json output mode");
+    check(readme.find("`exon status [--output human\\|json]`") != std::string::npos,
+          "README documents status command");
     check(readme.find(
               "`exon add [--dev] --git <repo> --version <v> --subdir <dir> [--name <n>]`") !=
               std::string::npos,
@@ -226,6 +252,10 @@ void test_readme_output_docs_match_usage() {
           "README documents non-tty fallback");
     check(readme.find("NO_COLOR=1") != std::string::npos,
           "README documents NO_COLOR override");
+    check(readme.find("EXON_PROGRESS=never") != std::string::npos,
+          "README documents progress capability env");
+    check(readme.find("JSON Lines") != std::string::npos,
+          "README documents JSON Lines output");
     check(readme.find("[4/5] [hello (apps/hello)] build") != std::string::npos,
           "README documents workspace member stage labels");
     check(readme.find("`wrapped` adds the same command framing while still showing the underlying "
@@ -259,6 +289,7 @@ int main() {
     test_commands_usage_lists_debug();
     test_commands_usage_lists_human_output_mode();
     test_commands_reporting_defaults();
+    test_commands_reporting_capabilities();
     test_commands_suggest_unknown_command();
     test_readme_output_docs_match_usage();
 

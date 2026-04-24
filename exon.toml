@@ -1,6 +1,6 @@
 [package]
 name = "exon"
-version = "0.27.0"
+version = "0.28.0"
 description = "A package manager for C++"
 authors = ["Geunryeol Park (misut)"]
 license = "MIT"

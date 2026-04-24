@@ -51,8 +51,12 @@ std::string usage_text() {
             {"new --lib|--bin <name>",             "create a new workspace member"},
             {"info",                               "show package information"},
             {"build [--release] [--target <t>] [--member a,b] [--exclude x,y] "
-             "[--output human|wrapped|raw]",
+             "[--output human|json|wrapped|raw] [--color auto|always|never] "
+             "[--progress auto|always|never] [--unicode auto|always|never] "
+             "[--hyperlinks auto|always|never]",
                                                    "build the project"},
+            {"status [--output human|json]",       "inspect project, toolchain, and terminal status"},
+            {"doctor [--output human|json]",       "alias for status"},
             {"check [--release] [--target <t>] [--member a,b] [--exclude x,y]",
                                                    "check syntax without linking"},
             {"run [--release] [--target <t>] [--member <name>] [args]",
@@ -61,7 +65,9 @@ std::string usage_text() {
              "[--member <name>] [--exclude x,y] [-- <args...>]",
                                                    "build and open the selected native executable in a native debugger"},
             {"test [--release] [--target <t>] [--member a,b] [--exclude x,y] [--timeout <sec>] "
-             "[--output human|wrapped|raw] [--show-output failed|all|none]",
+             "[--output human|json|wrapped|raw] [--show-output failed|all|none] "
+             "[--color auto|always|never] [--progress auto|always|never] "
+             "[--unicode auto|always|never] [--hyperlinks auto|always|never]",
                                                    "build and run tests"},
             {"clean [--member a,b] [--exclude x,y]","remove build artifacts"},
             {"add [--dev] <pkg> <ver>",            "add a git dependency"},
@@ -86,9 +92,10 @@ std::string usage_text() {
 }
 
 std::span<std::string_view const> command_names() {
-    static constexpr auto names = std::array<std::string_view, 15>{
-        "init", "new", "info", "build", "check", "run", "debug", "test",
-        "clean", "add", "remove", "update", "sync", "fmt", "version",
+    static constexpr auto names = std::array<std::string_view, 17>{
+        "init", "new", "info", "build", "status", "doctor", "check", "run",
+        "debug", "test", "clean", "add", "remove", "update", "sync", "fmt",
+        "version",
     };
     return std::span{names};
 }
@@ -178,6 +185,18 @@ struct WorkspaceSelection {
 std::vector<cli::ArgDef> workspace_select_defs(std::vector<cli::ArgDef> defs = {}) {
     defs.push_back(cli::ListOption{"--member"});
     defs.push_back(cli::ListOption{"--exclude"});
+    return defs;
+}
+
+std::vector<cli::ArgDef> reporting_defs(std::vector<cli::ArgDef> defs = {},
+                                        bool include_show_output = false) {
+    defs.push_back(cli::Option{"--output"});
+    if (include_show_output)
+        defs.push_back(cli::Option{"--show-output"});
+    defs.push_back(cli::Option{"--color"});
+    defs.push_back(cli::Option{"--progress"});
+    defs.push_back(cli::Option{"--unicode"});
+    defs.push_back(cli::Option{"--hyperlinks"});
     return defs;
 }
 
@@ -490,12 +509,43 @@ manifest::Manifest workspace_build_manifest(std::filesystem::path const& workspa
     return manifest;
 }
 
+std::optional<reporting::CapabilitySetting>
+parse_capability_option(std::string_view name, std::string_view value) {
+    if (value.empty())
+        return std::nullopt;
+    auto parsed = reporting::parse_capability_setting(value);
+    if (!parsed) {
+        throw std::runtime_error(
+            std::format("invalid {} '{}': expected auto, always, or never", name, value));
+    }
+    return parsed;
+}
+
 reporting::Options parse_reporting_options(std::string_view output_mode_text = {},
-                                           std::string_view show_output_text = {}) {
+                                           std::string_view show_output_text = {},
+                                           std::string_view color_text = {},
+                                           std::string_view progress_text = {},
+                                           std::string_view unicode_text = {},
+                                           std::string_view hyperlinks_text = {}) {
     return {
         .output = build::system::detail::parse_output_mode_text(output_mode_text),
         .show_output = build::system::detail::parse_show_output_text(show_output_text),
+        .color = parse_capability_option("--color", color_text),
+        .progress = parse_capability_option("--progress", progress_text),
+        .unicode = parse_capability_option("--unicode", unicode_text),
+        .hyperlinks = parse_capability_option("--hyperlinks", hyperlinks_text),
     };
+}
+
+reporting::Options parse_reporting_options(cli::Args const& args,
+                                           bool include_show_output = false) {
+    return parse_reporting_options(
+        args.get("--output"),
+        include_show_output ? args.get("--show-output") : std::string_view{},
+        args.get("--color"),
+        args.get("--progress"),
+        args.get("--unicode"),
+        args.get("--hyperlinks"));
 }
 
 int sync_workspace_member_cmake(WorkspaceMember const& member,
@@ -682,6 +732,7 @@ int run_workspace_build(std::filesystem::path const& workspace_root,
                         WorkspaceSelection const& selection,
                         bool release, std::string_view target,
                         reporting::Options const& options) {
+    auto scoped_options = reporting::ScopedOptionsContext{options};
     if (options.output != reporting::OutputMode::raw) {
         auto started = std::chrono::steady_clock::now();
         auto project = core::ProjectContext{
@@ -693,10 +744,13 @@ int run_workspace_build(std::filesystem::path const& workspace_root,
             .is_wasm = !target.empty(),
         };
         auto workspace_name = workspace_build_manifest(workspace_root, selection.members).name;
-        build::system::detail::print_header("build", workspace_name, project);
+        if (options.output == reporting::OutputMode::json)
+            build::system::detail::emit_json_stage("build", "resolve", "started", project);
+        else
+            build::system::detail::print_header("build", workspace_name, project);
         if (options.output == reporting::OutputMode::human)
             build::system::detail::print_human_stage("resolve", 1, 5);
-        else
+        else if (options.output == reporting::OutputMode::wrapped)
             build::system::detail::print_stage("resolve");
         try {
             auto execution = prepare_workspace_build_execution(
@@ -706,13 +760,23 @@ int run_workspace_build(std::filesystem::path const& workspace_root,
                     execution.request, execution.plan, "build", started,
                     execution.success_path, execution.success_label);
             }
+            if (options.output == reporting::OutputMode::json) {
+                return build::system::detail::run_build_json(
+                    execution.request, execution.plan, "build", started,
+                    execution.success_path, execution.success_label);
+            }
             return build::system::detail::run_build_wrapped(
                 execution.request, execution.plan, "build", started,
                 execution.success_path, execution.success_label);
         } catch (...) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started);
-            build::system::detail::print_failure_summary("build", "resolve", project, elapsed);
+            if (options.output == reporting::OutputMode::json) {
+                build::system::detail::emit_json_stage("build", "resolve", "failed", project);
+                build::system::detail::emit_json_summary("build", false, project, started);
+            } else {
+                build::system::detail::print_failure_summary("build", "resolve", project, elapsed);
+            }
             throw;
         }
     }
@@ -1029,6 +1093,184 @@ int cmd_info() {
     return 0;
 }
 
+std::string first_line(std::string_view text) {
+    while (!text.empty() && (text.front() == '\n' || text.front() == '\r'))
+        text.remove_prefix(1);
+    auto end = text.find_first_of("\r\n");
+    if (end == std::string_view::npos)
+        return std::string{text};
+    return std::string{text.substr(0, end)};
+}
+
+std::string tool_version_line(std::string program,
+                              std::vector<std::string> args = {"--version"}) {
+    if (program.empty())
+        return "unavailable";
+    try {
+        auto result = reporting::system::run_process(
+            core::ProcessSpec{.program = std::move(program), .args = std::move(args)},
+            reporting::StreamMode::capture);
+        if (result.exit_code != 0)
+            return std::format("unavailable (exit {})", result.exit_code);
+        auto line = first_line(!result.stdout_text.empty() ? result.stdout_text
+                                                           : result.stderr_text);
+        return line.empty() ? "available" : line;
+    } catch (std::exception const& e) {
+        return std::format("unavailable ({})", e.what());
+    }
+}
+
+std::string mise_tool_version_line(std::string_view tool,
+                                   std::vector<std::string> args = {"--version"}) {
+    try {
+        auto result = reporting::system::run_process(
+            core::ProcessSpec{
+                .program = "mise",
+                .args = {"which", std::string{tool}},
+            },
+            reporting::StreamMode::capture);
+        if (result.exit_code != 0)
+            return std::format("unavailable (mise which exit {})", result.exit_code);
+        auto path = first_line(!result.stdout_text.empty() ? result.stdout_text
+                                                           : result.stderr_text);
+        if (path.empty())
+            return "unavailable (mise which returned no path)";
+        return tool_version_line(std::move(path), std::move(args));
+    } catch (std::exception const& e) {
+        return std::format("unavailable (mise which failed: {})", e.what());
+    }
+}
+
+std::size_t manifest_dependency_count(manifest::Manifest const& m) {
+    return m.dependencies.size() + m.path_deps.size() + m.workspace_deps.size() +
+           m.vcpkg_deps.size() + m.subdir_deps.size() + m.featured_deps.size() +
+           m.cmake_deps.size() + m.dev_dependencies.size() + m.dev_path_deps.size() +
+           m.dev_workspace_deps.size() + m.dev_vcpkg_deps.size() +
+           m.dev_subdir_deps.size() + m.dev_featured_deps.size() +
+           m.dev_cmake_deps.size() + m.find_deps.size() + m.dev_find_deps.size();
+}
+
+void print_terminal_status(reporting::Options const& options) {
+    auto color = reporting::resolve_capability(options.color, "EXON_COLOR");
+    auto progress = reporting::resolve_capability(options.progress, "EXON_PROGRESS");
+    auto unicode = reporting::resolve_capability(options.unicode, "EXON_UNICODE");
+    auto hyperlinks = reporting::resolve_capability(options.hyperlinks, "EXON_HYPERLINKS");
+    std::println("{}", terminal::section("terminal", reporting::system::stdout_is_tty()));
+    std::println("{}", terminal::key_value("stdout tty",
+        reporting::system::stdout_is_terminal() ? "yes" : "no"));
+    std::println("{}", terminal::key_value("width",
+        reporting::system::terminal_width() == 0
+            ? std::string{"unknown"}
+            : std::format("{}", reporting::system::terminal_width())));
+    std::println("{}", terminal::key_value("color", reporting::to_string(color)));
+    std::println("{}", terminal::key_value("progress", reporting::to_string(progress)));
+    std::println("{}", terminal::key_value("unicode", reporting::to_string(unicode)));
+    std::println("{}", terminal::key_value("hyperlinks", reporting::to_string(hyperlinks)));
+}
+
+int cmd_status(int argc, char* argv[]) {
+    try {
+        auto args = cli::parse(argc, argv, 2, reporting_defs());
+        auto options = parse_reporting_options(args);
+        auto scoped_options = reporting::ScopedOptionsContext{options};
+        auto project_root = std::filesystem::current_path();
+        auto manifest_path = project_root / "exon.toml";
+        auto manifest_exists = std::filesystem::exists(manifest_path);
+        if (options.output == reporting::OutputMode::json) {
+            auto fields = std::vector<reporting::JsonField>{
+                reporting::json_string("root", project_root.generic_string()),
+                reporting::json_bool("manifest", manifest_exists),
+                reporting::json_string("exon_version", version),
+            };
+            if (!manifest_exists) {
+                fields.push_back(reporting::json_string("next", "exon init"));
+                reporting::emit_json_event("status", fields);
+                return 0;
+            }
+
+            auto m = load_manifest(project_root);
+            auto kind = manifest::is_workspace(m) ? std::string{"workspace"} : m.type;
+            fields.push_back(reporting::json_string("package", m.name));
+            fields.push_back(reporting::json_string("kind", kind));
+            fields.push_back(reporting::json_number(
+                "workspace_members", static_cast<long long>(m.workspace_members.size())));
+            fields.push_back(reporting::json_number(
+                "dependencies", static_cast<long long>(manifest_dependency_count(m))));
+            fields.push_back(reporting::json_bool(
+                "lock", std::filesystem::exists(project_root / "exon.lock")));
+            auto project = build::project_context(project_root, false, {});
+            fields.push_back(reporting::json_bool(
+                "configured", std::filesystem::exists(project.build_dir / "build.ninja")));
+            try {
+                auto tc = toolchain::system::detect();
+                fields.push_back(reporting::json_string("cmake", tc.cmake));
+                fields.push_back(reporting::json_string("ninja", tc.ninja));
+                fields.push_back(reporting::json_string("compiler", tc.cxx_compiler));
+                fields.push_back(reporting::json_string(
+                    "compiler_kind", toolchain::compiler_kind_name(tc.compiler_kind)));
+            } catch (std::exception const& e) {
+                fields.push_back(reporting::json_string("toolchain_error", e.what()));
+            }
+            reporting::emit_json_event("status", fields);
+            return 0;
+        }
+
+        std::println("{}", terminal::section("exon status", reporting::system::stdout_is_tty()));
+        std::println("{}", terminal::key_value("root", project_root.generic_string()));
+        std::println("{}", terminal::key_value("version", version));
+        if (!manifest_exists) {
+            std::println("{}", terminal::key_value("manifest", "missing"));
+            std::println("{}", terminal::key_value("next", "exon init"));
+            std::println("");
+            print_terminal_status(options);
+            return 0;
+        }
+
+        auto m = load_manifest(project_root);
+        auto kind = manifest::is_workspace(m) ? std::string{"workspace"} : m.type;
+        std::println("{}", terminal::key_value("manifest", "found"));
+        std::println("{}", terminal::key_value("package", m.name));
+        std::println("{}", terminal::key_value("kind", kind));
+        if (manifest::is_workspace(m))
+            std::println("{}", terminal::key_value(
+                "members", std::format("{}", m.workspace_members.size())));
+        std::println("{}", terminal::key_value(
+            "deps", std::format("{}", manifest_dependency_count(m))));
+        std::println("{}", terminal::key_value(
+            "lock", std::filesystem::exists(project_root / "exon.lock") ? "present" : "missing"));
+        auto project = build::project_context(project_root, false, {});
+        std::println("{}", terminal::key_value(
+            "build dir", build::system::detail::display_path(project.build_dir, project.root)));
+        std::println("{}", terminal::key_value(
+            "configured",
+            std::filesystem::exists(project.build_dir / "build.ninja") ? "yes" : "no"));
+
+        std::println("");
+        std::println("{}", terminal::section("tools", reporting::system::stdout_is_tty()));
+        std::println("{}", terminal::key_value("mise", tool_version_line("mise")));
+        std::println("{}", terminal::key_value("intron", mise_tool_version_line("intron", {"help"})));
+        try {
+            auto tc = toolchain::system::detect();
+            std::println("{}", terminal::key_value("cmake", tool_version_line(tc.cmake)));
+            std::println("{}", terminal::key_value("ninja", tool_version_line(tc.ninja)));
+            std::println("{}", terminal::key_value("compiler", tool_version_line(tc.cxx_compiler)));
+            std::println("{}", terminal::key_value(
+                "compiler kind", toolchain::compiler_kind_name(tc.compiler_kind)));
+        } catch (std::exception const& e) {
+            std::println("{}", terminal::key_value("toolchain", std::format("error: {}", e.what())));
+        }
+
+        std::println("");
+        print_terminal_status(options);
+        std::println("");
+        std::println("{}", terminal::key_value("next", "exon build"));
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
+    return 0;
+}
+
 using BuildFn = std::function<int(std::filesystem::path const&,
                                   manifest::Manifest const&,
                                   manifest::Manifest const&,
@@ -1096,6 +1338,7 @@ int run_workspace_test(std::filesystem::path const& workspace_root,
                        std::string_view filter,
                        std::optional<std::chrono::milliseconds> timeout,
                        reporting::Options const& options) {
+    auto scoped_options = reporting::ScopedOptionsContext{options};
     auto started = std::chrono::steady_clock::now();
     WorkspaceTestAggregate aggregate;
     int last_rc = 0;
@@ -1105,6 +1348,13 @@ int run_workspace_test(std::filesystem::path const& workspace_root,
             if (aggregate.members_run > 0)
                 std::println("");
             print_workspace_human_member_header(workspace_root, member);
+        } else if (options.output == reporting::OutputMode::json) {
+            reporting::emit_json_event("workspace-member", {
+                reporting::json_string("name", member.name),
+                reporting::json_string("path",
+                    std::filesystem::relative(member.path, workspace_root).generic_string()),
+                reporting::json_string("state", "started"),
+            });
         } else {
             std::println("--- {} ---", workspace_display_name(member, workspace_root));
         }
@@ -1117,10 +1367,22 @@ int run_workspace_test(std::filesystem::path const& workspace_root,
         aggregate.binaries_run += member_summary.collected;
         if (rc == 0) {
             ++aggregate.members_passed;
+            if (options.output == reporting::OutputMode::json) {
+                reporting::emit_json_event("workspace-member", {
+                    reporting::json_string("name", member.name),
+                    reporting::json_string("state", "passed"),
+                });
+            }
             continue;
         }
 
         ++aggregate.members_failed;
+        if (options.output == reporting::OutputMode::json) {
+            reporting::emit_json_event("workspace-member", {
+                reporting::json_string("name", member.name),
+                reporting::json_string("state", "failed"),
+            });
+        }
         last_rc = rc;
         break;
     }
@@ -1129,20 +1391,32 @@ int run_workspace_test(std::filesystem::path const& workspace_root,
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started);
         print_workspace_test_summary(aggregate, elapsed);
+    } else if (options.output == reporting::OutputMode::json) {
+        reporting::emit_json_event("summary", {
+            reporting::json_string("verb", "workspace-test"),
+            reporting::json_bool("success", aggregate.members_failed == 0),
+            reporting::json_number("members_run", aggregate.members_run),
+            reporting::json_number("members_passed", aggregate.members_passed),
+            reporting::json_number("members_failed", aggregate.members_failed),
+            reporting::json_number("binaries_run", aggregate.binaries_run),
+            reporting::json_number(
+                "elapsed_ms",
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started).count()),
+        });
     }
     return last_rc;
 }
 
 int cmd_build(int argc, char* argv[]) {
     try {
-        auto args = cli::parse(argc, argv, 2, workspace_select_defs({
+        auto args = cli::parse(argc, argv, 2, workspace_select_defs(reporting_defs({
             cli::Flag{"--release"},
             cli::Option{"--target"},
-            cli::Option{"--output"},
-        }));
+        })));
         auto release = args.has("--release");
         auto target = std::string{args.get("--target")};
-        auto options = parse_reporting_options(args.get("--output"));
+        auto options = parse_reporting_options(args);
         auto requested_members = args.get_list("--member");
         auto excluded_members = args.get_list("--exclude");
         auto project_root = std::filesystem::current_path();
@@ -1323,15 +1597,14 @@ int cmd_test(int argc, char* argv[]) {
             cli::Option{"--target"},
             cli::Option{"--filter"},
             cli::Option{"--timeout"},
-            cli::Option{"--output"},
-            cli::Option{"--show-output"},
         };
-        auto args = cli::parse(argc, argv, 2, workspace_select_defs(test_defs));
+        auto args = cli::parse(argc, argv, 2,
+                               workspace_select_defs(reporting_defs(test_defs, true)));
         auto release = args.has("--release");
         auto target = std::string{args.get("--target")};
         auto filter = std::string{args.get("--filter")};
         auto timeout = parse_timeout(args.get("--timeout"));
-        auto options = parse_reporting_options(args.get("--output"), args.get("--show-output"));
+        auto options = parse_reporting_options(args, true);
         auto requested_members = args.get_list("--member");
         auto excluded_members = args.get_list("--exclude");
         auto project_root = std::filesystem::current_path();

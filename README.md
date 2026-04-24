@@ -82,11 +82,13 @@ hello, world!
 | `exon init [--lib\|--workspace] [name]` | Create a new package or workspace |
 | `exon new --lib\|--bin <name>` | Create a new workspace member from the workspace root |
 | `exon info` | Show package information |
-| `exon build [--release] [--target <t>] [--member a,b] [--exclude x,y] [--output human\|wrapped\|raw]` | Build the project or selected workspace members |
+| `exon build [--release] [--target <t>] [--member a,b] [--exclude x,y] [--output human\|json\|wrapped\|raw] [--color auto\|always\|never] [--progress auto\|always\|never] [--unicode auto\|always\|never] [--hyperlinks auto\|always\|never]` | Build the project or selected workspace members |
+| `exon status [--output human\|json]` | Inspect project, toolchain, and terminal status |
+| `exon doctor [--output human\|json]` | Alias for `exon status` |
 | `exon check [--release] [--target <t>] [--member a,b] [--exclude x,y]` | Check syntax without linking |
 | `exon run [--release] [--target <t>] [--member <name>] [args]` | Build and run |
 | `exon debug [--release] [--debugger auto\|lldb\|gdb\|devenv\|cdb\|<path>] [--member <name>] [--exclude x,y] [-- <args...>]` | Build and open the selected native executable in a native debugger |
-| `exon test [--release] [--target <t>] [--member a,b] [--exclude x,y] [--timeout <sec>] [--output human\|wrapped\|raw] [--show-output failed\|all\|none]` | Build and run tests |
+| `exon test [--release] [--target <t>] [--member a,b] [--exclude x,y] [--timeout <sec>] [--output human\|json\|wrapped\|raw] [--show-output failed\|all\|none]` | Build and run tests |
 | `exon clean [--member a,b] [--exclude x,y]` | Remove build artifacts |
 | `exon add [--dev] <pkg> <ver>` | Add a git dependency |
 | `exon add [--dev] --path <name> <path>` | Add a local path dependency |
@@ -282,15 +284,21 @@ ldflags = ["/fsanitize=address"]
 
 When these flags are present, exon now copies `clang_rt.asan_dynamic-x86_64.dll` next to each built executable and test binary. This makes direct execution from `.exon/debug/` work without manually editing `PATH`.
 
-`exon build` and `exon test` default to `human` output. In an interactive terminal, `human` shows indexed stages such as `[1/5] resolve`, fixed-width status cells such as `OK`, `FAIL`, and `TIMEOUT`, and a single-line live progress renderer whose active phase label shimmers from left to right during long build or test phases. The same path uses restrained ANSI styling for status and `error:` diagnostics. When stdout is not a TTY, `human` falls back to the same plain ASCII, stage-oriented summaries. `wrapped` adds the same command framing while still showing the underlying CMake/Ninja/test output, and `raw` keeps exon wrapping to a minimum.
+`exon build` and `exon test` default to `human` output. In an interactive terminal, `human` shows indexed stages such as `[1/5] resolve`, fixed-width status cells such as `OK`, `FAIL`, and `TIMEOUT`, and a single-line live progress renderer whose active phase label shimmers from left to right during long build or test phases. Long progress lines are clipped to the terminal width and include elapsed time, ETA, and rate when enough progress data is available. The same path uses restrained ANSI styling for status and `error:` diagnostics. When stdout is not a TTY, `human` falls back to the same plain ASCII, stage-oriented summaries. `wrapped` adds the same command framing while still showing the underlying CMake/Ninja/test output, and `raw` keeps exon wrapping to a minimum.
 
-Set `NO_COLOR=1` to force plain output and disable the interactive progress renderer even in a TTY session.
+Use `--output json` for JSON Lines events (`stage`, `diagnostic`, `artifact`, `test-result`, and `summary`) that are stable for tools and CI log processors.
+
+Terminal capabilities can be controlled with `--color auto|always|never`, `--progress auto|always|never`, `--unicode auto|always|never`, and `--hyperlinks auto|always|never`. The matching environment variables are `EXON_COLOR`, `EXON_PROGRESS`, `EXON_UNICODE`, and `EXON_HYPERLINKS`. Set `NO_COLOR=1` to force plain output and disable the interactive progress renderer in auto mode; an explicit `--progress always` can still request progress in a TTY session. For example, `EXON_PROGRESS=never exon build` disables animation without changing human summaries.
+
+On GitHub Actions, exon disables animation and emits workflow annotations/groups for failures so the CI log stays readable.
 
 Workspace builds keep the active member inline in each indexed stage header, for example `[4/5] [hello (apps/hello)] build`. Workspace tests use the same status-cell style for member dividers, for example `RUN     member hello (apps/hello)`.
 
 `exon test --show-output failed` (default) only shows captured stdout/stderr for failing or timed-out test binaries. Use `--show-output all` to always print captured output, or `--show-output none` to suppress it entirely.
 
 `exon test --timeout <sec>` is also available for long-running or hung tests. On Windows, timeout uses a native process runner that terminates the full child process tree instead of leaving stale `cmake`, `ninja`, or test processes behind.
+
+`exon status` (or `exon doctor`) gives a TUI-lite snapshot of the current package/workspace, lockfile, build cache, detected tools, and terminal capability policy. Use `exon status --output json` when another tool needs the same information.
 
 ### Windows Toolchain Troubleshooting
 
