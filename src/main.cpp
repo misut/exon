@@ -51,6 +51,10 @@ int main(int argc, char* argv[]) {
         return commands::cmd_outdated(argc, argv);
     if (command == "update")
         return commands::cmd_update(argc, argv);
+    if (command == "tree")
+        return commands::cmd_tree(argc, argv);
+    if (command == "why")
+        return commands::cmd_why(argc, argv);
     if (command == "sync")
         return commands::cmd_sync(argc, argv);
     if (command == "fmt")

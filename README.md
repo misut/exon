@@ -98,6 +98,8 @@ hello, world!
 | `exon remove <pkg>` | Remove a dependency |
 | `exon outdated [pkg...] [--member a,b] [--exclude x,y] [--output human\|json]` | Check git dependencies for newer semver tags |
 | `exon update [pkg...] [--dry-run] [--precise <version>] [--member a,b] [--exclude x,y]` | Update lockfile entries to latest compatible versions |
+| `exon tree [--member a,b] [--exclude x,y] [--dev] [--features] [--output human\|json]` | Show the resolved dependency graph |
+| `exon why <pkg> [--member a,b] [--exclude x,y] [--dev] [--output human\|json]` | Show why a package is in the dependency graph |
 | `exon sync [--member a,b] [--exclude x,y]` | Sync CMakeLists.txt with exon.toml |
 | `exon fmt` | Format source files with clang-format |
 | `exon version` | Show exon version |
@@ -255,7 +257,7 @@ ldflags = ["-fsanitize=address"]
 
 Workspace roots are not runnable packages themselves. From the root:
 
-- `exon build`, `exon check`, `exon test`, `exon sync`, `exon clean`, `exon outdated`, and `exon update` accept `--member a,b` and `--exclude x,y`
+- `exon build`, `exon check`, `exon test`, `exon sync`, `exon clean`, `exon outdated`, `exon update`, `exon tree`, and `exon why` accept `--member a,b` and `--exclude x,y`
 - `exon run --member <name>` runs a member package
 - root builds use a unified graph under `.exon/workspace/<profile>` (or `.exon/workspace/<target>/<profile>` for cross-target builds)
 - member execution order follows workspace dependency order, not the declaration order in `members = [...]`
@@ -368,6 +370,17 @@ Use `exon update` to refresh `exon.lock` without rebuilding. With no package arg
 exon update
 exon update github.com/misut/tomlcpp --dry-run
 exon update github.com/misut/tomlcpp --precise 0.3.1
+```
+
+Use `exon tree` to inspect the resolved dependency graph. Repeated packages are
+deduplicated by default and marked with `(*)`; pass `--features` to include the
+selected git dependency features in the human output. `exon why <pkg>` prints
+the root-to-package path that explains why a dependency is present.
+
+```sh
+exon tree --features
+exon why tomlcpp
+exon tree --member hello --output json
 ```
 
 **Depending on a package inside a remote monorepo**: use inline-table syntax with `subdir`. The TOML key becomes the CMake target name.

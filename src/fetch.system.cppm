@@ -681,6 +681,8 @@ std::vector<std::size_t> distinct_source_indices(std::vector<std::size_t> const&
         auto const& candidate = candidates[index];
         msg << "\n  - " << describe_source(candidate);
     }
+    msg << "\n  hint: run 'exon why " << package_name
+        << "' to inspect dependency paths";
     throw std::runtime_error(msg.str());
 }
 

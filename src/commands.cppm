@@ -82,6 +82,10 @@ std::string usage_text() {
                                                    "check git dependencies for newer versions"},
             {"update [pkg...] [--dry-run] [--precise <version>] [--member a,b] [--exclude x,y]",
                                                    "update lockfile entries to latest compatible versions"},
+            {"tree [--member a,b] [--exclude x,y] [--dev] [--features] [--output human|json]",
+                                                   "show the resolved dependency graph"},
+            {"why <pkg> [--member a,b] [--exclude x,y] [--dev] [--output human|json]",
+                                                   "show why a package is in the dependency graph"},
             {"sync [--member a,b] [--exclude x,y]","sync CMakeLists.txt with exon.toml"},
             {"fmt",                                "format source files with clang-format"},
             {"version",                            "show exon version"},
@@ -94,10 +98,10 @@ std::string usage_text() {
 }
 
 std::span<std::string_view const> command_names() {
-    static constexpr auto names = std::array<std::string_view, 18>{
+    static constexpr auto names = std::array<std::string_view, 20>{
         "init", "new", "info", "build", "status", "doctor", "check", "run",
         "debug", "test", "clean", "add", "remove", "outdated", "update", "sync",
-        "fmt", "version",
+        "tree", "why", "fmt", "version",
     };
     return std::span{names};
 }
@@ -347,6 +351,301 @@ void print_update_diff(lock::LockFile const& before,
     if (changed == 0)
         print_status(terminal::StatusKind::ok, dry_run ? "lockfile already up to date"
                                                        : "dependencies already up to date");
+}
+
+struct DependencyGraphNode {
+    std::string name;
+    std::string key;
+    std::string version;
+    bool is_dev = false;
+    bool is_path = false;
+    std::vector<std::string> features;
+    bool default_features = true;
+    std::vector<std::string> aliases;
+    std::vector<std::string> dependencies;
+};
+
+struct DependencyGraph {
+    std::string root_name;
+    std::map<std::string, DependencyGraphNode> nodes;
+    std::vector<std::string> root_dependencies;
+};
+
+void add_unique_string(std::vector<std::string>& values, std::string const& value) {
+    if (value.empty())
+        return;
+    if (std::ranges::find(values, value) == values.end())
+        values.push_back(value);
+}
+
+std::string package_basename(std::string_view key) {
+    auto slash = key.find_last_of('/');
+    if (slash == std::string_view::npos)
+        return std::string{key};
+    return std::string{key.substr(slash + 1)};
+}
+
+bool fetched_dep_matches_key(fetch::FetchedDep const& dep, std::string const& key) {
+    if (dep.key == key || dep.name == key || dep.package_name == key)
+        return true;
+    if (std::ranges::find(dep.aliases, key) != dep.aliases.end())
+        return true;
+    return dep.package_name == package_basename(key);
+}
+
+std::optional<std::string> graph_name_for_key(fetch::FetchResult const& result,
+                                              std::string const& key) {
+    for (auto const& dep : result.deps) {
+        if (fetched_dep_matches_key(dep, key))
+            return dep.package_name;
+    }
+    return std::nullopt;
+}
+
+void add_graph_root_dep(DependencyGraph& graph,
+                        fetch::FetchResult const& result,
+                        std::string const& key) {
+    if (auto name = graph_name_for_key(result, key))
+        add_unique_string(graph.root_dependencies, *name);
+}
+
+DependencyGraph build_dependency_graph(std::string root_name,
+                                       manifest::Manifest const& m,
+                                       fetch::FetchResult const& result,
+                                       bool include_dev) {
+    DependencyGraph graph{.root_name = std::move(root_name)};
+    if (graph.root_name.empty())
+        graph.root_name = m.name.empty() ? "package" : m.name;
+
+    for (auto const& dep : result.deps) {
+        auto node = DependencyGraphNode{
+            .name = dep.package_name,
+            .key = dep.key,
+            .version = dep.version,
+            .is_dev = dep.is_dev,
+            .is_path = dep.is_path,
+            .features = dep.features,
+            .default_features = dep.default_features,
+            .aliases = dep.aliases,
+            .dependencies = dep.dependency_names,
+        };
+        graph.nodes[node.name] = std::move(node);
+    }
+
+    for (auto const& [key, _] : m.dependencies)
+        add_graph_root_dep(graph, result, key);
+    for (auto const& [key, _] : m.featured_deps)
+        add_graph_root_dep(graph, result, key);
+    for (auto const& [key, _] : m.subdir_deps)
+        add_graph_root_dep(graph, result, key);
+    for (auto const& [key, _] : m.path_deps)
+        add_graph_root_dep(graph, result, key);
+    for (auto const& key : m.workspace_deps)
+        add_graph_root_dep(graph, result, key);
+
+    if (include_dev) {
+        for (auto const& [key, _] : m.dev_dependencies)
+            add_graph_root_dep(graph, result, key);
+        for (auto const& [key, _] : m.dev_featured_deps)
+            add_graph_root_dep(graph, result, key);
+        for (auto const& [key, _] : m.dev_subdir_deps)
+            add_graph_root_dep(graph, result, key);
+        for (auto const& [key, _] : m.dev_path_deps)
+            add_graph_root_dep(graph, result, key);
+        for (auto const& key : m.dev_workspace_deps)
+            add_graph_root_dep(graph, result, key);
+    }
+
+    return graph;
+}
+
+std::string join_strings(std::vector<std::string> const& values,
+                         std::string_view separator = ",") {
+    auto out = std::string{};
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i > 0)
+            out += separator;
+        out += values[i];
+    }
+    return out;
+}
+
+std::string dependency_node_label(DependencyGraphNode const& node,
+                                  bool show_features = false) {
+    auto label = node.name;
+    if (!node.version.empty() && !node.is_path)
+        label += std::format(" {}", node.version);
+    if (node.is_path)
+        label += " (path)";
+    if (node.is_dev)
+        label += " (dev)";
+    if (show_features && (!node.features.empty() || !node.default_features)) {
+        auto parts = std::vector<std::string>{};
+        if (!node.features.empty())
+            parts.push_back(std::format("features: {}", join_strings(node.features, ",")));
+        if (!node.default_features)
+            parts.push_back("default-features=false");
+        label += std::format(" [{}]", join_strings(parts, "; "));
+    }
+    return label;
+}
+
+std::string dependency_label(DependencyGraph const& graph,
+                             std::string const& name,
+                             bool show_features = false) {
+    if (auto it = graph.nodes.find(name); it != graph.nodes.end())
+        return dependency_node_label(it->second, show_features);
+    return name;
+}
+
+void print_dependency_tree_node(DependencyGraph const& graph,
+                                std::string const& name,
+                                std::string const& prefix,
+                                bool last,
+                                std::set<std::string>& seen,
+                                bool show_features) {
+    auto it = graph.nodes.find(name);
+    auto label = it == graph.nodes.end()
+        ? name
+        : dependency_node_label(it->second, show_features);
+    std::print("{}{}{}", prefix, last ? "`- " : "+- ", label);
+    if (!seen.insert(name).second) {
+        std::println(" (*)");
+        return;
+    }
+    std::println("");
+    if (it == graph.nodes.end())
+        return;
+    auto next_prefix = prefix + (last ? "   " : "|  ");
+    for (std::size_t i = 0; i < it->second.dependencies.size(); ++i) {
+        print_dependency_tree_node(graph, it->second.dependencies[i], next_prefix,
+                                   i + 1 == it->second.dependencies.size(),
+                                   seen, show_features);
+    }
+}
+
+void print_dependency_tree(DependencyGraph const& graph, bool show_features) {
+    std::println("{}", graph.root_name);
+    auto seen = std::set<std::string>{};
+    for (std::size_t i = 0; i < graph.root_dependencies.size(); ++i) {
+        print_dependency_tree_node(graph, graph.root_dependencies[i], "",
+                                   i + 1 == graph.root_dependencies.size(),
+                                   seen, show_features);
+    }
+}
+
+std::string json_string_array(std::vector<std::string> const& values) {
+    auto out = std::string{"["};
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i > 0)
+            out += ",";
+        out += std::format("\"{}\"", reporting::json_escape(values[i]));
+    }
+    out += "]";
+    return out;
+}
+
+void emit_dependency_tree_json(DependencyGraph const& graph) {
+    reporting::emit_json_event("dependency-tree-root", {
+        reporting::json_string("name", graph.root_name),
+        reporting::JsonField{
+            .key = "dependencies",
+            .value = json_string_array(graph.root_dependencies),
+            .quote = false,
+        },
+    });
+    for (auto const& [_, node] : graph.nodes) {
+        reporting::emit_json_event("dependency-tree-node", {
+            reporting::json_string("name", node.name),
+            reporting::json_string("key", node.key),
+            reporting::json_string("version", node.version),
+            reporting::json_bool("dev", node.is_dev),
+            reporting::json_bool("path", node.is_path),
+            reporting::json_bool("default_features", node.default_features),
+            reporting::JsonField{
+                .key = "features",
+                .value = json_string_array(node.features),
+                .quote = false,
+            },
+            reporting::JsonField{
+                .key = "dependencies",
+                .value = json_string_array(node.dependencies),
+                .quote = false,
+            },
+        });
+    }
+    reporting::emit_json_event("summary", {
+        reporting::json_number("dependencies",
+                               static_cast<long long>(graph.nodes.size())),
+    });
+}
+
+bool dependency_node_matches(DependencyGraphNode const& node, std::string const& target) {
+    if (node.name == target || node.key == target)
+        return true;
+    return std::ranges::find(node.aliases, target) != node.aliases.end();
+}
+
+void collect_dependency_paths(DependencyGraph const& graph,
+                              std::string const& name,
+                              std::string const& target,
+                              std::vector<std::string>& current,
+                              std::set<std::string>& visiting,
+                              std::vector<std::vector<std::string>>& paths) {
+    auto it = graph.nodes.find(name);
+    if (it == graph.nodes.end())
+        return;
+    current.push_back(name);
+    if (dependency_node_matches(it->second, target))
+        paths.push_back(current);
+    if (visiting.insert(name).second) {
+        for (auto const& child : it->second.dependencies)
+            collect_dependency_paths(graph, child, target, current, visiting, paths);
+        visiting.erase(name);
+    }
+    current.pop_back();
+}
+
+std::vector<std::vector<std::string>> dependency_paths(DependencyGraph const& graph,
+                                                       std::string const& target) {
+    auto paths = std::vector<std::vector<std::string>>{};
+    for (auto const& root_dep : graph.root_dependencies) {
+        auto current = std::vector<std::string>{graph.root_name};
+        auto visiting = std::set<std::string>{};
+        collect_dependency_paths(graph, root_dep, target, current, visiting, paths);
+    }
+    return paths;
+}
+
+void print_dependency_paths(DependencyGraph const& graph,
+                            std::vector<std::vector<std::string>> const& paths) {
+    for (auto const& path : paths) {
+        auto parts = std::vector<std::string>{};
+        for (std::size_t i = 0; i < path.size(); ++i) {
+            if (i == 0)
+                parts.push_back(path[i]);
+            else
+                parts.push_back(dependency_label(graph, path[i]));
+        }
+        std::println("{}", join_strings(parts, " -> "));
+    }
+}
+
+void emit_dependency_paths_json(std::string const& target,
+                                std::vector<std::vector<std::string>> const& paths) {
+    for (auto const& path : paths) {
+        reporting::emit_json_event("dependency-path", {
+            reporting::json_string("target", target),
+            reporting::JsonField{
+                .key = "path",
+                .value = json_string_array(path),
+                .quote = false,
+            },
+        });
+    }
+    reporting::emit_json_event("summary", {
+        reporting::json_number("paths", static_cast<long long>(paths.size())),
+    });
 }
 
 WorkspaceMember load_workspace_member(std::filesystem::path const& workspace_root,
@@ -2137,6 +2436,138 @@ int cmd_update(int argc, char* argv[]) {
         if (!args.get_list("--member").empty() || !args.get_list("--exclude").empty())
             return command_error("--member and --exclude require a workspace root");
         return update_project(project_root, resolve_manifest(raw_m));
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
+}
+
+int cmd_tree(int argc, char* argv[]) {
+    try {
+        auto args = cli::parse(argc, argv, 2,
+                               workspace_select_defs({cli::Flag{"--dev"},
+                                                      cli::Flag{"--features"},
+                                                      cli::Option{"--output"}}));
+        auto project_root = std::filesystem::current_path();
+        auto manifest_path = project_root / "exon.toml";
+        if (!std::filesystem::exists(manifest_path)) {
+            std::println(std::cerr, "error: exon.toml not found. run 'exon init' first");
+            return 1;
+        }
+        if (!args.positional().empty())
+            return command_error(std::format("unexpected argument '{}'", args.positional()[0]));
+
+        auto output = parse_dependency_output_mode(args.get("--output"));
+        auto include_dev = args.has("--dev");
+        auto show_features = args.has("--features");
+        auto scoped_options = reporting::ScopedOptionsContext{
+            reporting::Options{.output = output}};
+
+        auto print_project_tree = [&](std::filesystem::path const& root,
+                                      manifest::Manifest const& m) -> int {
+            auto result = fetch::system::fetch_all({
+                .manifest = m,
+                .project_root = root,
+                .lock_path = root / "exon.lock",
+                .include_dev = include_dev,
+            });
+            auto graph = build_dependency_graph(m.name, m, result, include_dev);
+            if (output == reporting::OutputMode::json)
+                emit_dependency_tree_json(graph);
+            else
+                print_dependency_tree(graph, show_features);
+            return 0;
+        };
+
+        auto raw_m = load_manifest(project_root);
+        if (manifest::is_workspace(raw_m)) {
+            auto selection = select_workspace_members(project_root, raw_m, {},
+                                                      args.get_list("--member"),
+                                                      args.get_list("--exclude"),
+                                                      false, include_dev);
+            return run_selected_workspace_members(project_root, selection, [&](auto const& member) {
+                return print_project_tree(member.path, member.resolved_manifest);
+            });
+        }
+        if (!args.get_list("--member").empty() || !args.get_list("--exclude").empty())
+            return command_error("--member and --exclude require a workspace root");
+        return print_project_tree(project_root, resolve_manifest(raw_m));
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
+}
+
+int cmd_why(int argc, char* argv[]) {
+    try {
+        auto args = cli::parse(argc, argv, 2,
+                               workspace_select_defs({cli::Flag{"--dev"},
+                                                      cli::Option{"--output"}}));
+        auto project_root = std::filesystem::current_path();
+        auto manifest_path = project_root / "exon.toml";
+        if (!std::filesystem::exists(manifest_path)) {
+            std::println(std::cerr, "error: exon.toml not found. run 'exon init' first");
+            return 1;
+        }
+        auto const& positional = args.positional();
+        if (positional.size() != 1)
+            return command_error("usage: exon why <pkg>");
+
+        auto target = positional[0];
+        auto output = parse_dependency_output_mode(args.get("--output"));
+        auto include_dev = args.has("--dev");
+        auto scoped_options = reporting::ScopedOptionsContext{
+            reporting::Options{.output = output}};
+
+        auto explain_project = [&](std::filesystem::path const& root,
+                                   manifest::Manifest const& m,
+                                   bool fail_if_missing) -> std::pair<int, bool> {
+            auto result = fetch::system::fetch_all({
+                .manifest = m,
+                .project_root = root,
+                .lock_path = root / "exon.lock",
+                .include_dev = include_dev,
+            });
+            auto graph = build_dependency_graph(m.name, m, result, include_dev);
+            auto paths = dependency_paths(graph, target);
+            if (paths.empty()) {
+                if (fail_if_missing)
+                    return {command_error(
+                        std::format("'{}' is not in the dependency graph", target)), false};
+                return {0, false};
+            }
+            if (output == reporting::OutputMode::json)
+                emit_dependency_paths_json(target, paths);
+            else
+                print_dependency_paths(graph, paths);
+            return {0, true};
+        };
+
+        auto raw_m = load_manifest(project_root);
+        if (manifest::is_workspace(raw_m)) {
+            auto selection = select_workspace_members(project_root, raw_m, {},
+                                                      args.get_list("--member"),
+                                                      args.get_list("--exclude"),
+                                                      false, include_dev);
+            auto found = false;
+            auto fail_if_missing = selection.members.size() == 1;
+            for (auto const& member : selection.members) {
+                auto guard = reporting::ScopedStageContext{
+                    workspace_display_name(member, project_root)};
+                auto [rc, member_found] =
+                    explain_project(member.path, member.resolved_manifest, fail_if_missing);
+                if (rc != 0)
+                    return rc;
+                found = found || member_found;
+            }
+            if (!found)
+                return command_error(std::format(
+                    "'{}' is not in the selected dependency graphs", target));
+            return 0;
+        }
+        if (!args.get_list("--member").empty() || !args.get_list("--exclude").empty())
+            return command_error("--member and --exclude require a workspace root");
+        return explain_project(project_root, resolve_manifest(raw_m), true).first;
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
