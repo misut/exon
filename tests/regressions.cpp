@@ -1040,23 +1040,23 @@ void test_live_progress_frame_format() {
         .total = 56,
         .percent = 21,
     }, 1);
-    check(frame0 == "  [|] [12/56 21%]", "progress frame: first spinner frame");
-    check(frame1 == "  [/] [12/56 21%]", "progress frame: second spinner frame");
+    check(frame0 == "  RUN     [|] [12/56 21%]", "progress frame: first spinner frame");
+    check(frame1 == "  RUN     [/] [12/56 21%]", "progress frame: second spinner frame");
 }
 
 void test_human_build_success_output() {
     auto result = run_self_fixture("build-success");
     check(result.exit_code == 0, "human build success: exit code");
-    check(result.stdout_text.contains("==> sync"), "human build success: sync stage");
+    check(result.stdout_text.contains("[2/5] sync"), "human build success: sync stage");
     check(result.stdout_text.contains("generated build files"),
           "human build success: sync summary");
-    check(result.stdout_text.contains("==> configure"), "human build success: configure stage");
+    check(result.stdout_text.contains("[3/5] configure"), "human build success: configure stage");
     check(!result.stdout_text.contains("configure-noisy-stdout"),
           "human build success: hides configure chatter");
-    check(result.stdout_text.contains("==> build"), "human build success: build stage");
+    check(result.stdout_text.contains("[4/5] build"), "human build success: build stage");
     check(!result.stdout_text.contains("build-noisy-stdout"),
           "human build success: hides build chatter");
-    check(result.stdout_text.contains("==> finish"), "human build success: finish stage");
+    check(result.stdout_text.contains("[5/5] finish"), "human build success: finish stage");
     check(result.stdout_text.contains("artifact"), "human build success: artifact reported");
     check(result.stdout_text.contains(".exon/debug/app"),
           "human build success: artifact path reported");
@@ -1068,7 +1068,7 @@ void test_human_build_cached_output() {
     check(result.exit_code == 0, "human build cached: exit code");
     check(result.stdout_text.contains("build files up to date"),
           "human build cached: sync says up to date");
-    check(result.stdout_text.contains("==> configure"), "human build cached: configure stage");
+    check(result.stdout_text.contains("[3/5] configure"), "human build cached: configure stage");
     check(result.stdout_text.contains("cached"), "human build cached: cached configure");
     check(!result.stdout_text.contains("configure-noisy-stdout"),
           "human build cached: configure command skipped");
@@ -1096,9 +1096,9 @@ void test_human_test_failed_output_mode() {
     check(result.exit_code == 1, "human test failed mode: exit code");
     check(result.stdout_text.contains("collected 3 test binaries"),
           "human test failed mode: collected count");
-    check(result.stdout_text.contains("PASSED  test-pass"),
+    check(result.stdout_text.contains("OK      test-pass"),
           "human test failed mode: pass status shown");
-    check(result.stdout_text.contains("FAILED  test-fail"),
+    check(result.stdout_text.contains("FAIL    test-fail"),
           "human test failed mode: fail status shown");
     check(result.stdout_text.contains("TIMEOUT test-timeout"),
           "human test failed mode: timeout status shown");
@@ -1160,20 +1160,20 @@ void test_wrapped_output_regressions() {
 void test_workspace_human_output() {
     auto build_result = run_self_fixture("workspace-build");
     check(build_result.exit_code == 0, "workspace build human: exit code");
-    check(build_result.stdout_text.contains("==> resolve"),
+    check(build_result.stdout_text.contains("[1/5] resolve"),
           "workspace build human: resolve stage");
-    check(build_result.stdout_text.contains("==> sync"),
+    check(build_result.stdout_text.contains("[2/5] sync"),
           "workspace build human: sync stage");
-    check(build_result.stdout_text.contains("==> finish"),
+    check(build_result.stdout_text.contains("[5/5] finish"),
           "workspace build human: finish stage");
     check(build_result.stdout_text.contains("build dir"),
           "workspace build human: build dir reported");
 
     auto test_result = run_self_fixture("workspace-test");
     check(test_result.exit_code == 0, "workspace test human: exit code");
-    check(test_result.stdout_text.contains("==> member app (app)"),
+    check(test_result.stdout_text.contains("RUN     member app (app)"),
           "workspace test human: member header");
-    check(test_result.stdout_text.contains("==> member tool (tool)"),
+    check(test_result.stdout_text.contains("RUN     member tool (tool)"),
           "workspace test human: second member header");
     check(test_result.stdout_text.contains("members   2 run, 2 passed, 0 failed"),
           "workspace test human: member aggregate summary");
@@ -1192,11 +1192,11 @@ void test_workspace_human_output() {
 void test_workspace_human_fail_fast_summary() {
     auto result = run_self_fixture("workspace-test-failfast");
     check(result.exit_code == 1, "workspace test fail-fast: exit code");
-    check(result.stdout_text.contains("==> member app (app)"),
+    check(result.stdout_text.contains("RUN     member app (app)"),
           "workspace test fail-fast: first member ran");
-    check(result.stdout_text.contains("==> member broken (broken)"),
+    check(result.stdout_text.contains("RUN     member broken (broken)"),
           "workspace test fail-fast: failing member ran");
-    check(!result.stdout_text.contains("==> member after (after)"),
+    check(!result.stdout_text.contains("RUN     member after (after)"),
           "workspace test fail-fast: later member skipped after failure");
     check(result.stdout_text.contains("members   2 run, 1 passed, 1 failed"),
           "workspace test fail-fast: executed member summary");

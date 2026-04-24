@@ -52,7 +52,7 @@ int main(int argc, char* argv[]) {
     if (command == "fmt")
         return commands::cmd_fmt();
 
-    std::println(std::cerr, "unknown command: {}", command);
+    auto rc = commands::unknown_command(command);
     std::print(std::cerr, "{}", commands::usage_text());
-    return 1;
+    return rc;
 }

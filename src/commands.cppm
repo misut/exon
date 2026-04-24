@@ -17,6 +17,7 @@ import lock;
 import lock.system;
 import reporting;
 import reporting.system;
+import terminal;
 import templates;
 import toolchain;
 import toolchain.system;
@@ -82,6 +83,63 @@ std::string usage_text() {
             {"aarch64-linux-android", "Android arm64 (requires android-ndk via intron or ANDROID_NDK_HOME)"},
         }},
     });
+}
+
+std::span<std::string_view const> command_names() {
+    static constexpr auto names = std::array<std::string_view, 15>{
+        "init", "new", "info", "build", "check", "run", "debug", "test",
+        "clean", "add", "remove", "update", "sync", "fmt", "version",
+    };
+    return std::span{names};
+}
+
+std::size_t edit_distance(std::string_view lhs, std::string_view rhs) {
+    auto previous = std::vector<std::size_t>(rhs.size() + 1);
+    auto current = std::vector<std::size_t>(rhs.size() + 1);
+    std::iota(previous.begin(), previous.end(), std::size_t{0});
+
+    for (std::size_t i = 0; i < lhs.size(); ++i) {
+        current[0] = i + 1;
+        for (std::size_t j = 0; j < rhs.size(); ++j) {
+            auto substitution = previous[j] + (lhs[i] == rhs[j] ? 0 : 1);
+            current[j + 1] = std::min({
+                previous[j + 1] + 1,
+                current[j] + 1,
+                substitution,
+            });
+        }
+        std::swap(previous, current);
+    }
+    return previous.back();
+}
+
+std::optional<std::string_view> suggest_command(std::string_view command) {
+    std::optional<std::string_view> best;
+    auto best_distance = std::numeric_limits<std::size_t>::max();
+    for (auto name : command_names()) {
+        auto distance = edit_distance(command, name);
+        if (distance < best_distance) {
+            best = name;
+            best_distance = distance;
+        }
+    }
+    if (best && best_distance <= 2)
+        return best;
+    return std::nullopt;
+}
+
+int unknown_command(std::string_view command) {
+    auto diag = reporting::Diagnostic{
+        .message = std::format("unknown command: {}", command),
+    };
+    if (auto suggestion = suggest_command(command))
+        diag.hints.push_back(std::format("did you mean '{}'?", *suggestion));
+    return reporting::emit(diag, reporting::system::stderr_is_tty());
+}
+
+void print_status(terminal::StatusKind status, std::string_view message) {
+    std::println("{} {}", terminal::status_cell(
+                     status, reporting::system::stdout_is_tty()), message);
 }
 
 manifest::Manifest load_manifest(std::filesystem::path const& project_root) {
@@ -454,7 +512,7 @@ int sync_workspace_member_cmake(WorkspaceMember const& member,
     });
     write_text(member.path / "CMakeLists.txt",
                build::generate_portable_cmake(member.raw_manifest, member.path, fetch_result.deps));
-    std::println("synced CMakeLists.txt");
+    print_status(terminal::StatusKind::ok, "synced CMakeLists.txt");
     return 0;
 }
 
@@ -465,7 +523,7 @@ int sync_workspace_root_cmake(std::filesystem::path const& workspace_root,
         return 0;
     write_text(workspace_root / "CMakeLists.txt",
                generate_workspace_root_cmake(workspace_root, workspace_root, selection.members));
-    std::println("synced CMakeLists.txt");
+    print_status(terminal::StatusKind::ok, "synced CMakeLists.txt");
     return 0;
 }
 
@@ -636,7 +694,10 @@ int run_workspace_build(std::filesystem::path const& workspace_root,
         };
         auto workspace_name = workspace_build_manifest(workspace_root, selection.members).name;
         build::system::detail::print_header("build", workspace_name, project);
-        build::system::detail::print_stage("resolve");
+        if (options.output == reporting::OutputMode::human)
+            build::system::detail::print_human_stage("resolve", 1, 5);
+        else
+            build::system::detail::print_stage("resolve");
         try {
             auto execution = prepare_workspace_build_execution(
                 workspace_root, workspace_manifest, selection, release, target);
@@ -865,8 +926,9 @@ int cmd_init(int argc, char* argv[]) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
     }
-    std::println("created {} ({})", manifest_path.string(),
-                 is_workspace ? "workspace" : (is_lib ? "lib" : "bin"));
+    print_status(terminal::StatusKind::ok,
+                 std::format("created {} ({})", manifest_path.string(),
+                             is_workspace ? "workspace" : (is_lib ? "lib" : "bin")));
     return 0;
 }
 
@@ -897,8 +959,10 @@ int cmd_new(int argc, char* argv[]) {
 
         create_package_files(target_dir, member_name, is_lib);
         update_workspace_members_list(workspace_root, member_name);
-        std::println("created {} ({})", (target_dir / "exon.toml").string(),
-                     is_lib ? "lib" : "bin");
+        print_status(terminal::StatusKind::ok,
+                     std::format("created {} ({})",
+                                 (target_dir / "exon.toml").string(),
+                                 is_lib ? "lib" : "bin"));
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
@@ -917,25 +981,26 @@ int cmd_info() {
                 m = manifest::apply_workspace_defaults(std::move(m), workspace_manifest);
             }
         }
-        std::println("name: {}", m.name);
-        std::println("version: {}", m.version);
+        std::println("{}", terminal::section("package", reporting::system::stdout_is_tty()));
+        std::println("{}", terminal::key_value("name", m.name));
+        std::println("{}", terminal::key_value("version", m.version));
         if (!m.description.empty())
-            std::println("description: {}", m.description);
+            std::println("{}", terminal::key_value("description", m.description));
         if (!m.authors.empty()) {
-            std::print("authors: ");
+            std::string authors;
             for (std::size_t i = 0; i < m.authors.size(); ++i) {
                 if (i > 0)
-                    std::print(", ");
-                std::print("{}", m.authors[i]);
+                    authors += ", ";
+                authors += m.authors[i];
             }
-            std::println("");
+            std::println("{}", terminal::key_value("authors", authors));
         }
         if (!m.license.empty())
-            std::println("license: {}", m.license);
-        std::println("type: {}", m.type);
-        std::println("standard: C++{}", m.standard);
+            std::println("{}", terminal::key_value("license", m.license));
+        std::println("{}", terminal::key_value("type", m.type));
+        std::println("{}", terminal::key_value("standard", std::format("C++{}", m.standard)));
         auto host = toolchain::detect_host_platform();
-        std::println("host: {}", host.to_string());
+        std::println("{}", terminal::key_value("host", host.to_string()));
         if (!m.platforms.empty()) {
             std::println("platforms:");
             for (auto const& p : m.platforms) {
@@ -1003,7 +1068,8 @@ int run_build_command(int argc, char* argv[], BuildFn fn) {
 
 void print_workspace_human_member_header(std::filesystem::path const& workspace_root,
                                          WorkspaceMember const& member) {
-    std::println("==> member {}", workspace_display_name(member, workspace_root));
+    print_status(terminal::StatusKind::run,
+                 std::format("member {}", workspace_display_name(member, workspace_root)));
 }
 
 struct WorkspaceTestAggregate {
@@ -1307,9 +1373,9 @@ int cmd_clean(int argc, char* argv[]) {
                     auto dir = member.path / ".exon";
                     if (std::filesystem::exists(dir)) {
                         std::filesystem::remove_all(dir);
-                        std::println("cleaned .exon/");
+                        print_status(terminal::StatusKind::ok, "cleaned .exon/");
                     } else {
-                        std::println("nothing to clean");
+                        print_status(terminal::StatusKind::skip, "nothing to clean");
                     }
                     return 0;
                 });
@@ -1318,7 +1384,7 @@ int cmd_clean(int argc, char* argv[]) {
                 auto workspace_exon_dir = project_root / ".exon";
                 if (std::filesystem::exists(workspace_exon_dir)) {
                     std::filesystem::remove_all(workspace_exon_dir);
-                    std::println("cleaned workspace .exon/");
+                    print_status(terminal::StatusKind::ok, "cleaned workspace .exon/");
                 }
                 return 0;
             }
@@ -1332,9 +1398,9 @@ int cmd_clean(int argc, char* argv[]) {
     auto exon_dir = project_root / ".exon";
     if (std::filesystem::exists(exon_dir)) {
         std::filesystem::remove_all(exon_dir);
-        std::println("cleaned .exon/");
+        print_status(terminal::StatusKind::ok, "cleaned .exon/");
     } else {
-        std::println("nothing to clean");
+        print_status(terminal::StatusKind::skip, "nothing to clean");
     }
     return 0;
 }
@@ -1511,7 +1577,7 @@ int cmd_add(int argc, char* argv[]) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
     }
-    std::println("added {}", display);
+    print_status(terminal::StatusKind::ok, std::format("added {}", display));
     return 0;
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
@@ -1562,7 +1628,7 @@ int cmd_remove(int argc, char* argv[]) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;
     }
-    std::println("removed {}", pkg);
+    print_status(terminal::StatusKind::ok, std::format("removed {}", pkg));
 
     auto lock_path = project_root / "exon.lock";
     if (std::filesystem::exists(lock_path)) {
@@ -1598,7 +1664,7 @@ int cmd_update(int argc, char* argv[]) {
                 if (std::filesystem::exists(lock_path))
                     std::filesystem::remove(lock_path);
                 if (!manifest_has_any_dependencies(member.raw_manifest)) {
-                    std::println("no dependencies to update");
+                    print_status(terminal::StatusKind::skip, "no dependencies to update");
                     return 0;
                 }
                 return build::system::run(member.path, member.resolved_manifest, member.raw_manifest);
@@ -1612,7 +1678,7 @@ int cmd_update(int argc, char* argv[]) {
             std::filesystem::remove(lock_path);
 
         if (!manifest_has_any_dependencies(m)) {
-            std::println("no dependencies to update");
+            print_status(terminal::StatusKind::skip, "no dependencies to update");
             return 0;
         }
 
@@ -1677,7 +1743,7 @@ int cmd_fmt() {
     }
 
     if (files.empty()) {
-        std::println("no source files to format");
+        print_status(terminal::StatusKind::skip, "no source files to format");
         return 0;
     }
 
@@ -1694,7 +1760,8 @@ int cmd_fmt() {
         std::println(std::cerr, "error: clang-format failed (is it installed?)");
         return 1;
     }
-    std::println("formatted {} file(s)", files.size());
+    print_status(terminal::StatusKind::ok,
+                 std::format("formatted {} file(s)", files.size()));
     return 0;
 }
 

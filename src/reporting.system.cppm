@@ -17,6 +17,8 @@ export module reporting.system;
 import std;
 import core;
 import reporting;
+import terminal;
+import terminal.system;
 
 export namespace reporting::system {
 
@@ -59,21 +61,11 @@ public:
     void stop();
 
 private:
-    void render_once();
-    void clear_line();
+    explicit LiveProgressRenderer(
+        std::unique_ptr<terminal::system::LiveProgressRenderer> renderer);
+    friend std::unique_ptr<LiveProgressRenderer> make_live_progress_renderer();
 
-    LiveProgressRenderMode mode_ = LiveProgressRenderMode::disabled;
-    ProgressSource source_{};
-    std::thread thread_;
-    std::atomic<bool> stop_requested_ = false;
-    std::size_t spinner_index_ = 0;
-    std::size_t last_width_ = 0;
-    bool cursor_hidden_ = false;
-#if defined(_WIN32)
-    HANDLE handle_ = nullptr;
-    DWORD original_console_mode_ = 0;
-    bool restore_console_mode_ = false;
-#endif
+    std::unique_ptr<terminal::system::LiveProgressRenderer> renderer_;
 };
 
 std::unique_ptr<LiveProgressRenderer> make_live_progress_renderer();
@@ -82,66 +74,32 @@ std::unique_ptr<LiveProgressRenderer> make_live_progress_renderer();
 
 namespace reporting::system {
 
-namespace tty_detail {
-
-bool no_color_requested() {
-    auto const* value = std::getenv("NO_COLOR");
-    return value != nullptr && value[0] != '\0';
-}
-
-} // namespace tty_detail
-
 #if defined(_WIN32)
 
 void enable_vt_on_windows() {
-    auto enable = [](DWORD stream) {
-        auto handle = GetStdHandle(stream);
-        if (handle == INVALID_HANDLE_VALUE || handle == nullptr)
-            return;
-        DWORD mode = 0;
-        if (!GetConsoleMode(handle, &mode))
-            return;
-        (void)SetConsoleMode(handle, mode | ENABLE_PROCESSED_OUTPUT |
-                                         ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-    };
-    enable(STD_OUTPUT_HANDLE);
-    enable(STD_ERROR_HANDLE);
+    terminal::system::enable_vt_on_windows();
 }
 
 bool stdout_is_tty() {
-    if (tty_detail::no_color_requested())
-        return false;
-    auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (handle == INVALID_HANDLE_VALUE || handle == nullptr)
-        return false;
-    DWORD mode = 0;
-    return GetConsoleMode(handle, &mode) != 0;
+    return terminal::system::stdout_is_tty();
 }
 
 bool stderr_is_tty() {
-    if (tty_detail::no_color_requested())
-        return false;
-    auto handle = GetStdHandle(STD_ERROR_HANDLE);
-    if (handle == INVALID_HANDLE_VALUE || handle == nullptr)
-        return false;
-    DWORD mode = 0;
-    return GetConsoleMode(handle, &mode) != 0;
+    return terminal::system::stderr_is_tty();
 }
 
 #else
 
-void enable_vt_on_windows() {}
+void enable_vt_on_windows() {
+    terminal::system::enable_vt_on_windows();
+}
 
 bool stdout_is_tty() {
-    if (tty_detail::no_color_requested())
-        return false;
-    return ::isatty(STDOUT_FILENO) != 0;
+    return terminal::system::stdout_is_tty();
 }
 
 bool stderr_is_tty() {
-    if (tty_detail::no_color_requested())
-        return false;
-    return ::isatty(STDERR_FILENO) != 0;
+    return terminal::system::stderr_is_tty();
 }
 
 #endif
@@ -732,31 +690,48 @@ ProcessResult run_process(core::ProcessSpec const& spec, StreamMode mode,
     return detail::run_passthrough(spec);
 }
 
-namespace progress_detail {
-
-constexpr auto spinner_frames =
-    std::array<std::string_view, 4>{"|", "/", "-", "\\"};
-
-void write_raw(std::string_view text) {
-    std::fwrite(text.data(), 1, text.size(), stdout);
-}
-
-} // namespace progress_detail
-
 std::string format_progress_frame(ProgressSnapshot const& snapshot,
                                   std::size_t frame_index) {
-    auto spin = progress_detail::spinner_frames
-        [frame_index % progress_detail::spinner_frames.size()];
-    if (snapshot.total <= 0) {
-        auto label = snapshot.label.empty() ? std::string_view{"working"}
-                                            : snapshot.label;
-        return std::format("  [{}] {}...", spin, label);
+    return terminal::format_progress_frame({
+        .done = snapshot.done,
+        .total = snapshot.total,
+        .percent = snapshot.percent,
+        .label = snapshot.label,
+    }, frame_index, stdout_is_tty());
+}
+
+terminal::system::LiveProgressRenderMode to_terminal_mode(
+    LiveProgressRenderMode mode) {
+    switch (mode) {
+    case LiveProgressRenderMode::disabled:
+        return terminal::system::LiveProgressRenderMode::disabled;
+    case LiveProgressRenderMode::carriage_return:
+        return terminal::system::LiveProgressRenderMode::carriage_return;
+    case LiveProgressRenderMode::vt:
+        return terminal::system::LiveProgressRenderMode::vt;
     }
-    if (snapshot.label.empty())
-        return std::format("  [{}] [{}/{} {}%]", spin, snapshot.done,
-                           snapshot.total, snapshot.percent);
-    return std::format("  [{}] [{}/{} {}%] {}", spin, snapshot.done,
-                       snapshot.total, snapshot.percent, snapshot.label);
+    return terminal::system::LiveProgressRenderMode::disabled;
+}
+
+terminal::system::ProgressSource to_terminal_source(ProgressSource source) {
+    return terminal::system::ProgressSource{
+        .poll = [source = std::move(source)]() mutable
+            -> std::optional<terminal::ProgressSnapshot> {
+            if (!source.poll)
+                return std::nullopt;
+
+            auto snapshot = source.poll();
+            if (!snapshot)
+                return std::nullopt;
+
+            return terminal::ProgressSnapshot{
+                .done = snapshot->done,
+                .total = snapshot->total,
+                .percent = snapshot->percent,
+                .label = snapshot->label,
+            };
+        },
+    };
 }
 
 LiveProgressRenderer::LiveProgressRenderer(LiveProgressRenderMode mode
@@ -767,135 +742,48 @@ LiveProgressRenderer::LiveProgressRenderer(LiveProgressRenderMode mode
                                            bool restore_console_mode
 #endif
                                            )
-    : mode_(mode)
+    : renderer_(std::make_unique<terminal::system::LiveProgressRenderer>(
+          to_terminal_mode(mode)
 #if defined(_WIN32)
-    , handle_(handle)
-    , original_console_mode_(original_console_mode)
-    , restore_console_mode_(restore_console_mode)
+          ,
+          handle, original_console_mode, restore_console_mode
 #endif
-{}
+          )) {}
+
+LiveProgressRenderer::LiveProgressRenderer(
+    std::unique_ptr<terminal::system::LiveProgressRenderer> renderer)
+    : renderer_(std::move(renderer)) {}
 
 LiveProgressRenderer::~LiveProgressRenderer() {
     stop();
-#if defined(_WIN32)
-    if (restore_console_mode_ && handle_ != INVALID_HANDLE_VALUE && handle_ != nullptr) {
-        SetConsoleMode(handle_, original_console_mode_);
-        restore_console_mode_ = false;
-    }
-#endif
 }
 
 bool LiveProgressRenderer::active() const {
-    return mode_ != LiveProgressRenderMode::disabled;
+    return renderer_ != nullptr && renderer_->active();
 }
 
 void LiveProgressRenderer::start(ProgressSource source) {
-    if (!active() || thread_.joinable())
+    if (!active())
         return;
-    source_ = std::move(source);
-    stop_requested_.store(false, std::memory_order_relaxed);
-    thread_ = std::thread([this] {
-        while (!stop_requested_.load(std::memory_order_relaxed)) {
-            render_once();
-            std::this_thread::sleep_for(std::chrono::milliseconds{100});
-        }
-    });
+    renderer_->start(to_terminal_source(std::move(source)));
 }
 
 void LiveProgressRenderer::refresh() {
-    if (!active())
-        return;
-    render_once();
+    if (renderer_)
+        renderer_->refresh();
 }
 
 void LiveProgressRenderer::stop() {
-    if (thread_.joinable()) {
-        stop_requested_.store(true, std::memory_order_relaxed);
-        thread_.join();
-    }
-
-    clear_line();
-}
-
-void LiveProgressRenderer::render_once() {
-    if (!source_.poll)
-        return;
-
-    auto progress = source_.poll();
-    if (!progress)
-        return;
-
-    auto text = format_progress_frame(*progress, spinner_index_++);
-    if (mode_ == LiveProgressRenderMode::vt) {
-        if (!cursor_hidden_) {
-            progress_detail::write_raw("\x1b[?25l");
-            cursor_hidden_ = true;
-        }
-        progress_detail::write_raw("\r\x1b[2K");
-        progress_detail::write_raw(text);
-        std::fflush(stdout);
-        last_width_ = 0;
-        return;
-    }
-
-    progress_detail::write_raw("\r");
-    progress_detail::write_raw(text);
-    if (text.size() < last_width_) {
-        auto padding = std::string(last_width_ - text.size(), ' ');
-        progress_detail::write_raw(padding);
-    }
-    std::fflush(stdout);
-    last_width_ = text.size();
-}
-
-void LiveProgressRenderer::clear_line() {
-    if (!active())
-        return;
-
-    if (mode_ == LiveProgressRenderMode::vt) {
-        if (!cursor_hidden_)
-            return;
-        progress_detail::write_raw("\r\x1b[2K\x1b[?25h");
-        std::fflush(stdout);
-        cursor_hidden_ = false;
-        return;
-    }
-
-    if (last_width_ == 0)
-        return;
-
-    progress_detail::write_raw("\r");
-    auto padding = std::string(last_width_, ' ');
-    progress_detail::write_raw(padding);
-    progress_detail::write_raw("\r");
-    std::fflush(stdout);
-    last_width_ = 0;
+    if (renderer_)
+        renderer_->stop();
 }
 
 std::unique_ptr<LiveProgressRenderer> make_live_progress_renderer() {
-#if defined(_WIN32)
-    if (!stdout_is_tty())
+    auto renderer = terminal::system::make_live_progress_renderer();
+    if (!renderer)
         return {};
-
-    auto handle = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (handle == INVALID_HANDLE_VALUE || handle == nullptr)
-        return {};
-
-    DWORD mode = 0;
-    if (!GetConsoleMode(handle, &mode))
-        return {};
-
-    auto vt_mode = mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-    if (SetConsoleMode(handle, vt_mode)) {
-        return std::make_unique<LiveProgressRenderer>(LiveProgressRenderMode::vt, handle,
-                                                      mode, true);
-    }
-    return std::make_unique<LiveProgressRenderer>(LiveProgressRenderMode::carriage_return);
-#else
-    if (!stdout_is_tty())
-        return {};
-    return std::make_unique<LiveProgressRenderer>(LiveProgressRenderMode::carriage_return);
-#endif
+    return std::unique_ptr<LiveProgressRenderer>(
+        new LiveProgressRenderer(std::move(renderer)));
 }
 
 } // namespace reporting::system
