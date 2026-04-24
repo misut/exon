@@ -16,6 +16,7 @@ import manifest;
 import manifest.system;
 import reporting;
 import reporting.system;
+import terminal;
 import toml;
 import toolchain;
 import toolchain.system;
@@ -543,22 +544,15 @@ std::string command_text(core::ProcessSpec const& spec) {
 }
 
 std::string tail_excerpt(std::string_view text, std::size_t max_chars = 2000) {
-    if (text.empty() || text.size() <= max_chars)
-        return std::string{text};
-
-    auto start = text.size() - max_chars;
-    if (auto line_start = text.find('\n', start); line_start != std::string_view::npos &&
-        line_start + 1 < text.size()) {
-        start = line_start + 1;
-    }
-    return std::format("...\n{}", text.substr(start));
+    return terminal::tail_excerpt(text, max_chars);
 }
 
 void print_output_block(std::string_view heading, std::string_view text) {
     if (text.empty())
         return;
     write_line(stdout);
-    write_formatted_line(stdout, "---- {} ----", heading);
+    write_line(stdout, terminal::output_block_header(
+        heading, reporting::system::stdout_is_tty()));
     write_stream(stdout, text);
     if (!text.ends_with('\n'))
         write_line(stdout);
@@ -566,9 +560,12 @@ void print_output_block(std::string_view heading, std::string_view text) {
 
 void print_header(std::string_view verb, std::string_view name,
                   core::ProjectContext const& project) {
-    write_formatted_line(stdout, "exon: {} {} ({})", verb, name, profile_label(project));
-    write_formatted_line(stdout, "  target    {}", target_label(project));
-    write_formatted_line(stdout, "  build dir {}", display_path(project.build_dir, project.root));
+    auto color = reporting::system::stdout_is_tty();
+    write_line(stdout, terminal::section(std::format("exon {} {}", verb, name), color));
+    write_line(stdout, terminal::key_value("profile", profile_label(project)));
+    write_line(stdout, terminal::key_value("target", target_label(project)));
+    write_line(stdout, terminal::key_value("build dir",
+                                           display_path(project.build_dir, project.root)));
     write_line(stdout);
 }
 
@@ -579,6 +576,12 @@ void print_stage(std::string_view stage) {
     }
     write_formatted_line(stdout, "==> [{}] {}", reporting::current_stage_context,
                          stage);
+}
+
+void print_human_stage(std::string_view stage, int index, int total) {
+    write_line(stdout, terminal::stage(stage, index, total,
+                                       reporting::current_stage_context,
+                                       reporting::system::stdout_is_tty()));
 }
 
 void print_failure_summary(std::string_view verb, std::string_view stage,
@@ -871,12 +874,11 @@ reporting::ProgressSource as_progress_source(TestProgressCounter const& counter)
 
 std::string format_test_status_cell(reporting::ProcessResult const& result,
                                     bool color_enabled) {
-    auto padded = std::format("{:<7}", reporting::test_status(result));
-    auto failing = result.timed_out || result.exit_code != 0;
-    if (!failing || !color_enabled)
-        return padded;
-    return std::format("{}{}{}", reporting::ansi::red, padded,
-                       reporting::ansi::reset);
+    if (result.timed_out)
+        return terminal::status_cell(terminal::StatusKind::timeout, color_enabled);
+    if (result.exit_code == 0)
+        return terminal::status_cell(terminal::StatusKind::ok, color_enabled);
+    return terminal::status_cell(terminal::StatusKind::fail, color_enabled);
 }
 
 void print_failure_excerpt(core::ProcessStep const& step,
@@ -900,8 +902,10 @@ void print_wrapped_rerun_hint() {
 
 std::optional<StepFailure> run_steps_human(std::vector<core::ProcessStep> const& steps,
                                            std::string_view stage,
-                                           bool use_ninja_status = false) {
-    print_stage(stage);
+                                           bool use_ninja_status = false,
+                                           int stage_index = 0,
+                                           int stage_total = 0) {
+    print_human_stage(stage, stage_index, stage_total);
     for (auto const& step : steps) {
         auto observer = reporting::system::OutputObserver{};
         auto renderer = std::unique_ptr<reporting::system::LiveProgressRenderer>{};
@@ -936,8 +940,10 @@ std::optional<StepFailure> run_steps_human(std::vector<core::ProcessStep> const&
 }
 
 std::optional<StepFailure> run_configure_steps_human(std::vector<core::ProcessStep> const& steps,
-                                                     build::BuildRequest const& request) {
-    print_stage("configure");
+                                                     build::BuildRequest const& request,
+                                                     int stage_index = 0,
+                                                     int stage_total = 0) {
+    print_human_stage("configure", stage_index, stage_total);
     maybe_print_windows_native_toolchain_warning(request);
     for (auto const& step : steps) {
         auto result = run_step(step, reporting::StreamMode::capture);
@@ -979,7 +985,9 @@ void print_human_test_outputs(std::vector<TestRunRecord> const& records,
     write_line(stdout, show_output == reporting::ShowOutput::all ? "Output:" : "Failures:");
     for (auto const* record : selected) {
         write_line(stdout);
-        write_formatted_line(stdout, "{} {}", reporting::test_status(record->result), record->name);
+        write_formatted_line(stdout, "{} {}", format_test_status_cell(
+                             record->result, reporting::system::stdout_is_tty()),
+                             record->name);
         if (!record->result.stdout_text.empty()) {
             write_formatted_line(stdout, "---- output: {} (stdout) ----", record->name);
             write_stream(stdout, record->result.stdout_text);
@@ -1296,21 +1304,21 @@ int run_build_human(build::BuildRequest const& request, build::BuildPlan const& 
                     std::chrono::steady_clock::time_point started,
                     std::optional<std::filesystem::path> success_path = std::nullopt,
                     std::string_view success_label = "artifact") {
-    print_stage("sync");
+    print_human_stage("sync", 2, 5);
     auto changed = apply_writes(plan.writes, false);
     write_formatted_line(stdout, "  {}",
                          changed ? "generated build files" : "build files up to date");
 
     if (changed || !plan.configured) {
-        if (auto failure = run_configure_steps_human(plan.configure_steps, request))
+        if (auto failure = run_configure_steps_human(plan.configure_steps, request, 3, 5))
             return finish_human_failure(verb, "configure", request, failure->step,
                                         failure->result, started);
     } else {
-        print_stage("configure");
+        print_human_stage("configure", 3, 5);
         write_line(stdout, "  cached");
     }
 
-    if (auto failure = run_steps_human(plan.build_steps, "build", true))
+    if (auto failure = run_steps_human(plan.build_steps, "build", true, 4, 5))
         return finish_human_failure(verb, "build", request, failure->step,
                                     failure->result, started);
 
@@ -1319,7 +1327,10 @@ int run_build_human(build::BuildRequest const& request, build::BuildPlan const& 
     auto location = success_path.value_or(request.project.build_dir / request.manifest.name);
     if (!success_path && !request.project.is_wasm)
         location += toolchain::exe_suffix;
-    print_build_finish(location, request.project, elapsed, success_label);
+    print_human_stage("finish", 5, 5);
+    write_formatted_line(stdout, "  {:<9} {}", success_label,
+                         display_path(location, request.project.root));
+    write_formatted_line(stdout, "  elapsed   {}", reporting::format_duration(elapsed));
     return 0;
 }
 
@@ -1365,21 +1376,21 @@ int run_test_human(build::BuildRequest const& request, build::BuildPlan const& p
                    reporting::Options const& options,
                    std::chrono::steady_clock::time_point started,
                    TestRunSummary& summary) {
-    print_stage("sync");
+    print_human_stage("sync", 2, 5);
     auto changed = apply_writes(plan.writes, false);
     write_formatted_line(stdout, "  {}",
                          changed ? "generated build files" : "build files up to date");
 
     if (changed || !plan.configured) {
-        if (auto failure = run_configure_steps_human(plan.configure_steps, request))
+        if (auto failure = run_configure_steps_human(plan.configure_steps, request, 3, 5))
             return finish_human_failure("test", "configure", request, failure->step,
                                         failure->result, started);
     } else {
-        print_stage("configure");
+        print_human_stage("configure", 3, 5);
         write_line(stdout, "  cached");
     }
 
-    if (auto failure = run_steps_human(plan.build_steps, "build", true))
+    if (auto failure = run_steps_human(plan.build_steps, "build", true, 4, 5))
         return finish_human_failure("test", "build", request, failure->step,
                                     failure->result, started);
 
@@ -1388,7 +1399,7 @@ int run_test_human(build::BuildRequest const& request, build::BuildPlan const& p
     int failed = 0;
     int timed_out = 0;
 
-    print_stage("run");
+    print_human_stage("run", 5, 5);
     write_formatted_line(stdout, "  collected {} test binaries", plan.run_steps.size());
 
     auto color_enabled = reporting::system::stdout_is_tty();
@@ -1484,7 +1495,10 @@ inline int run(std::filesystem::path const& project_root, manifest::Manifest con
         auto started = std::chrono::steady_clock::now();
         auto project = build::project_context(project_root, release, target);
         detail::print_header("build", m.name, project);
-        detail::print_stage("resolve");
+        if (options.output == reporting::OutputMode::human)
+            detail::print_human_stage("resolve", 1, 5);
+        else
+            detail::print_stage("resolve");
         try {
             auto request = detail::prepare_request(project_root, m, release, target, false, {},
                                                    {});
@@ -1540,7 +1554,10 @@ inline int run(std::filesystem::path const& project_root, manifest::Manifest con
         auto started = std::chrono::steady_clock::now();
         auto project = build::project_context(project_root, release, target);
         detail::print_header("build", m.name, project);
-        detail::print_stage("resolve");
+        if (options.output == reporting::OutputMode::human)
+            detail::print_human_stage("resolve", 1, 5);
+        else
+            detail::print_stage("resolve");
         try {
             auto request = detail::prepare_request(project_root, m, portable_manifest, release,
                                                    target, false, {}, {});
@@ -1670,7 +1687,10 @@ inline int run_test(std::filesystem::path const& project_root,
         auto started = std::chrono::steady_clock::now();
         auto project = build::project_context(project_root, release, target);
         detail::print_header("test", m.name, project);
-        detail::print_stage("resolve");
+        if (options.output == reporting::OutputMode::human)
+            detail::print_human_stage("resolve", 1, 5);
+        else
+            detail::print_stage("resolve");
         try {
             auto request = detail::prepare_request(project_root, m, release, target, true, filter,
                                                    timeout);
@@ -1749,7 +1769,10 @@ inline int run_test(std::filesystem::path const& project_root,
         auto started = std::chrono::steady_clock::now();
         auto project = build::project_context(project_root, release, target);
         detail::print_header("test", m.name, project);
-        detail::print_stage("resolve");
+        if (options.output == reporting::OutputMode::human)
+            detail::print_human_stage("resolve", 1, 5);
+        else
+            detail::print_stage("resolve");
         try {
             auto request = detail::prepare_request(project_root, m, portable_manifest, release,
                                                    target, true, filter, timeout);

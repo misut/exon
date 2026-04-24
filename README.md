@@ -282,11 +282,11 @@ ldflags = ["/fsanitize=address"]
 
 When these flags are present, exon now copies `clang_rt.asan_dynamic-x86_64.dll` next to each built executable and test binary. This makes direct execution from `.exon/debug/` work without manually editing `PATH`.
 
-`exon build` and `exon test` default to `human` output. In an interactive terminal, `human` shows a live spinner plus `[finished/total percent%]` progress while keeping the console focused on stage headers and final summaries. The same path also adds minimal ANSI styling for `error:` diagnostics and failing `FAILED` / `TIMEOUT` test statuses. When stdout is not a TTY, `human` falls back to the same static stage-oriented summaries. `wrapped` adds the same headers while still showing the underlying CMake/Ninja/test output, and `raw` keeps exon wrapping to a minimum.
+`exon build` and `exon test` default to `human` output. In an interactive terminal, `human` shows indexed stages such as `[1/5] resolve`, fixed-width status cells such as `OK`, `FAIL`, and `TIMEOUT`, and a single-line live progress renderer for long build or test phases. The same path uses restrained ANSI styling for status and `error:` diagnostics. When stdout is not a TTY, `human` falls back to the same plain ASCII, stage-oriented summaries. `wrapped` adds the same command framing while still showing the underlying CMake/Ninja/test output, and `raw` keeps exon wrapping to a minimum.
 
 Set `NO_COLOR=1` to force plain output and disable the interactive progress renderer even in a TTY session.
 
-Workspace builds and tests also keep the active member inline in each stage header. For example, a selected member can render stages such as `==> [hello (apps/hello)] fetch` and `==> [hello (apps/hello)] build` instead of a separate member divider.
+Workspace builds keep the active member inline in each indexed stage header, for example `[4/5] [hello (apps/hello)] build`. Workspace tests use the same status-cell style for member dividers, for example `RUN     member hello (apps/hello)`.
 
 `exon test --show-output failed` (default) only shows captured stdout/stderr for failing or timed-out test binaries. Use `--show-output all` to always print captured output, or `--show-output none` to suppress it entirely.
 

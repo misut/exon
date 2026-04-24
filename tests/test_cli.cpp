@@ -186,6 +186,14 @@ void test_commands_reporting_defaults() {
           "commands default show-output is failed");
 }
 
+void test_commands_suggest_unknown_command() {
+    auto suggestion = commands::suggest_command("udpate");
+    check(suggestion && *suggestion == "update",
+          "commands suggest close command names");
+    check(!commands::suggest_command("zzzzzz").has_value(),
+          "commands ignore distant command names");
+}
+
 void test_readme_output_docs_match_usage() {
     auto readme = read_text(std::filesystem::current_path() / "README.md");
     check(readme.find(
@@ -215,9 +223,9 @@ void test_readme_output_docs_match_usage() {
           "README documents non-tty fallback");
     check(readme.find("NO_COLOR=1") != std::string::npos,
           "README documents NO_COLOR override");
-    check(readme.find("==> [hello (apps/hello)] build") != std::string::npos,
+    check(readme.find("[4/5] [hello (apps/hello)] build") != std::string::npos,
           "README documents workspace member stage labels");
-    check(readme.find("`wrapped` adds the same headers while still showing the underlying "
+    check(readme.find("`wrapped` adds the same command framing while still showing the underlying "
                       "CMake/Ninja/test output") != std::string::npos,
           "README documents wrapped behavior");
     check(readme.find("`raw` keeps exon wrapping to a minimum") != std::string::npos,
@@ -248,6 +256,7 @@ int main() {
     test_commands_usage_lists_debug();
     test_commands_usage_lists_human_output_mode();
     test_commands_reporting_defaults();
+    test_commands_suggest_unknown_command();
     test_readme_output_docs_match_usage();
 
     if (failures > 0) {
