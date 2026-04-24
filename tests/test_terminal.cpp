@@ -46,6 +46,29 @@ void test_progress_frame() {
           "progress frame uses status cell and spinner");
 }
 
+std::string active_char(char ch) {
+    return std::format("\x1b[1m\x1b[36m{}\x1b[0m", ch);
+}
+
+std::string dim_char(char ch) {
+    return std::format("\x1b[2m{}\x1b[0m", ch);
+}
+
+void test_shimmer_label() {
+    check(terminal::shimmer_label("build", 0, false) == "build",
+          "shimmer label falls back when color is disabled");
+
+    auto first = terminal::shimmer_label("build", 0, true);
+    check(first == active_char('b') + active_char('u') + dim_char('i') +
+                       dim_char('l') + dim_char('d'),
+          "shimmer label highlights from the left");
+
+    auto later = terminal::shimmer_label("build", 3, true);
+    check(later == dim_char('b') + dim_char('u') + dim_char('i') +
+                       active_char('l') + active_char('d'),
+          "shimmer label moves right");
+}
+
 int main() {
     std::println("test_terminal:");
     test_style_disabled();
@@ -53,6 +76,7 @@ int main() {
     test_key_value();
     test_stage();
     test_progress_frame();
+    test_shimmer_label();
 
     if (failures > 0) {
         std::println("test_terminal: {} FAILED", failures);

@@ -1044,6 +1044,39 @@ void test_live_progress_frame_format() {
     check(frame1 == "  RUN     [/] [12/56 21%]", "progress frame: second spinner frame");
 }
 
+void test_progress_source_labels() {
+    auto tracker = build::system::detail::NinjaProgressTracker{};
+    tracker.observe("[12/56 21%] Building CXX object foo.o\n", false);
+    auto build_source = build::system::detail::as_progress_source(tracker, "build");
+    auto build_snapshot = build_source.poll();
+    check(build_snapshot.has_value(), "build progress source: snapshot available");
+    check(build_snapshot && build_snapshot->label == "build",
+          "build progress source: label is build");
+
+    auto test_counter = build::system::detail::TestProgressCounter{};
+    test_counter.total = 3;
+    auto test_source = build::system::detail::as_progress_source(test_counter);
+    auto test_snapshot = test_source.poll();
+    check(test_snapshot.has_value(), "test progress source: snapshot available");
+    check(test_snapshot && test_snapshot->label == "test",
+          "test progress source: label is test");
+
+    auto empty_test_counter = build::system::detail::TestProgressCounter{};
+    auto empty_test_source = build::system::detail::as_progress_source(empty_test_counter);
+    auto empty_test_snapshot = empty_test_source.poll();
+    check(empty_test_snapshot && empty_test_snapshot->label == "test",
+          "empty test progress source: label is test");
+
+    auto configure_source = build::system::detail::indeterminate_progress_source("configure");
+    auto configure_snapshot = configure_source.poll();
+    check(configure_snapshot.has_value(),
+          "configure progress source: snapshot available");
+    check(configure_snapshot && configure_snapshot->total == 0,
+          "configure progress source: indeterminate");
+    check(configure_snapshot && configure_snapshot->label == "configure",
+          "configure progress source: label is configure");
+}
+
 void test_human_build_success_output() {
     auto result = run_self_fixture("build-success");
     check(result.exit_code == 0, "human build success: exit code");
@@ -1362,6 +1395,7 @@ int main(int argc, char* argv[]) {
     test_reporting_timeout_marks_result();
     test_ninja_progress_helpers();
     test_live_progress_frame_format();
+    test_progress_source_labels();
     test_human_build_success_output();
     test_human_build_cached_output();
     test_human_build_failure_output();
