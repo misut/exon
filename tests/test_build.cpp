@@ -1229,6 +1229,39 @@ void test_generate_cmake_no_build_flags_skipped() {
     std::filesystem::remove_all(temp);
 }
 
+void test_generate_cmake_cmake_deps_are_generic() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}");
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+    m.cmake_deps.emplace("glfw", manifest::CmakeDep{
+        .git = "https://github.com/glfw/glfw.git",
+        .tag = "3.4",
+        .targets = "glfw",
+        .options = {{"GLFW_BUILD_TESTS", "OFF"}},
+        .shallow = false,
+    });
+
+    auto cmake = build::generate_cmake(m, proj.root, {}, make_tc());
+
+    check(cmake.contains("FetchContent_Declare(glfw"),
+          "cmake deps: generic FetchContent emitted");
+    check(cmake.contains("GIT_REPOSITORY https://github.com/glfw/glfw.git"),
+          "cmake deps: repository emitted");
+    check(cmake.contains("set(GLFW_BUILD_TESTS OFF)"),
+          "cmake deps: options emitted before FetchContent");
+    check(!cmake.contains("GIT_SHALLOW ON"),
+          "cmake deps: shallow false omits GIT_SHALLOW");
+    auto legacy_name = std::string{"Da"} + "wn";
+    auto legacy_lower = std::string{"da"} + "wn";
+    check(!cmake.contains(legacy_name) && !cmake.contains(legacy_lower),
+          "cmake deps: no project-specific legacy text emitted");
+}
+
 // test: cmake_deps from a git dep are collected at root level and linked transitively
 void test_transitive_cmake_deps_from_git() {
     TmpProject proj;
@@ -1682,6 +1715,8 @@ int main() {
         test_generate_cmake_target_section_build_profiles);
     run("test_generate_cmake_no_build_flags_skipped",
         test_generate_cmake_no_build_flags_skipped);
+    run("test_generate_cmake_cmake_deps_are_generic",
+        test_generate_cmake_cmake_deps_are_generic);
     run("test_transitive_cmake_deps_from_git", test_transitive_cmake_deps_from_git);
     run("test_transitive_cmake_deps_from_path", test_transitive_cmake_deps_from_path);
     run("test_transitive_git_deps_linked", test_transitive_git_deps_linked);

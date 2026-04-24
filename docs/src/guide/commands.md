@@ -49,6 +49,8 @@ deploy the artifact to a device or emulator.
   `[dependencies.path]`
 - `exon add --workspace <name>` — add a workspace dep to
   `[dependencies.workspace]`
+- `exon add --cmake <name> --repo <url> --tag <tag> --targets <targets> [--option K=V] [--shallow false]`
+  — add a raw CMake `FetchContent` dep to `[dependencies.cmake.<name>]`
 - `exon add --dev ...` — write under `[dev-dependencies*]` instead
 - `exon remove <name>` — drop the dep entry from the manifest
 - `exon outdated [pkg...] [--member m[,n,...]] [--exclude x[,y,...]] [--output human|json]`
@@ -68,6 +70,24 @@ provider declares `[features]`, exon builds only the provider default plus the
 consumer-selected features; `--no-default-features` or
 `default-features = false` disables the provider default. The selected feature
 set is recorded in `exon.lock`.
+
+Raw CMake dependencies are fetched with CMake `FetchContent` and linked by
+their published target names. Options are emitted as `set(KEY VALUE)` before
+`FetchContent_Declare`, so projects can disable tests, examples, or docs:
+
+```toml
+[dependencies.cmake.glfw]
+git = "https://github.com/glfw/glfw.git"
+tag = "3.4"
+targets = "glfw"
+
+[dependencies.cmake.glfw.options]
+GLFW_BUILD_TESTS = "OFF"
+GLFW_BUILD_EXAMPLES = "OFF"
+```
+
+Use a commit hash in `tag` when reproducibility matters; remote tag or branch
+names can move.
 
 ## Generation
 

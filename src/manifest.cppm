@@ -25,7 +25,7 @@ struct GitFeatureDep {
 struct CmakeDep {
     std::string git;         // Git repository URL
     std::string tag;         // Git tag, branch, or commit hash
-    std::string targets;     // Semicolon-separated CMake target names to link
+    std::string targets;     // Whitespace-separated CMake target names to link
     std::map<std::string, std::string> options; // set(KEY VALUE) before FetchContent
     bool shallow = true;
 };
@@ -687,7 +687,8 @@ bool dependency_exists(Manifest const& m, std::string const& name) {
            m.workspace_deps.contains(name) || m.dev_workspace_deps.contains(name) ||
            m.vcpkg_deps.contains(name) || m.dev_vcpkg_deps.contains(name) ||
            m.subdir_deps.contains(name) || m.dev_subdir_deps.contains(name) ||
-           m.featured_deps.contains(name) || m.dev_featured_deps.contains(name);
+           m.featured_deps.contains(name) || m.dev_featured_deps.contains(name) ||
+           m.cmake_deps.contains(name) || m.dev_cmake_deps.contains(name);
 }
 
 // insert `line` into [section] block; create section at EOF if missing
