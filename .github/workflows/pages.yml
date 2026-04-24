@@ -20,8 +20,8 @@ concurrency:
 env:
   # Pin the codon release and the phenotype tag that shipped with it.
   # When codon publishes a new reader.wasm, bump both in lockstep.
-  CODON_TAG: v0.1.0
-  PHENOTYPE_TAG: v0.13.0
+  CODON_TAG: v0.1.1
+  PHENOTYPE_TAG: v0.14.0
 
 jobs:
   build-and-deploy:
@@ -40,7 +40,8 @@ jobs:
       - name: Fetch codon artifacts
         run: |
           gh release download "$CODON_TAG" --repo misut/codon \
-            --pattern 'codon.wasm' --pattern 'reader.wasm' --pattern 'index.html'
+            --pattern 'codon.wasm' --pattern 'reader.wasm' \
+            --pattern 'index.html' --pattern 'codon.js'
           chmod +x codon.wasm
         env:
           GH_TOKEN: ${{ github.token }}
@@ -52,6 +53,7 @@ jobs:
       - name: Assemble site
         run: |
           cp index.html dist/index.html
+          cp codon.js   dist/codon.js
           cp reader.wasm dist/reader.wasm
           curl -sSfL \
             "https://raw.githubusercontent.com/misut/phenotype/$PHENOTYPE_TAG/shim/phenotype.js" \
