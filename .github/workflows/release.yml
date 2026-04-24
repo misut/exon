@@ -70,6 +70,8 @@ jobs:
         with:
           name: exon-${{ matrix.platform }}
           path: exon-*.tar.gz
+          retention-days: 1
+          compression-level: 0
 
   build-windows:
     runs-on: windows-2022
@@ -82,9 +84,6 @@ jobs:
         run: |
           sed -n 's/^"vfox:misut\/mise-intron"[[:space:]]*=[[:space:]]*"\([^"]*\)"$/intron=\1/p' mise.toml >> "$GITHUB_OUTPUT"
           sed -n 's/^"vfox:misut\/mise-exon"[[:space:]]*=[[:space:]]*"\([^"]*\)"$/exon=\1/p' mise.toml >> "$GITHUB_OUTPUT"
-
-      - name: Setup MSVC
-        uses: ilammy/msvc-dev-cmd@v1
 
       - name: Install intron
         shell: pwsh
@@ -107,8 +106,9 @@ jobs:
           echo "$env:USERPROFILE\.intron\toolchains\ninja\1.13.2" >> $env:GITHUB_PATH
 
       - name: Bootstrap and release build
-        shell: cmd
+        shell: pwsh
         run: |
+          Invoke-Expression (& intron env | Out-String)
           cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build --target exon
           .\build\exon.exe build --release
@@ -122,6 +122,8 @@ jobs:
         with:
           name: exon-x86_64-pc-windows-msvc
           path: exon-*.zip
+          retention-days: 1
+          compression-level: 0
 
   release:
     needs: [build, build-windows]
@@ -133,7 +135,7 @@ jobs:
           merge-multiple: true
 
       - name: Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             exon-*.tar.gz
