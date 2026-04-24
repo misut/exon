@@ -24,6 +24,9 @@ struct ProgressSnapshot {
     int done = 0;
     int total = 0;
     int percent = 0;
+    double rate = 0.0;
+    std::chrono::milliseconds elapsed{0};
+    std::chrono::milliseconds remaining{0};
     std::string_view label;
 };
 
@@ -140,6 +143,13 @@ std::string output_block_header(std::string_view heading,
                  color_enabled);
 }
 
+std::string osc8_hyperlink(std::string_view text, std::string_view uri,
+                           bool enabled = false) {
+    if (!enabled || text.empty() || uri.empty())
+        return std::string{text};
+    return std::format("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", uri, text);
+}
+
 bool is_ascii_label(std::string_view text) {
     return std::ranges::all_of(text, [](unsigned char ch) {
         return ch >= 0x20 && ch <= 0x7e;
@@ -176,6 +186,29 @@ std::string shimmer_label(std::string_view label, std::size_t frame_index,
     return out;
 }
 
+std::string format_progress_duration(std::chrono::milliseconds elapsed) {
+    auto total_ms = elapsed.count();
+    if (total_ms <= 0)
+        return {};
+    if (total_ms < 1000)
+        return std::format("{}ms", total_ms);
+    auto seconds = static_cast<double>(total_ms) / 1000.0;
+    if (seconds < 10.0)
+        return std::format("{:.1f}s", seconds);
+    return std::format("{:.0f}s", seconds);
+}
+
+void append_progress_timing(std::string& out, ProgressSnapshot const& snapshot) {
+    if (auto elapsed = format_progress_duration(snapshot.elapsed); !elapsed.empty())
+        out += std::format(" elapsed {}", elapsed);
+    if (snapshot.remaining.count() > 0) {
+        if (auto remaining = format_progress_duration(snapshot.remaining); !remaining.empty())
+            out += std::format(" eta {}", remaining);
+    }
+    if (snapshot.rate > 0.0)
+        out += std::format(" {:.1f}/s", snapshot.rate);
+}
+
 std::string format_progress_frame(ProgressSnapshot const& snapshot,
                                   std::size_t frame_index,
                                   bool color_enabled = false) {
@@ -186,17 +219,21 @@ std::string format_progress_frame(ProgressSnapshot const& snapshot,
     if (snapshot.total <= 0) {
         auto label = snapshot.label.empty() ? std::string_view{"working"}
                                             : snapshot.label;
-        return std::format("  {} [{}] {}...", run, spin,
-                           shimmer_label(label, frame_index, color_enabled));
+        auto out = std::format("  {} [{}] {}...", run, spin,
+                               shimmer_label(label, frame_index, color_enabled));
+        append_progress_timing(out, snapshot);
+        return out;
     }
 
-    if (snapshot.label.empty())
-        return std::format("  {} [{}] [{}/{} {}%]", run, spin,
-                           snapshot.done, snapshot.total, snapshot.percent);
+    auto out = snapshot.label.empty()
+        ? std::format("  {} [{}] [{}/{} {}%]", run, spin,
+                      snapshot.done, snapshot.total, snapshot.percent)
+        : std::format("  {} [{}] [{}/{} {}%] {}", run, spin,
+                      snapshot.done, snapshot.total, snapshot.percent,
+                      shimmer_label(snapshot.label, frame_index, color_enabled));
 
-    return std::format("  {} [{}] [{}/{} {}%] {}", run, spin,
-                       snapshot.done, snapshot.total, snapshot.percent,
-                       shimmer_label(snapshot.label, frame_index, color_enabled));
+    append_progress_timing(out, snapshot);
+    return out;
 }
 
 } // namespace terminal

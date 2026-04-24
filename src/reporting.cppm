@@ -5,8 +5,15 @@ export namespace reporting {
 
 enum class OutputMode {
     human,
+    json,
     raw,
     wrapped,
+};
+
+enum class CapabilitySetting {
+    auto_detect,
+    always,
+    never,
 };
 
 enum class ShowOutput {
@@ -24,6 +31,10 @@ enum class StreamMode {
 struct Options {
     OutputMode output = OutputMode::human;
     ShowOutput show_output = ShowOutput::failed;
+    std::optional<CapabilitySetting> color;
+    std::optional<CapabilitySetting> progress;
+    std::optional<CapabilitySetting> unicode;
+    std::optional<CapabilitySetting> hyperlinks;
 };
 
 struct ProcessResult {
@@ -38,6 +49,9 @@ struct ProgressSnapshot {
     int done = 0;
     int total = 0;
     int percent = 0;
+    double rate = 0.0;
+    std::chrono::milliseconds elapsed{0};
+    std::chrono::milliseconds remaining{0};
     std::string_view label;
 };
 
@@ -48,10 +62,22 @@ struct ProgressSource {
 std::optional<OutputMode> parse_output_mode(std::string_view value) {
     if (value == "human")
         return OutputMode::human;
+    if (value == "json")
+        return OutputMode::json;
     if (value == "raw")
         return OutputMode::raw;
     if (value == "wrapped")
         return OutputMode::wrapped;
+    return std::nullopt;
+}
+
+std::optional<CapabilitySetting> parse_capability_setting(std::string_view value) {
+    if (value == "auto")
+        return CapabilitySetting::auto_detect;
+    if (value == "always")
+        return CapabilitySetting::always;
+    if (value == "never")
+        return CapabilitySetting::never;
     return std::nullopt;
 }
 
@@ -69,12 +95,26 @@ std::string_view to_string(OutputMode mode) {
     switch (mode) {
     case OutputMode::human:
         return "human";
+    case OutputMode::json:
+        return "json";
     case OutputMode::raw:
         return "raw";
     case OutputMode::wrapped:
         return "wrapped";
     }
     return "raw";
+}
+
+std::string_view to_string(CapabilitySetting setting) {
+    switch (setting) {
+    case CapabilitySetting::auto_detect:
+        return "auto";
+    case CapabilitySetting::always:
+        return "always";
+    case CapabilitySetting::never:
+        return "never";
+    }
+    return "auto";
 }
 
 std::string_view to_string(ShowOutput mode) {
@@ -92,6 +132,7 @@ std::string_view to_string(ShowOutput mode) {
 StreamMode stream_mode_for(OutputMode mode) {
     switch (mode) {
     case OutputMode::human:
+    case OutputMode::json:
         return StreamMode::capture;
     case OutputMode::raw:
         return StreamMode::passthrough;
@@ -99,6 +140,23 @@ StreamMode stream_mode_for(OutputMode mode) {
         return StreamMode::tee;
     }
     return StreamMode::passthrough;
+}
+
+std::optional<CapabilitySetting> env_capability_setting(std::string_view name) {
+    auto key = std::string{name};
+    auto const* value = std::getenv(key.c_str());
+    if (value == nullptr || value[0] == '\0')
+        return std::nullopt;
+    return parse_capability_setting(value);
+}
+
+CapabilitySetting resolve_capability(std::optional<CapabilitySetting> cli_setting,
+                                     std::string_view env_name) {
+    if (cli_setting)
+        return *cli_setting;
+    if (auto env_setting = env_capability_setting(env_name))
+        return *env_setting;
+    return CapabilitySetting::auto_detect;
 }
 
 bool should_show_output(ShowOutput mode, bool failed) {
@@ -153,6 +211,79 @@ struct Diagnostic {
     std::vector<std::string> hints;
 };
 
+std::string json_escape(std::string_view value) {
+    auto out = std::string{};
+    out.reserve(value.size() + 8);
+    for (auto ch : value) {
+        switch (ch) {
+        case '"':
+            out += "\\\"";
+            break;
+        case '\\':
+            out += "\\\\";
+            break;
+        case '\b':
+            out += "\\b";
+            break;
+        case '\f':
+            out += "\\f";
+            break;
+        case '\n':
+            out += "\\n";
+            break;
+        case '\r':
+            out += "\\r";
+            break;
+        case '\t':
+            out += "\\t";
+            break;
+        default:
+            if (static_cast<unsigned char>(ch) < 0x20)
+                out += std::format("\\u{:04x}", static_cast<unsigned char>(ch));
+            else
+                out.push_back(ch);
+            break;
+        }
+    }
+    return out;
+}
+
+struct JsonField {
+    std::string key;
+    std::string value;
+    bool quote = true;
+};
+
+JsonField json_string(std::string key, std::string_view value) {
+    return JsonField{.key = std::move(key), .value = std::string{value}, .quote = true};
+}
+
+JsonField json_number(std::string key, long long value) {
+    return JsonField{.key = std::move(key), .value = std::format("{}", value), .quote = false};
+}
+
+JsonField json_bool(std::string key, bool value) {
+    return JsonField{.key = std::move(key), .value = value ? "true" : "false", .quote = false};
+}
+
+void emit_json_event(std::string_view event, std::span<JsonField const> fields = {}) {
+    auto out = std::format("{{\"schema\":\"exon.cli.v1\",\"event\":\"{}\"",
+                           json_escape(event));
+    for (auto const& field : fields) {
+        out += std::format(",\"{}\":", json_escape(field.key));
+        if (field.quote)
+            out += std::format("\"{}\"", json_escape(field.value));
+        else
+            out += field.value;
+    }
+    out.push_back('}');
+    std::println("{}", out);
+}
+
+void emit_json_event(std::string_view event, std::initializer_list<JsonField> fields) {
+    emit_json_event(event, std::span<JsonField const>{fields.begin(), fields.size()});
+}
+
 int emit(Diagnostic const& diag, bool color_enabled) {
     auto label_code =
         diag.severity == Diagnostic::Severity::Error ? ansi::red : ansi::yellow;
@@ -170,6 +301,7 @@ int emit(Diagnostic const& diag, bool color_enabled) {
 }
 
 inline thread_local std::string current_stage_context;
+inline thread_local Options current_options;
 
 class ScopedStageContext {
 public:
@@ -185,6 +317,22 @@ public:
 
 private:
     std::string previous_;
+};
+
+class ScopedOptionsContext {
+public:
+    explicit ScopedOptionsContext(Options options)
+        : previous_(std::exchange(current_options, std::move(options))) {}
+
+    ~ScopedOptionsContext() {
+        current_options = std::move(previous_);
+    }
+
+    ScopedOptionsContext(ScopedOptionsContext const&) = delete;
+    ScopedOptionsContext& operator=(ScopedOptionsContext const&) = delete;
+
+private:
+    Options previous_;
 };
 
 } // namespace reporting

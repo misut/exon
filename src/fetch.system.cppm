@@ -1,5 +1,6 @@
 export module fetch.system;
 import std;
+import core;
 import fetch;
 import manifest;
 import manifest.system;
@@ -163,6 +164,20 @@ std::string describe_source(Candidate const& candidate) {
     throw std::runtime_error("unknown dependency kind");
 }
 
+std::string first_line(std::string_view text) {
+    while (!text.empty() && (text.front() == '\n' || text.front() == '\r'))
+        text.remove_prefix(1);
+    auto end = text.find_first_of("\r\n");
+    if (end == std::string_view::npos)
+        return std::string{text};
+    return std::string{text.substr(0, end)};
+}
+
+bool quiet_dependency_output() {
+    return reporting::current_options.output == reporting::OutputMode::json ||
+           reporting::current_options.output == reporting::OutputMode::raw;
+}
+
 manifest::Manifest load_dependency_manifest(std::filesystem::path const& dep_toml,
                                             std::optional<toolchain::Platform> const& platform) {
     auto dep_m = manifest::system::load(dep_toml.string());
@@ -191,10 +206,12 @@ MaterializedGitSource materialize_git_source(std::string const& repo, std::strin
     if (std::filesystem::exists(dep_cache)) {
         auto current_commit = get_git_commit(dep_cache);
         if (expected_commit.empty() || current_commit == expected_commit) {
-            if (!expected_commit.empty())
-                std::println("  locked: {} {} ({})", repo, tag, current_commit.substr(0, 8));
-            else
-                std::println("  cached: {} {} ({})", repo, tag, current_commit.substr(0, 8));
+            if (!quiet_dependency_output()) {
+                if (!expected_commit.empty())
+                    std::println("  locked: {} {} ({})", repo, tag, current_commit.substr(0, 8));
+                else
+                    std::println("  cached: {} {} ({})", repo, tag, current_commit.substr(0, 8));
+            }
             return {.path = dep_cache, .commit = current_commit};
         }
         std::filesystem::remove_all(dep_cache);
@@ -202,13 +219,31 @@ MaterializedGitSource materialize_git_source(std::string const& repo, std::strin
 
     std::filesystem::create_directories(dep_cache);
     auto git_url = to_git_url(repo);
-    auto cmd = std::format("git clone --depth 1 --branch {} {} {} 2>&1", tag, git_url,
-                           toolchain::shell_quote(dep_cache.string()));
-    std::println("  fetching: {} {}...", repo, tag);
-    int rc = std::system(cmd.c_str());
-    if (rc != 0) {
-        std::filesystem::remove_all(dep_cache);
-        throw std::runtime_error(std::format("failed to fetch {} {}", repo, tag));
+    if (quiet_dependency_output()) {
+        auto result = reporting::system::run_process(
+            core::ProcessSpec{
+                .program = "git",
+                .args = {"clone", "--depth", "1", "--branch", tag, git_url,
+                         dep_cache.string()},
+            },
+            reporting::StreamMode::capture);
+        if (result.exit_code != 0) {
+            std::filesystem::remove_all(dep_cache);
+            auto detail = first_line(!result.stderr_text.empty() ? result.stderr_text
+                                                                 : result.stdout_text);
+            if (!detail.empty())
+                throw std::runtime_error(std::format("failed to fetch {} {}: {}", repo, tag, detail));
+            throw std::runtime_error(std::format("failed to fetch {} {}", repo, tag));
+        }
+    } else {
+        auto cmd = std::format("git clone --depth 1 --branch {} {} {} 2>&1", tag, git_url,
+                               toolchain::shell_quote(dep_cache.string()));
+        std::println("  fetching: {} {}...", repo, tag);
+        int rc = std::system(cmd.c_str());
+        if (rc != 0) {
+            std::filesystem::remove_all(dep_cache);
+            throw std::runtime_error(std::format("failed to fetch {} {}", repo, tag));
+        }
     }
     return {.path = dep_cache, .commit = get_git_commit(dep_cache)};
 }
@@ -634,10 +669,18 @@ fetch::FetchResult fetch_all(fetch::FetchRequest const& request) {
         .platform = request.platform,
     };
 
-    if (reporting::current_stage_context.empty())
-        std::println("==> fetch");
-    else
-        std::println("==> [{}] fetch", reporting::current_stage_context);
+    if (reporting::current_options.output == reporting::OutputMode::json) {
+        reporting::emit_json_event("stage", {
+            reporting::json_string("verb", "fetch"),
+            reporting::json_string("phase", "fetch"),
+            reporting::json_string("state", "started"),
+        });
+    } else if (reporting::current_options.output != reporting::OutputMode::raw) {
+        if (reporting::current_stage_context.empty())
+            std::println("==> fetch");
+        else
+            std::println("==> [{}] fetch", reporting::current_stage_context);
+    }
     auto counter = FetchProgressCounter{};
     auto renderer = reporting::system::make_live_progress_renderer();
     if (renderer && renderer->active())
@@ -679,6 +722,14 @@ fetch::FetchResult fetch_all(fetch::FetchRequest const& request) {
 
     if (renderer)
         renderer->stop();
+    if (reporting::current_options.output == reporting::OutputMode::json) {
+        reporting::emit_json_event("stage", {
+            reporting::json_string("verb", "fetch"),
+            reporting::json_string("phase", "fetch"),
+            reporting::json_string("state", "completed"),
+            reporting::json_number("dependencies", static_cast<long long>(result.deps.size())),
+        });
+    }
     return result;
 }
 

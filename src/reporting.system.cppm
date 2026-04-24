@@ -28,8 +28,13 @@ ProcessResult run_process(core::ProcessSpec const& spec, StreamMode mode,
                           OutputObserver observer);
 
 void enable_vt_on_windows();
+bool stdout_is_terminal();
+bool stderr_is_terminal();
 bool stdout_is_tty();
 bool stderr_is_tty();
+bool stdout_hyperlinks_enabled();
+bool stdout_unicode_enabled();
+std::size_t terminal_width();
 
 enum class LiveProgressRenderMode {
     disabled,
@@ -84,8 +89,28 @@ bool stdout_is_tty() {
     return terminal::system::stdout_is_tty();
 }
 
+bool stdout_is_terminal() {
+    return terminal::system::stdout_is_terminal();
+}
+
 bool stderr_is_tty() {
     return terminal::system::stderr_is_tty();
+}
+
+bool stderr_is_terminal() {
+    return terminal::system::stderr_is_terminal();
+}
+
+bool stdout_hyperlinks_enabled() {
+    return terminal::system::stdout_hyperlinks_enabled();
+}
+
+bool stdout_unicode_enabled() {
+    return terminal::system::stdout_unicode_enabled();
+}
+
+std::size_t terminal_width() {
+    return terminal::system::terminal_width();
 }
 
 #else
@@ -98,8 +123,28 @@ bool stdout_is_tty() {
     return terminal::system::stdout_is_tty();
 }
 
+bool stdout_is_terminal() {
+    return terminal::system::stdout_is_terminal();
+}
+
 bool stderr_is_tty() {
     return terminal::system::stderr_is_tty();
+}
+
+bool stderr_is_terminal() {
+    return terminal::system::stderr_is_terminal();
+}
+
+bool stdout_hyperlinks_enabled() {
+    return terminal::system::stdout_hyperlinks_enabled();
+}
+
+bool stdout_unicode_enabled() {
+    return terminal::system::stdout_unicode_enabled();
+}
+
+std::size_t terminal_width() {
+    return terminal::system::terminal_width();
 }
 
 #endif
@@ -696,6 +741,9 @@ std::string format_progress_frame(ProgressSnapshot const& snapshot,
         .done = snapshot.done,
         .total = snapshot.total,
         .percent = snapshot.percent,
+        .rate = snapshot.rate,
+        .elapsed = snapshot.elapsed,
+        .remaining = snapshot.remaining,
         .label = snapshot.label,
     }, frame_index, stdout_is_tty());
 }
@@ -728,6 +776,9 @@ terminal::system::ProgressSource to_terminal_source(ProgressSource source) {
                 .done = snapshot->done,
                 .total = snapshot->total,
                 .percent = snapshot->percent,
+                .rate = snapshot->rate,
+                .elapsed = snapshot->elapsed,
+                .remaining = snapshot->remaining,
                 .label = snapshot->label,
             };
         },

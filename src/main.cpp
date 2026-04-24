@@ -29,6 +29,8 @@ int main(int argc, char* argv[]) {
         return commands::cmd_new(argc, argv);
     if (command == "info")
         return commands::cmd_info();
+    if (command == "status" || command == "doctor")
+        return commands::cmd_status(argc, argv);
     if (command == "build")
         return commands::cmd_build(argc, argv);
     if (command == "check")

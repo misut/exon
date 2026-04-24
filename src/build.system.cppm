@@ -509,6 +509,225 @@ std::string display_path(std::filesystem::path const& path,
     return path.generic_string();
 }
 
+std::string command_text(core::ProcessSpec const& spec);
+std::string tail_excerpt(std::string_view text, std::size_t max_chars);
+std::string sanitize_ninja_progress_output(std::string_view text);
+
+std::string uri_escape(std::string_view value) {
+    auto out = std::string{};
+    for (auto ch : value) {
+        auto uch = static_cast<unsigned char>(ch);
+        if (std::isalnum(uch) || ch == '/' || ch == ':' || ch == '-' || ch == '_' ||
+            ch == '.' || ch == '~') {
+            out.push_back(ch);
+        } else {
+            out += std::format("%{:02X}", uch);
+        }
+    }
+    return out;
+}
+
+std::string file_uri(std::filesystem::path const& path) {
+    auto absolute = std::filesystem::absolute(path).generic_string();
+    if (!absolute.starts_with('/'))
+        absolute.insert(absolute.begin(), '/');
+    return std::format("file://{}", uri_escape(absolute));
+}
+
+std::string display_path_link(std::filesystem::path const& path,
+                              std::filesystem::path const& root) {
+    auto text = display_path(path, root);
+    return terminal::osc8_hyperlink(text, file_uri(path),
+                                    reporting::system::stdout_hyperlinks_enabled());
+}
+
+bool github_actions_enabled() {
+    auto const* value = std::getenv("GITHUB_ACTIONS");
+    return value != nullptr && value[0] != '\0';
+}
+
+std::string github_command_escape(std::string_view value) {
+    auto out = std::string{};
+    for (auto ch : value) {
+        switch (ch) {
+        case '%':
+            out += "%25";
+            break;
+        case '\r':
+            out += "%0D";
+            break;
+        case '\n':
+            out += "%0A";
+            break;
+        default:
+            out.push_back(ch);
+            break;
+        }
+    }
+    return out;
+}
+
+std::string github_property_escape(std::string_view value) {
+    auto out = github_command_escape(value);
+    auto escaped = std::string{};
+    escaped.reserve(out.size());
+    for (auto ch : out) {
+        if (ch == ':')
+            escaped += "%3A";
+        else if (ch == ',')
+            escaped += "%2C";
+        else
+            escaped.push_back(ch);
+    }
+    return escaped;
+}
+
+void emit_github_error(std::string_view message) {
+    if (!github_actions_enabled())
+        return;
+    write_formatted_line(stdout, "::error::{}", github_command_escape(message));
+}
+
+void emit_github_error_at(std::string_view file, int line, std::string_view message) {
+    if (!github_actions_enabled())
+        return;
+    write_formatted_line(stdout, "::error file={},line={}::{}",
+                         github_property_escape(file), line,
+                         github_command_escape(message));
+}
+
+struct GithubAnnotation {
+    std::string file;
+    int line = 0;
+    std::string message;
+};
+
+std::optional<GithubAnnotation> parse_github_annotation_line(std::string_view line_view) {
+    auto line = std::string{line_view};
+    static auto const clang_pattern = std::regex{
+        R"(^(.+):([0-9]+):(?:[0-9]+:)?\s*(?:fatal error|error):\s*(.+)$)"};
+    static auto const msvc_pattern = std::regex{
+        R"(^(.+)\(([0-9]+)(?:,[0-9]+)?\):\s*(?:fatal error|error)\s*[A-Za-z0-9]*:\s*(.+)$)"};
+
+    auto match = std::smatch{};
+    auto extract = [&](std::smatch const& m) -> std::optional<GithubAnnotation> {
+        try {
+            auto number = std::stoi(m[2].str());
+            if (number <= 0)
+                return std::nullopt;
+            return GithubAnnotation{
+                .file = m[1].str(),
+                .line = number,
+                .message = m[3].str(),
+            };
+        } catch (...) {
+            return std::nullopt;
+        }
+    };
+
+    if (std::regex_match(line, match, clang_pattern))
+        return extract(match);
+    if (std::regex_match(line, match, msvc_pattern))
+        return extract(match);
+    return std::nullopt;
+}
+
+std::optional<GithubAnnotation> github_annotation_from_text(std::string_view text) {
+    auto line = std::string{};
+    for (auto ch : text) {
+        if (ch == '\n' || ch == '\r') {
+            if (auto annotation = parse_github_annotation_line(line))
+                return annotation;
+            line.clear();
+            continue;
+        }
+        line.push_back(ch);
+    }
+    if (auto annotation = parse_github_annotation_line(line))
+        return annotation;
+    return std::nullopt;
+}
+
+void emit_github_error_for_result(std::string_view fallback,
+                                  reporting::ProcessResult const& result) {
+    if (!github_actions_enabled())
+        return;
+    auto combined = sanitize_ninja_progress_output(result.stderr_text);
+    if (!combined.empty() && !combined.ends_with('\n'))
+        combined.push_back('\n');
+    combined += sanitize_ninja_progress_output(result.stdout_text);
+    if (auto annotation = github_annotation_from_text(combined)) {
+        emit_github_error_at(annotation->file, annotation->line, annotation->message);
+        return;
+    }
+    emit_github_error(fallback);
+}
+
+long long elapsed_ms(std::chrono::steady_clock::time_point started) {
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+    return elapsed.count();
+}
+
+void emit_json_stage(std::string_view verb, std::string_view phase,
+                     std::string_view state,
+                     core::ProjectContext const& project) {
+    reporting::emit_json_event("stage", {
+        reporting::json_string("verb", verb),
+        reporting::json_string("phase", phase),
+        reporting::json_string("state", state),
+        reporting::json_string("profile", project.profile),
+        reporting::json_string("target", target_label(project)),
+        reporting::json_string("build_dir", display_path(project.build_dir, project.root)),
+    });
+}
+
+void emit_json_diagnostic(std::string_view severity, std::string_view message,
+                          std::string_view phase,
+                          core::ProjectContext const& project,
+                          reporting::ProcessResult const* result = nullptr,
+                          core::ProcessStep const* step = nullptr) {
+    auto fields = std::vector<reporting::JsonField>{
+        reporting::json_string("severity", severity),
+        reporting::json_string("message", message),
+        reporting::json_string("phase", phase),
+        reporting::json_string("target", target_label(project)),
+    };
+    if (step)
+        fields.push_back(reporting::json_string("command", command_text(step->spec)));
+    if (result) {
+        fields.push_back(reporting::json_number("exit_code", result->exit_code));
+        fields.push_back(reporting::json_bool("timed_out", result->timed_out));
+        fields.push_back(reporting::json_string(
+            "stderr_excerpt", tail_excerpt(sanitize_ninja_progress_output(result->stderr_text), 2000)));
+        fields.push_back(reporting::json_string(
+            "stdout_excerpt", tail_excerpt(sanitize_ninja_progress_output(result->stdout_text), 2000)));
+    }
+    reporting::emit_json_event("diagnostic", fields);
+}
+
+void emit_json_summary(std::string_view verb, bool success,
+                       core::ProjectContext const& project,
+                       std::chrono::steady_clock::time_point started) {
+    reporting::emit_json_event("summary", {
+        reporting::json_string("verb", verb),
+        reporting::json_bool("success", success),
+        reporting::json_string("profile", project.profile),
+        reporting::json_string("target", target_label(project)),
+        reporting::json_number("elapsed_ms", elapsed_ms(started)),
+    });
+}
+
+void emit_json_artifact(std::filesystem::path const& artifact,
+                        core::ProjectContext const& project,
+                        std::string_view label) {
+    reporting::emit_json_event("artifact", {
+        reporting::json_string("label", label),
+        reporting::json_string("path", display_path(artifact, project.root)),
+        reporting::json_string("absolute_path", std::filesystem::absolute(artifact).generic_string()),
+    });
+}
+
 std::string quote_command_arg(std::string_view arg) {
     if (arg.empty())
         return "\"\"";
@@ -550,12 +769,16 @@ std::string tail_excerpt(std::string_view text, std::size_t max_chars = 2000) {
 void print_output_block(std::string_view heading, std::string_view text) {
     if (text.empty())
         return;
+    if (github_actions_enabled())
+        write_formatted_line(stdout, "::group::{}", github_command_escape(heading));
     write_line(stdout);
     write_line(stdout, terminal::output_block_header(
         heading, reporting::system::stdout_is_tty()));
     write_stream(stdout, text);
     if (!text.ends_with('\n'))
         write_line(stdout);
+    if (github_actions_enabled())
+        write_line(stdout, "::endgroup::");
 }
 
 void print_header(std::string_view verb, std::string_view name,
@@ -586,7 +809,8 @@ void print_human_stage(std::string_view stage, int index, int total) {
 
 void print_failure_summary(std::string_view verb, std::string_view stage,
                            core::ProjectContext const& project,
-                           std::chrono::milliseconds elapsed) {
+                           std::chrono::milliseconds elapsed,
+                           reporting::ProcessResult const* result = nullptr) {
     write_line(stdout);
     write_formatted_line(stdout, "exon: {} failed", verb);
     write_formatted_line(stdout, "  phase     {}", stage);
@@ -594,6 +818,11 @@ void print_failure_summary(std::string_view verb, std::string_view stage,
     write_formatted_line(stdout, "  target    {}", target_label(project));
     write_formatted_line(stdout, "  build dir {}", display_path(project.build_dir, project.root));
     write_formatted_line(stdout, "  elapsed   {}", reporting::format_duration(elapsed));
+    auto fallback = std::format("exon {} failed in {} phase", verb, stage);
+    if (result)
+        emit_github_error_for_result(fallback, *result);
+    else
+        emit_github_error(fallback);
 }
 
 void print_build_success(std::string_view verb, std::filesystem::path const& artifact,
@@ -603,7 +832,7 @@ void print_build_success(std::string_view verb, std::filesystem::path const& art
     write_line(stdout);
     write_formatted_line(stdout, "exon: {} succeeded", verb);
     write_formatted_line(stdout, "  {:<9} {}", location_label,
-                         display_path(artifact, project.root));
+                         display_path_link(artifact, project.root));
     write_formatted_line(stdout, "  elapsed   {}", reporting::format_duration(elapsed));
 }
 
@@ -619,7 +848,7 @@ void print_build_finish(std::filesystem::path const& location,
                         std::string_view location_label) {
     print_stage("finish");
     write_formatted_line(stdout, "  {:<9} {}", location_label,
-                         display_path(location, project.root));
+                         display_path_link(location, project.root));
     write_formatted_line(stdout, "  elapsed   {}", reporting::format_duration(elapsed));
 }
 
@@ -982,7 +1211,7 @@ int finish_human_failure(std::string_view verb, std::string_view stage,
                          std::chrono::steady_clock::time_point started) {
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started);
-    print_failure_summary(verb, stage, request.project, elapsed);
+    print_failure_summary(verb, stage, request.project, elapsed, &result);
     print_failure_excerpt(step, result);
     maybe_print_windows_native_toolchain_failure_hint(request, result);
     print_wrapped_rerun_hint();
@@ -1158,7 +1387,7 @@ reporting::OutputMode parse_output_mode_text(std::string_view value) {
                                 : reporting::parse_output_mode(value);
     if (!parsed) {
         throw std::runtime_error(
-            std::format("invalid --output '{}': expected human, raw, or wrapped", value));
+            std::format("invalid --output '{}': expected human, json, raw, or wrapped", value));
     }
     return *parsed;
 }
@@ -1351,8 +1580,79 @@ int run_build_human(build::BuildRequest const& request, build::BuildPlan const& 
         location += toolchain::exe_suffix;
     print_human_stage("finish", 5, 5);
     write_formatted_line(stdout, "  {:<9} {}", success_label,
-                         display_path(location, request.project.root));
+                         display_path_link(location, request.project.root));
     write_formatted_line(stdout, "  elapsed   {}", reporting::format_duration(elapsed));
+    return 0;
+}
+
+std::optional<StepFailure> run_steps_json(std::vector<core::ProcessStep> const& steps,
+                                          std::string_view verb,
+                                          std::string_view stage,
+                                          core::ProjectContext const& project,
+                                          bool use_ninja_status = false) {
+    emit_json_stage(verb, stage, "started", project);
+    for (auto const& step : steps) {
+        auto result = run_step(step, reporting::StreamMode::capture,
+                               use_ninja_status ? human_ninja_status_format
+                                                : std::string_view{});
+        if (result.exit_code != 0) {
+            emit_json_stage(verb, stage, "failed", project);
+            return StepFailure{.step = step, .result = std::move(result)};
+        }
+    }
+    emit_json_stage(verb, stage, "completed", project);
+    return std::nullopt;
+}
+
+std::optional<StepFailure> run_configure_steps_json(
+    std::vector<core::ProcessStep> const& steps,
+    build::BuildRequest const& request,
+    std::string_view verb) {
+    if (steps.empty()) {
+        emit_json_stage(verb, "configure", "skipped", request.project);
+        return std::nullopt;
+    }
+    return run_steps_json(steps, verb, "configure", request.project);
+}
+
+int run_build_json(build::BuildRequest const& request, build::BuildPlan const& plan,
+                   std::string_view verb,
+                   std::chrono::steady_clock::time_point started,
+                   std::optional<std::filesystem::path> success_path = std::nullopt,
+                   std::string_view success_label = "artifact") {
+    emit_json_stage(verb, "sync", "started", request.project);
+    auto changed = apply_writes(plan.writes, false);
+    reporting::emit_json_event("stage", {
+        reporting::json_string("verb", verb),
+        reporting::json_string("phase", "sync"),
+        reporting::json_string("state", "completed"),
+        reporting::json_bool("changed", changed),
+    });
+
+    if (changed || !plan.configured) {
+        if (auto failure = run_configure_steps_json(plan.configure_steps, request, verb)) {
+            emit_json_diagnostic("error", "configure step failed", "configure",
+                                 request.project, &failure->result, &failure->step);
+            emit_json_summary(verb, false, request.project, started);
+            return failure->result.exit_code;
+        }
+    } else {
+        emit_json_stage(verb, "configure", "cached", request.project);
+    }
+
+    if (auto failure = run_steps_json(plan.build_steps, verb, "build",
+                                      request.project, true)) {
+        emit_json_diagnostic("error", "build step failed", "build",
+                             request.project, &failure->result, &failure->step);
+        emit_json_summary(verb, false, request.project, started);
+        return failure->result.exit_code;
+    }
+
+    auto location = success_path.value_or(request.project.build_dir / request.manifest.name);
+    if (!success_path && !request.project.is_wasm)
+        location += toolchain::exe_suffix;
+    emit_json_artifact(location, request.project, success_label);
+    emit_json_summary(verb, true, request.project, started);
     return 0;
 }
 
@@ -1468,6 +1768,81 @@ int run_test_human(build::BuildRequest const& request, build::BuildPlan const& p
     return (failed == 0 && timed_out == 0) ? 0 : 1;
 }
 
+int run_test_json(build::BuildRequest const& request, build::BuildPlan const& plan,
+                  reporting::Options const& options,
+                  std::chrono::steady_clock::time_point started,
+                  TestRunSummary& summary) {
+    emit_json_stage("test", "sync", "started", request.project);
+    auto changed = apply_writes(plan.writes, false);
+    reporting::emit_json_event("stage", {
+        reporting::json_string("verb", "test"),
+        reporting::json_string("phase", "sync"),
+        reporting::json_string("state", "completed"),
+        reporting::json_bool("changed", changed),
+    });
+
+    if (changed || !plan.configured) {
+        if (auto failure = run_configure_steps_json(plan.configure_steps, request, "test")) {
+            emit_json_diagnostic("error", "configure step failed", "configure",
+                                 request.project, &failure->result, &failure->step);
+            emit_json_summary("test", false, request.project, started);
+            return failure->result.exit_code;
+        }
+    } else {
+        emit_json_stage("test", "configure", "cached", request.project);
+    }
+
+    if (auto failure = run_steps_json(plan.build_steps, "test", "build",
+                                      request.project, true)) {
+        emit_json_diagnostic("error", "build step failed", "build",
+                             request.project, &failure->result, &failure->step);
+        emit_json_summary("test", false, request.project, started);
+        return failure->result.exit_code;
+    }
+
+    emit_json_stage("test", "run", "started", request.project);
+    int passed = 0;
+    int failed = 0;
+    int timed_out = 0;
+    for (auto const& step : plan.run_steps) {
+        auto result = run_step(step, reporting::StreamMode::capture);
+        auto failed_result = result.timed_out || result.exit_code != 0;
+        reporting::emit_json_event("test-result", {
+            reporting::json_string("name", step.label),
+            reporting::json_string("status", reporting::test_status(result)),
+            reporting::json_number("exit_code", result.exit_code),
+            reporting::json_bool("timed_out", result.timed_out),
+            reporting::json_number("elapsed_ms", result.elapsed.count()),
+        });
+        if (reporting::should_show_output(options.show_output, failed_result)) {
+            emit_json_diagnostic(failed_result ? "error" : "info", "captured test output",
+                                 "run", request.project, &result, &step);
+        }
+        if (result.timed_out) {
+            ++timed_out;
+        } else if (result.exit_code == 0) {
+            ++passed;
+        } else {
+            ++failed;
+        }
+    }
+    emit_json_stage("test", "run", failed == 0 && timed_out == 0 ? "completed" : "failed",
+                    request.project);
+    assign_test_run_summary(summary, static_cast<int>(plan.run_steps.size()), passed, failed,
+                            timed_out);
+    reporting::emit_json_event("summary", {
+        reporting::json_string("verb", "test"),
+        reporting::json_bool("success", failed == 0 && timed_out == 0),
+        reporting::json_number("collected", summary.collected),
+        reporting::json_number("passed", summary.passed),
+        reporting::json_number("failed", summary.failed),
+        reporting::json_number("timed_out", summary.timed_out),
+        reporting::json_string("target", target_label(request.project)),
+        reporting::json_number("elapsed_ms", elapsed_ms(started)),
+    });
+    return (failed == 0 && timed_out == 0) ? 0 : 1;
+}
+
 } // namespace detail
 
 inline bool sync_root_cmake(manifest::Manifest const& m,
@@ -1513,13 +1888,18 @@ inline int run(std::filesystem::path const& project_root, manifest::Manifest con
 inline int run(std::filesystem::path const& project_root, manifest::Manifest const& m,
                bool release, std::string_view target,
                reporting::Options const& options) {
+    auto scoped_options = reporting::ScopedOptionsContext{options};
     if (options.output != reporting::OutputMode::raw) {
         auto started = std::chrono::steady_clock::now();
         auto project = build::project_context(project_root, release, target);
-        detail::print_header("build", m.name, project);
+        if (options.output == reporting::OutputMode::json) {
+            detail::emit_json_stage("build", "resolve", "started", project);
+        } else {
+            detail::print_header("build", m.name, project);
+        }
         if (options.output == reporting::OutputMode::human)
             detail::print_human_stage("resolve", 1, 5);
-        else
+        else if (options.output == reporting::OutputMode::wrapped)
             detail::print_stage("resolve");
         try {
             auto request = detail::prepare_request(project_root, m, release, target, false, {},
@@ -1527,11 +1907,18 @@ inline int run(std::filesystem::path const& project_root, manifest::Manifest con
             auto plan = build::plan_build(request);
             if (options.output == reporting::OutputMode::human)
                 return detail::run_build_human(request, plan, "build", started);
+            if (options.output == reporting::OutputMode::json)
+                return detail::run_build_json(request, plan, "build", started);
             return detail::run_build_wrapped(request, plan, "build", started);
         } catch (...) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started);
-            detail::print_failure_summary("build", "resolve", project, elapsed);
+            if (options.output == reporting::OutputMode::json) {
+                detail::emit_json_stage("build", "resolve", "failed", project);
+                detail::emit_json_summary("build", false, project, started);
+            } else {
+                detail::print_failure_summary("build", "resolve", project, elapsed);
+            }
             throw;
         }
     }
@@ -1572,13 +1959,18 @@ inline int run(std::filesystem::path const& project_root, manifest::Manifest con
 inline int run(std::filesystem::path const& project_root, manifest::Manifest const& m,
                manifest::Manifest const& portable_manifest, bool release,
                std::string_view target, reporting::Options const& options) {
+    auto scoped_options = reporting::ScopedOptionsContext{options};
     if (options.output != reporting::OutputMode::raw) {
         auto started = std::chrono::steady_clock::now();
         auto project = build::project_context(project_root, release, target);
-        detail::print_header("build", m.name, project);
+        if (options.output == reporting::OutputMode::json) {
+            detail::emit_json_stage("build", "resolve", "started", project);
+        } else {
+            detail::print_header("build", m.name, project);
+        }
         if (options.output == reporting::OutputMode::human)
             detail::print_human_stage("resolve", 1, 5);
-        else
+        else if (options.output == reporting::OutputMode::wrapped)
             detail::print_stage("resolve");
         try {
             auto request = detail::prepare_request(project_root, m, portable_manifest, release,
@@ -1586,11 +1978,18 @@ inline int run(std::filesystem::path const& project_root, manifest::Manifest con
             auto plan = build::plan_build(request);
             if (options.output == reporting::OutputMode::human)
                 return detail::run_build_human(request, plan, "build", started);
+            if (options.output == reporting::OutputMode::json)
+                return detail::run_build_json(request, plan, "build", started);
             return detail::run_build_wrapped(request, plan, "build", started);
         } catch (...) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started);
-            detail::print_failure_summary("build", "resolve", project, elapsed);
+            if (options.output == reporting::OutputMode::json) {
+                detail::emit_json_stage("build", "resolve", "failed", project);
+                detail::emit_json_summary("build", false, project, started);
+            } else {
+                detail::print_failure_summary("build", "resolve", project, elapsed);
+            }
             throw;
         }
     }
@@ -1705,13 +2104,18 @@ inline int run_test(std::filesystem::path const& project_root,
                     std::optional<std::chrono::milliseconds> timeout,
                     reporting::Options const& options,
                     TestRunSummary& summary) {
+    auto scoped_options = reporting::ScopedOptionsContext{options};
     if (options.output != reporting::OutputMode::raw) {
         auto started = std::chrono::steady_clock::now();
         auto project = build::project_context(project_root, release, target);
-        detail::print_header("test", m.name, project);
+        if (options.output == reporting::OutputMode::json) {
+            detail::emit_json_stage("test", "resolve", "started", project);
+        } else {
+            detail::print_header("test", m.name, project);
+        }
         if (options.output == reporting::OutputMode::human)
             detail::print_human_stage("resolve", 1, 5);
-        else
+        else if (options.output == reporting::OutputMode::wrapped)
             detail::print_stage("resolve");
         try {
             auto request = detail::prepare_request(project_root, m, release, target, true, filter,
@@ -1719,11 +2123,18 @@ inline int run_test(std::filesystem::path const& project_root,
             auto plan = build::plan_test(request);
             if (options.output == reporting::OutputMode::human)
                 return detail::run_test_human(request, plan, options, started, summary);
+            if (options.output == reporting::OutputMode::json)
+                return detail::run_test_json(request, plan, options, started, summary);
             return detail::run_test_wrapped(request, plan, options, started, summary);
         } catch (...) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started);
-            detail::print_failure_summary("test", "resolve", project, elapsed);
+            if (options.output == reporting::OutputMode::json) {
+                detail::emit_json_stage("test", "resolve", "failed", project);
+                detail::emit_json_summary("test", false, project, started);
+            } else {
+                detail::print_failure_summary("test", "resolve", project, elapsed);
+            }
             throw;
         }
     }
@@ -1787,13 +2198,18 @@ inline int run_test(std::filesystem::path const& project_root,
                     std::optional<std::chrono::milliseconds> timeout,
                     reporting::Options const& options,
                     TestRunSummary& summary) {
+    auto scoped_options = reporting::ScopedOptionsContext{options};
     if (options.output != reporting::OutputMode::raw) {
         auto started = std::chrono::steady_clock::now();
         auto project = build::project_context(project_root, release, target);
-        detail::print_header("test", m.name, project);
+        if (options.output == reporting::OutputMode::json) {
+            detail::emit_json_stage("test", "resolve", "started", project);
+        } else {
+            detail::print_header("test", m.name, project);
+        }
         if (options.output == reporting::OutputMode::human)
             detail::print_human_stage("resolve", 1, 5);
-        else
+        else if (options.output == reporting::OutputMode::wrapped)
             detail::print_stage("resolve");
         try {
             auto request = detail::prepare_request(project_root, m, portable_manifest, release,
@@ -1801,11 +2217,18 @@ inline int run_test(std::filesystem::path const& project_root,
             auto plan = build::plan_test(request);
             if (options.output == reporting::OutputMode::human)
                 return detail::run_test_human(request, plan, options, started, summary);
+            if (options.output == reporting::OutputMode::json)
+                return detail::run_test_json(request, plan, options, started, summary);
             return detail::run_test_wrapped(request, plan, options, started, summary);
         } catch (...) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - started);
-            detail::print_failure_summary("test", "resolve", project, elapsed);
+            if (options.output == reporting::OutputMode::json) {
+                detail::emit_json_stage("test", "resolve", "failed", project);
+                detail::emit_json_summary("test", false, project, started);
+            } else {
+                detail::print_failure_summary("test", "resolve", project, elapsed);
+            }
             throw;
         }
     }
