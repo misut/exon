@@ -219,6 +219,9 @@ void test_readme_output_docs_match_usage() {
           "README documents human default");
     check(readme.find("interactive terminal") != std::string::npos,
           "README documents interactive live progress");
+    check(readme.find("active phase label shimmers from left to right") !=
+              std::string::npos,
+          "README documents progress label shimmer");
     check(readme.find("When stdout is not a TTY") != std::string::npos,
           "README documents non-tty fallback");
     check(readme.find("NO_COLOR=1") != std::string::npos,

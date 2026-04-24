@@ -140,6 +140,42 @@ std::string output_block_header(std::string_view heading,
                  color_enabled);
 }
 
+bool is_ascii_label(std::string_view text) {
+    return std::ranges::all_of(text, [](unsigned char ch) {
+        return ch >= 0x20 && ch <= 0x7e;
+    });
+}
+
+void append_shimmer_char(std::string& out, char ch, bool active) {
+    if (active) {
+        out.append(ansi::bold);
+        out.append(ansi::cyan);
+    } else {
+        out.append(ansi::dim);
+    }
+    out.push_back(ch);
+    out.append(ansi::reset);
+}
+
+std::string shimmer_label(std::string_view label, std::size_t frame_index,
+                          bool color_enabled = false) {
+    if (!color_enabled || label.empty() || !is_ascii_label(label))
+        return std::string{label};
+
+    auto const width = std::min<std::size_t>(2, label.size());
+    auto const period = label.size() + width;
+    auto const cursor = frame_index % period;
+
+    auto out = std::string{};
+    out.reserve(label.size() * 16);
+    for (std::size_t index = 0; index < label.size(); ++index) {
+        auto const active = cursor < label.size() &&
+            index >= cursor && index < cursor + width;
+        append_shimmer_char(out, label[index], active);
+    }
+    return out;
+}
+
 std::string format_progress_frame(ProgressSnapshot const& snapshot,
                                   std::size_t frame_index,
                                   bool color_enabled = false) {
@@ -150,7 +186,8 @@ std::string format_progress_frame(ProgressSnapshot const& snapshot,
     if (snapshot.total <= 0) {
         auto label = snapshot.label.empty() ? std::string_view{"working"}
                                             : snapshot.label;
-        return std::format("  {} [{}] {}...", run, spin, label);
+        return std::format("  {} [{}] {}...", run, spin,
+                           shimmer_label(label, frame_index, color_enabled));
     }
 
     if (snapshot.label.empty())
@@ -159,7 +196,7 @@ std::string format_progress_frame(ProgressSnapshot const& snapshot,
 
     return std::format("  {} [{}] [{}/{} {}%] {}", run, spin,
                        snapshot.done, snapshot.total, snapshot.percent,
-                       snapshot.label);
+                       shimmer_label(snapshot.label, frame_index, color_enabled));
 }
 
 } // namespace terminal

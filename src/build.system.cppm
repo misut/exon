@@ -832,9 +832,22 @@ private:
     std::optional<NinjaProgressUpdate> latest_;
 };
 
-reporting::ProgressSource as_progress_source(NinjaProgressTracker& tracker) {
+reporting::ProgressSource indeterminate_progress_source(std::string_view label) {
+    auto owned_label = std::string{label};
     return reporting::ProgressSource{
-        .poll = [&tracker]() -> std::optional<reporting::ProgressSnapshot> {
+        .poll = [label = std::move(owned_label)]()
+            -> std::optional<reporting::ProgressSnapshot> {
+            return reporting::ProgressSnapshot{.label = label};
+        },
+    };
+}
+
+reporting::ProgressSource as_progress_source(NinjaProgressTracker& tracker,
+                                             std::string_view label = {}) {
+    auto owned_label = std::string{label};
+    return reporting::ProgressSource{
+        .poll = [&tracker, label = std::move(owned_label)]()
+            -> std::optional<reporting::ProgressSnapshot> {
             auto snap = tracker.snapshot();
             if (!snap)
                 return std::nullopt;
@@ -842,7 +855,7 @@ reporting::ProgressSource as_progress_source(NinjaProgressTracker& tracker) {
                 .done = snap->finished,
                 .total = snap->total,
                 .percent = snap->percent,
-                .label = {},
+                .label = label,
             };
         },
     };
@@ -859,14 +872,14 @@ reporting::ProgressSource as_progress_source(TestProgressCounter const& counter)
             auto done = counter.done.load(std::memory_order_relaxed);
             auto total = counter.total;
             if (total <= 0)
-                return reporting::ProgressSnapshot{.label = "tests"};
+                return reporting::ProgressSnapshot{.label = "test"};
             auto percent = static_cast<int>(
                 (static_cast<std::int64_t>(done) * 100) / total);
             return reporting::ProgressSnapshot{
                 .done = done,
                 .total = total,
                 .percent = percent,
-                .label = "tests",
+                .label = "test",
             };
         },
     };
@@ -918,7 +931,7 @@ std::optional<StepFailure> run_steps_human(std::vector<core::ProcessStep> const&
                 observer = [&tracker](std::string_view chunk, bool stderr_stream) {
                     tracker.observe(chunk, stderr_stream);
                 };
-                renderer->start(as_progress_source(tracker));
+                renderer->start(as_progress_source(tracker, stage));
             }
         }
 
@@ -945,11 +958,20 @@ std::optional<StepFailure> run_configure_steps_human(std::vector<core::ProcessSt
                                                      int stage_total = 0) {
     print_human_stage("configure", stage_index, stage_total);
     maybe_print_windows_native_toolchain_warning(request);
+    auto renderer = reporting::system::make_live_progress_renderer();
+    auto live = renderer && renderer->active() && !steps.empty();
+    if (live)
+        renderer->start(indeterminate_progress_source("configure"));
     for (auto const& step : steps) {
         auto result = run_step(step, reporting::StreamMode::capture);
-        if (result.exit_code != 0)
+        if (result.exit_code != 0) {
+            if (live)
+                renderer->stop();
             return StepFailure{.step = step, .result = std::move(result)};
+        }
     }
+    if (live)
+        renderer->stop();
     return std::nullopt;
 }
 

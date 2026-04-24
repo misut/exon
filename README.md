@@ -282,7 +282,7 @@ ldflags = ["/fsanitize=address"]
 
 When these flags are present, exon now copies `clang_rt.asan_dynamic-x86_64.dll` next to each built executable and test binary. This makes direct execution from `.exon/debug/` work without manually editing `PATH`.
 
-`exon build` and `exon test` default to `human` output. In an interactive terminal, `human` shows indexed stages such as `[1/5] resolve`, fixed-width status cells such as `OK`, `FAIL`, and `TIMEOUT`, and a single-line live progress renderer for long build or test phases. The same path uses restrained ANSI styling for status and `error:` diagnostics. When stdout is not a TTY, `human` falls back to the same plain ASCII, stage-oriented summaries. `wrapped` adds the same command framing while still showing the underlying CMake/Ninja/test output, and `raw` keeps exon wrapping to a minimum.
+`exon build` and `exon test` default to `human` output. In an interactive terminal, `human` shows indexed stages such as `[1/5] resolve`, fixed-width status cells such as `OK`, `FAIL`, and `TIMEOUT`, and a single-line live progress renderer whose active phase label shimmers from left to right during long build or test phases. The same path uses restrained ANSI styling for status and `error:` diagnostics. When stdout is not a TTY, `human` falls back to the same plain ASCII, stage-oriented summaries. `wrapped` adds the same command framing while still showing the underlying CMake/Ninja/test output, and `raw` keeps exon wrapping to a minimum.
 
 Set `NO_COLOR=1` to force plain output and disable the interactive progress renderer even in a TTY session.
 
