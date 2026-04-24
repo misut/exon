@@ -1129,9 +1129,9 @@ void test_human_test_failed_output_mode() {
     check(result.exit_code == 1, "human test failed mode: exit code");
     check(result.stdout_text.contains("collected 3 test binaries"),
           "human test failed mode: collected count");
-    check(result.stdout_text.contains("OK      test-pass"),
+    check(result.stdout_text.contains("OK   test-pass"),
           "human test failed mode: pass status shown");
-    check(result.stdout_text.contains("FAIL    test-fail"),
+    check(result.stdout_text.contains("FAIL test-fail"),
           "human test failed mode: fail status shown");
     check(result.stdout_text.contains("TIMEOUT test-timeout"),
           "human test failed mode: timeout status shown");
