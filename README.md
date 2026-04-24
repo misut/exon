@@ -90,7 +90,7 @@ hello, world!
 | `exon debug [--release] [--debugger auto\|lldb\|gdb\|devenv\|cdb\|<path>] [--member <name>] [--exclude x,y] [-- <args...>]` | Build and open the selected native executable in a native debugger |
 | `exon test [--release] [--target <t>] [--member a,b] [--exclude x,y] [--timeout <sec>] [--output human\|json\|wrapped\|raw] [--show-output failed\|all\|none]` | Build and run tests |
 | `exon clean [--member a,b] [--exclude x,y]` | Remove build artifacts |
-| `exon add [--dev] <pkg> <ver>` | Add a git dependency |
+| `exon add [--dev] <pkg> <ver> [--features a,b] [--no-default-features]` | Add a git dependency |
 | `exon add [--dev] --path <name> <path>` | Add a local path dependency |
 | `exon add [--dev] --workspace <name>` | Add a workspace member dependency |
 | `exon add [--dev] --vcpkg <name> <ver> [--features a,b]` | Add a vcpkg dependency |
@@ -355,6 +355,19 @@ The version is a Cargo-style requirement. A bare version such as `0.2.0` means `
 ```sh
 exon add github.com/misut/tomlcpp 0.2.0
 exon add --dev github.com/user/testlib 0.1.0
+exon add github.com/user/codec 1.0.0 --features json --no-default-features
+```
+
+Git dependencies may declare `[features]` in their own `exon.toml`. Each
+feature expands to module basenames or to other feature names. When a provider
+declares `[features]`, exon includes only `default` plus the consumer-selected
+features; `default-features = false` disables the provider default. If a
+provider has no `[features]` table, all dependency modules are included. The
+selected feature set is recorded in `exon.lock`.
+
+```toml
+[dependencies]
+"github.com/user/codec" = { version = "1.0.0", default-features = false, features = ["json"] }
 ```
 
 Use `exon outdated` to compare locked git dependencies with remote semver tags. Path, workspace, find, vcpkg, and raw CMake dependencies are reported as skipped because they do not resolve through git tags.

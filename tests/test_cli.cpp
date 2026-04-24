@@ -179,6 +179,9 @@ void test_commands_usage_lists_human_output_mode() {
           "usage lists status command");
     check(usage.find("doctor [--output human|json]") != std::string::npos,
           "usage lists doctor alias");
+    check(usage.find("add [--dev] <pkg> <ver> [--features a,b] "
+                     "[--no-default-features]") != std::string::npos,
+          "usage lists git dependency feature options");
     check(usage.find("outdated [pkg...] [--member a,b] [--exclude x,y] "
                      "[--output human|json]") != std::string::npos,
           "usage lists outdated command");
@@ -251,6 +254,10 @@ void test_readme_output_docs_match_usage() {
               "`exon add [--dev] --git <repo> --version <v> --subdir <dir> [--name <n>]`") !=
               std::string::npos,
           "README documents git subdir add name override");
+    check(readme.find(
+              "`exon add [--dev] <pkg> <ver> [--features a,b] [--no-default-features]`") !=
+              std::string::npos,
+          "README documents git dependency feature options");
     check(readme.find(
               "`exon outdated [pkg...] [--member a,b] [--exclude x,y] [--output human\\|json]`") !=
               std::string::npos,

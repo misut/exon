@@ -175,6 +175,79 @@ void test_with_dependencies() {
     std::filesystem::remove_all(dep_path);
 }
 
+void test_git_dependency_features_filter_modules() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}\n");
+
+    auto dep_path = std::filesystem::temp_directory_path() / "exon_test_featured_dep";
+    std::filesystem::remove_all(dep_path);
+    std::filesystem::create_directories(dep_path / "src");
+    {
+        auto f = std::ofstream{dep_path / "exon.toml"};
+        f << R"([package]
+name = "featlib"
+version = "0.1.0"
+type = "lib"
+standard = 23
+
+[features]
+default = ["core"]
+json = ["json"]
+extra = ["json", "extra"]
+)";
+    }
+    {
+        auto f = std::ofstream{dep_path / "src" / "core.cppm"};
+        f << "export module featlib.core;";
+    }
+    {
+        auto f = std::ofstream{dep_path / "src" / "json.cppm"};
+        f << "export module featlib.json;";
+    }
+    {
+        auto f = std::ofstream{dep_path / "src" / "extra.cppm"};
+        f << "export module featlib.extra;";
+    }
+    {
+        auto f = std::ofstream{dep_path / "src" / "internal.cppm"};
+        f << "export module featlib.internal;";
+    }
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    std::vector<fetch::FetchedDep> default_deps = {{
+        .key = "github.com/user/featlib",
+        .name = "featlib",
+        .package_name = "featlib",
+        .version = "0.1.0",
+        .commit = "abc123",
+        .path = dep_path,
+    }};
+    auto default_cmake = build::generate_cmake(m, proj.root, default_deps, make_tc());
+    check(default_cmake.contains("core.cppm"), "git features: default module included");
+    check(!default_cmake.contains("json.cppm"), "git features: unselected feature excluded");
+    check(!default_cmake.contains("internal.cppm"), "git features: unlisted module excluded");
+
+    auto selected_deps = default_deps;
+    selected_deps[0].features = {"extra"};
+    selected_deps[0].default_features = false;
+    auto selected_cmake = build::generate_cmake(m, proj.root, selected_deps, make_tc());
+    check(!selected_cmake.contains("core.cppm"),
+          "git features: default module disabled");
+    check(selected_cmake.contains("json.cppm"),
+          "git features: nested feature module included");
+    check(selected_cmake.contains("extra.cppm"),
+          "git features: selected module included");
+    check(!selected_cmake.contains("internal.cppm"),
+          "git features: unlisted module still excluded");
+
+    std::filesystem::remove_all(dep_path);
+}
+
 void test_dev_deps_excluded_from_main() {
     TmpProject proj;
     proj.write("src/main.cpp", "int main() {}");
@@ -1528,6 +1601,8 @@ int main() {
     run("test_basic_bin", test_basic_bin);
     run("test_lib_with_modules", test_lib_with_modules);
     run("test_with_dependencies", test_with_dependencies);
+    run("test_git_dependency_features_filter_modules",
+        test_git_dependency_features_filter_modules);
     run("test_dev_deps_excluded_from_main", test_dev_deps_excluded_from_main);
     run("test_with_tests", test_with_tests);
     run("test_defines", test_defines);

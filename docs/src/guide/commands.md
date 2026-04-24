@@ -37,7 +37,8 @@ environment variables are `EXON_COLOR`, `EXON_PROGRESS`, `EXON_UNICODE`, and
 
 ## Dependencies
 
-- `exon add <pkg> <version>` — add a git dep to `[dependencies]`
+- `exon add <pkg> <version> [--features a,b] [--no-default-features]`
+  — add a git dep to `[dependencies]`
 - `exon add --path <name> <path>` — add a path dep to
   `[dependencies.path]`
 - `exon add --workspace <name>` — add a workspace dep to
@@ -54,6 +55,13 @@ environment variables are `EXON_COLOR`, `EXON_PROGRESS`, `EXON_UNICODE`, and
   — print the resolved dependency graph, deduping repeated packages as `(*)`
 - `exon why <pkg> [--member m[,n,...]] [--exclude x[,y,...]] [--dev] [--output human|json]`
   — print the dependency path from the selected root to a package
+
+Git dependency features are declared by the provider's `[features]` table.
+Feature entries expand to module basenames or to other feature names. When a
+provider declares `[features]`, exon builds only the provider default plus the
+consumer-selected features; `--no-default-features` or
+`default-features = false` disables the provider default. The selected feature
+set is recorded in `exon.lock`.
 
 ## Generation
 

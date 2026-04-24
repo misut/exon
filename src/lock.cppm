@@ -10,7 +10,7 @@ struct LockedDep {
     std::string version;
     std::string commit; // exact git commit hash
     std::string subdir; // non-empty for git+subdir deps
-    std::vector<std::string> features; // consumer-selected features (empty = all)
+    std::vector<std::string> features; // consumer-selected features
 };
 
 struct LockFile {

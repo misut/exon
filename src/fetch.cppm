@@ -16,7 +16,7 @@ struct FetchedDep {
     std::string subdir;         // non-empty for git+subdir deps
     bool is_dev = false;        // dev-dependency (test-only)
     bool is_path = false;       // local path / workspace dep (no git, no lock)
-    std::vector<std::string> features; // consumer-selected features (empty = all)
+    std::vector<std::string> features; // consumer-selected features
     bool default_features = true;
     std::vector<std::string> aliases; // compatibility aliases requested by manifests
     std::vector<std::string> dependency_names; // canonical child package names
