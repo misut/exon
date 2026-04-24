@@ -4,6 +4,7 @@ import cli;
 import core;
 import cppx.fs;
 import cppx.fs.system;
+import cppx.terminal;
 import toml;
 import manifest;
 import manifest.system;
@@ -17,10 +18,11 @@ import lock;
 import lock.system;
 import reporting;
 import reporting.system;
-import terminal;
 import templates;
 import toolchain;
 import toolchain.system;
+
+namespace terminal = cppx::terminal;
 
 export namespace commands {
 
