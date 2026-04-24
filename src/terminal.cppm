@@ -28,6 +28,7 @@ struct ProgressSnapshot {
     std::chrono::milliseconds elapsed{0};
     std::chrono::milliseconds remaining{0};
     std::string_view label;
+    std::string detail;
 };
 
 namespace ansi {
@@ -222,6 +223,8 @@ std::string format_progress_frame(ProgressSnapshot const& snapshot,
         auto out = std::format("  {} [{}] {}...", run, spin,
                                shimmer_label(label, frame_index, color_enabled));
         append_progress_timing(out, snapshot);
+        if (!snapshot.detail.empty())
+            out += std::format("\n{}", style(snapshot.detail, StyleRole::dim, color_enabled));
         return out;
     }
 
@@ -233,6 +236,8 @@ std::string format_progress_frame(ProgressSnapshot const& snapshot,
                       shimmer_label(snapshot.label, frame_index, color_enabled));
 
     append_progress_timing(out, snapshot);
+    if (!snapshot.detail.empty())
+        out += std::format("\n{}", style(snapshot.detail, StyleRole::dim, color_enabled));
     return out;
 }
 

@@ -44,6 +44,15 @@ void test_progress_frame() {
     }, 0, false);
     check(frame == "  RUN     [|] [12/56 21%] build",
           "progress frame uses status cell and spinner");
+
+    auto detailed = terminal::format_progress_frame({
+        .label = "discover",
+        .detail = "  locked: github.com/misut/tomlcpp v0.4.0 (12345678)",
+    }, 0, false);
+    check(detailed ==
+              "  RUN     [|] discover...\n"
+              "  locked: github.com/misut/tomlcpp v0.4.0 (12345678)",
+          "progress frame renders transient detail on the next line");
 }
 
 std::string active_char(char ch) {

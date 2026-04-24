@@ -53,6 +53,7 @@ struct ProgressSnapshot {
     std::chrono::milliseconds elapsed{0};
     std::chrono::milliseconds remaining{0};
     std::string_view label;
+    std::string detail;
 };
 
 struct ProgressSource {
