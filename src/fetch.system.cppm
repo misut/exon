@@ -63,6 +63,7 @@ struct DiscoveryState {
     std::vector<Candidate> candidates;
     std::map<std::string, std::size_t> source_to_index;
     std::optional<toolchain::Platform> platform;
+    std::function<void(std::string)> progress_detail;
 };
 
 std::filesystem::path cache_dir() {
@@ -197,8 +198,19 @@ struct MaterializedGitSource {
     std::string commit;
 };
 
+void report_dependency_status(std::function<void(std::string)> const& progress_detail,
+                              std::string line) {
+    if (progress_detail) {
+        progress_detail(std::move(line));
+        return;
+    }
+    if (!quiet_dependency_output())
+        std::println("{}", line);
+}
+
 MaterializedGitSource materialize_git_source(std::string const& repo, std::string const& version,
-                                             std::string const& expected_commit = {}) {
+                                             std::string const& expected_commit = {},
+                                             std::function<void(std::string)> const& progress_detail = {}) {
     auto cache_root = cache_dir();
     auto tag = to_git_tag(version);
     auto dep_cache = cache_root / cache_safe_key(repo) / tag;
@@ -206,12 +218,14 @@ MaterializedGitSource materialize_git_source(std::string const& repo, std::strin
     if (std::filesystem::exists(dep_cache)) {
         auto current_commit = get_git_commit(dep_cache);
         if (expected_commit.empty() || current_commit == expected_commit) {
-            if (!quiet_dependency_output()) {
-                if (!expected_commit.empty())
-                    std::println("  locked: {} {} ({})", repo, tag, current_commit.substr(0, 8));
-                else
-                    std::println("  cached: {} {} ({})", repo, tag, current_commit.substr(0, 8));
-            }
+            if (!expected_commit.empty())
+                report_dependency_status(progress_detail,
+                                         std::format("  locked: {} {} ({})",
+                                                     repo, tag, current_commit.substr(0, 8)));
+            else
+                report_dependency_status(progress_detail,
+                                         std::format("  cached: {} {} ({})",
+                                                     repo, tag, current_commit.substr(0, 8)));
             return {.path = dep_cache, .commit = current_commit};
         }
         std::filesystem::remove_all(dep_cache);
@@ -219,7 +233,9 @@ MaterializedGitSource materialize_git_source(std::string const& repo, std::strin
 
     std::filesystem::create_directories(dep_cache);
     auto git_url = to_git_url(repo);
-    if (quiet_dependency_output()) {
+    if (quiet_dependency_output() || progress_detail) {
+        report_dependency_status(progress_detail,
+                                 std::format("  fetching: {} {}...", repo, tag));
         auto result = reporting::system::run_process(
             core::ProcessSpec{
                 .program = "git",
@@ -259,7 +275,9 @@ Candidate materialize_candidate(DependencySpec const& spec, DiscoveryState const
     switch (spec.kind) {
     case DependencyKind::git: {
         auto locked = state.existing_lock.find(spec.key, spec.version);
-        auto source = materialize_git_source(spec.key, spec.version, locked ? locked->commit : "");
+        auto source = materialize_git_source(spec.key, spec.version,
+                                             locked ? locked->commit : "",
+                                             state.progress_detail);
         dep_path = source.path;
         commit = std::move(source.commit);
         candidate.key = spec.key;
@@ -269,7 +287,9 @@ Candidate materialize_candidate(DependencySpec const& spec, DiscoveryState const
     case DependencyKind::subdir: {
         auto lock_name = std::format("{}#{}", spec.key, spec.subdir);
         auto locked = state.existing_lock.find(lock_name, spec.version);
-        auto source = materialize_git_source(spec.key, spec.version, locked ? locked->commit : "");
+        auto source = materialize_git_source(spec.key, spec.version,
+                                             locked ? locked->commit : "",
+                                             state.progress_detail);
         dep_path = source.path / spec.subdir;
         if (!std::filesystem::exists(dep_path)) {
             throw std::runtime_error(std::format(
@@ -634,6 +654,8 @@ struct FetchProgressCounter {
     std::atomic<int> done{0};
     std::atomic<int> total{0};
     std::atomic<bool> discovery_phase{true};
+    mutable std::mutex detail_mutex;
+    std::string detail;
 };
 
 reporting::ProgressSource as_progress_source(FetchProgressCounter const& counter) {
@@ -642,10 +664,17 @@ reporting::ProgressSource as_progress_source(FetchProgressCounter const& counter
             auto done = counter.done.load(std::memory_order_relaxed);
             auto total = counter.total.load(std::memory_order_relaxed);
             auto discovering = counter.discovery_phase.load(std::memory_order_relaxed);
+            auto detail = std::string{};
+            {
+                auto lock = std::lock_guard{counter.detail_mutex};
+                detail = counter.detail;
+            }
             if (discovering)
-                return reporting::ProgressSnapshot{.label = "discover"};
+                return reporting::ProgressSnapshot{.label = "discover",
+                                                   .detail = std::move(detail)};
             if (total <= 0)
-                return reporting::ProgressSnapshot{.label = "resolve"};
+                return reporting::ProgressSnapshot{.label = "resolve",
+                                                   .detail = std::move(detail)};
             auto percent = static_cast<int>(
                 (static_cast<std::int64_t>(done) * 100) / total);
             return reporting::ProgressSnapshot{
@@ -653,6 +682,7 @@ reporting::ProgressSource as_progress_source(FetchProgressCounter const& counter
                 .total = total,
                 .percent = percent,
                 .label = "resolve",
+                .detail = std::move(detail),
             };
         },
     };
@@ -664,11 +694,6 @@ fetch::FetchResult fetch_all(fetch::FetchRequest const& request) {
         return result;
 
     auto existing_lock = lock::system::load(request.lock_path.string());
-    detail::DiscoveryState state{
-        .existing_lock = existing_lock,
-        .platform = request.platform,
-    };
-
     if (reporting::current_options.output == reporting::OutputMode::json) {
         reporting::emit_json_event("stage", {
             reporting::json_string("verb", "fetch"),
@@ -685,6 +710,23 @@ fetch::FetchResult fetch_all(fetch::FetchRequest const& request) {
     auto renderer = reporting::system::make_live_progress_renderer();
     if (renderer && renderer->active())
         renderer->start(as_progress_source(counter));
+
+    auto progress_detail = std::function<void(std::string)>{};
+    if (renderer && renderer->active()) {
+        progress_detail = [&counter, renderer = renderer.get()](std::string line) {
+            {
+                auto lock = std::lock_guard{counter.detail_mutex};
+                counter.detail = std::move(line);
+            }
+            renderer->refresh();
+        };
+    }
+
+    detail::DiscoveryState state{
+        .existing_lock = existing_lock,
+        .platform = request.platform,
+        .progress_detail = std::move(progress_detail),
+    };
 
     auto fetch_plan = fetch::plan(request);
 

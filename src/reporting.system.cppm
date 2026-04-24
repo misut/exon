@@ -780,6 +780,7 @@ terminal::system::ProgressSource to_terminal_source(ProgressSource source) {
                 .elapsed = snapshot->elapsed,
                 .remaining = snapshot->remaining,
                 .label = snapshot->label,
+                .detail = std::move(snapshot->detail),
             };
         },
     };

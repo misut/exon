@@ -58,13 +58,16 @@ public:
 private:
     void render_once();
     void clear_line();
+    void clear_rendered_frame();
 
     LiveProgressRenderMode mode_ = LiveProgressRenderMode::disabled;
     ProgressSource source_{};
     std::thread thread_;
     std::atomic<bool> stop_requested_ = false;
+    std::mutex render_mutex_;
     std::size_t spinner_index_ = 0;
     std::size_t last_width_ = 0;
+    std::size_t last_line_count_ = 0;
     bool cursor_hidden_ = false;
     std::chrono::steady_clock::time_point started_{};
 #if defined(_WIN32)
@@ -247,8 +250,7 @@ void write_raw(std::string_view text) {
     std::fwrite(text.data(), 1, text.size(), stdout);
 }
 
-std::string fit_to_terminal_width(std::string text) {
-    auto width = terminal_width();
+std::string fit_line_to_terminal_width(std::string text, std::size_t width) {
     if (width == 0 || text.size() <= width)
         return text;
     if (width <= 3)
@@ -256,6 +258,39 @@ std::string fit_to_terminal_width(std::string text) {
     text.resize(width - 3);
     text += "...";
     return text;
+}
+
+std::string fit_to_terminal_width(std::string text) {
+    auto width = terminal_width();
+    if (width == 0)
+        return text;
+
+    auto out = std::string{};
+    auto start = std::size_t{0};
+    while (start <= text.size()) {
+        auto end = text.find('\n', start);
+        auto last = end == std::string::npos;
+        auto line = last ? text.substr(start) : text.substr(start, end - start);
+        out += fit_line_to_terminal_width(std::move(line), width);
+        if (last)
+            break;
+        out.push_back('\n');
+        start = end + 1;
+    }
+    return out;
+}
+
+std::size_t rendered_line_count(std::string_view text) {
+    if (text.empty())
+        return 1;
+    return 1 + static_cast<std::size_t>(std::ranges::count(text, '\n'));
+}
+
+std::size_t rendered_last_line_width(std::string_view text) {
+    auto last_newline = text.rfind('\n');
+    if (last_newline == std::string_view::npos)
+        return text.size();
+    return text.size() - last_newline - 1;
 }
 
 } // namespace progress_detail
@@ -319,6 +354,7 @@ void LiveProgressRenderer::stop() {
 }
 
 void LiveProgressRenderer::render_once() {
+    auto render_lock = std::lock_guard{render_mutex_};
     if (!source_.poll)
         return;
 
@@ -342,15 +378,32 @@ void LiveProgressRenderer::render_once() {
     auto text = terminal::format_progress_frame(*progress, spinner_index_++,
                                                 stdout_is_tty());
     text = progress_detail::fit_to_terminal_width(std::move(text));
+    auto const line_count = progress_detail::rendered_line_count(text);
     if (mode_ == LiveProgressRenderMode::vt) {
         if (!cursor_hidden_) {
             progress_detail::write_raw("\x1b[?25l");
             cursor_hidden_ = true;
         }
-        progress_detail::write_raw("\r\x1b[2K");
+        if (last_line_count_ == 0)
+            progress_detail::write_raw("\r\x1b[2K");
+        else
+            clear_rendered_frame();
         progress_detail::write_raw(text);
         std::fflush(stdout);
-        last_width_ = 0;
+        last_width_ = progress_detail::rendered_last_line_width(text);
+        last_line_count_ = line_count;
+        return;
+    }
+
+    if (line_count > 1 || last_line_count_ > 1) {
+        if (last_line_count_ == 0)
+            progress_detail::write_raw("\r\x1b[2K");
+        else
+            clear_rendered_frame();
+        progress_detail::write_raw(text);
+        std::fflush(stdout);
+        last_width_ = progress_detail::rendered_last_line_width(text);
+        last_line_count_ = line_count;
         return;
     }
 
@@ -362,6 +415,28 @@ void LiveProgressRenderer::render_once() {
     }
     std::fflush(stdout);
     last_width_ = text.size();
+    last_line_count_ = 1;
+}
+
+void LiveProgressRenderer::clear_rendered_frame() {
+    if (last_line_count_ == 0)
+        return;
+
+    if (mode_ == LiveProgressRenderMode::vt || last_line_count_ > 1) {
+        progress_detail::write_raw("\r\x1b[2K");
+        for (std::size_t line = 1; line < last_line_count_; ++line)
+            progress_detail::write_raw("\x1b[1A\r\x1b[2K");
+        last_line_count_ = 0;
+        last_width_ = 0;
+        return;
+    }
+
+    progress_detail::write_raw("\r");
+    auto padding = std::string(last_width_, ' ');
+    progress_detail::write_raw(padding);
+    progress_detail::write_raw("\r");
+    last_line_count_ = 0;
+    last_width_ = 0;
 }
 
 void LiveProgressRenderer::clear_line() {
@@ -369,23 +444,16 @@ void LiveProgressRenderer::clear_line() {
         return;
 
     if (mode_ == LiveProgressRenderMode::vt) {
-        if (!cursor_hidden_)
-            return;
-        progress_detail::write_raw("\r\x1b[2K\x1b[?25h");
+        clear_rendered_frame();
+        if (cursor_hidden_)
+            progress_detail::write_raw("\x1b[?25h");
         std::fflush(stdout);
         cursor_hidden_ = false;
         return;
     }
 
-    if (last_width_ == 0)
-        return;
-
-    progress_detail::write_raw("\r");
-    auto padding = std::string(last_width_, ' ');
-    progress_detail::write_raw(padding);
-    progress_detail::write_raw("\r");
+    clear_rendered_frame();
     std::fflush(stdout);
-    last_width_ = 0;
 }
 
 std::unique_ptr<LiveProgressRenderer> make_live_progress_renderer() {
