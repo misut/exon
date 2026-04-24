@@ -1029,6 +1029,22 @@ void test_ninja_progress_helpers() {
           "progress sanitize: non-progress output preserved");
 }
 
+void test_live_output_tail_buffer() {
+    auto tail = build::system::detail::LineTailBuffer{3};
+    tail.observe("one", false);
+    check(tail.snapshot() == std::vector<std::string>{"one"},
+          "live tail: pending chunk is visible");
+
+    tail.observe("\ntwo\r[1/4 25%] \n[1/4 25%] Building CXX object foo.o\n",
+                 false);
+    tail.observe("stderr diagnostic\n", true);
+
+    auto lines = tail.snapshot();
+    check(lines == std::vector<std::string>{"two", "Building CXX object foo.o",
+                                            "stderr diagnostic"},
+          "live tail: keeps last lines and strips progress-only noise");
+}
+
 void test_live_progress_frame_format() {
     auto frame0 = reporting::system::format_progress_frame({
         .done = 12,
@@ -1075,6 +1091,17 @@ void test_progress_source_labels() {
           "configure progress source: indeterminate");
     check(configure_snapshot && configure_snapshot->label == "configure",
           "configure progress source: label is configure");
+
+    auto tail = build::system::detail::LineTailBuffer{};
+    tail.observe("[1/2 50%] Building CXX object foo.o\n", false);
+    auto tail_source = build::system::detail::as_progress_source(
+        tracker, "build", &tail);
+    auto tail_snapshot = tail_source.poll();
+    check(tail_snapshot && !tail_snapshot->detail_lines.empty(),
+          "progress source: detail lines available");
+    check(tail_snapshot && tail_snapshot->detail_lines.front() ==
+                               "Building CXX object foo.o",
+          "progress source: detail line is sanitized");
 }
 
 void test_human_build_success_output() {
@@ -1394,6 +1421,7 @@ int main(int argc, char* argv[]) {
     test_reporting_tee_collects_output();
     test_reporting_timeout_marks_result();
     test_ninja_progress_helpers();
+    test_live_output_tail_buffer();
     test_live_progress_frame_format();
     test_progress_source_labels();
     test_human_build_success_output();

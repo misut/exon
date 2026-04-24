@@ -55,6 +55,20 @@ void test_progress_frame() {
           "progress frame renders transient detail on the next line");
 }
 
+void test_progress_frame_with_detail_lines() {
+    auto frame = terminal::format_progress_frame({
+        .done = 12,
+        .total = 56,
+        .percent = 21,
+        .label = "build",
+        .detail_lines = {"Building CXX object foo.o", "Linking app"},
+    }, 0, false);
+    check(frame == "  RUN     [|] [12/56 21%] build\n"
+                   "    Building CXX object foo.o\n"
+                   "    Linking app",
+          "progress frame appends detail lines");
+}
+
 std::string active_char(char ch) {
     return std::format("\x1b[1m\x1b[36m{}\x1b[0m", ch);
 }
@@ -85,6 +99,7 @@ int main() {
     test_key_value();
     test_stage();
     test_progress_frame();
+    test_progress_frame_with_detail_lines();
     test_shimmer_label();
 
     if (failures > 0) {

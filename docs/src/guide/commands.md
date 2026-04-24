@@ -26,10 +26,13 @@ A quick reference of every exon subcommand.
 
 `build` and `test` default to `--output human`. Use `--output json`
 for JSON Lines events (`stage`, `diagnostic`, `artifact`,
-`test-result`, and `summary`). Terminal rendering can be controlled with
-`--color`, `--progress`, `--unicode`, and `--hyperlinks`, each accepting
-`auto`, `always`, or `never`; the matching environment variables are
-`EXON_COLOR`, `EXON_PROGRESS`, `EXON_UNICODE`, and `EXON_HYPERLINKS`.
+`test-result`, and `summary`). In an interactive terminal, human configure
+and build progress refreshes recent CMake/Ninja output lines in place while
+keeping full tool logs available through `--output wrapped`. Terminal
+rendering can be controlled with `--color`, `--progress`, `--unicode`, and
+`--hyperlinks`, each accepting `auto`, `always`, or `never`; the matching
+environment variables are `EXON_COLOR`, `EXON_PROGRESS`, `EXON_UNICODE`, and
+`EXON_HYPERLINKS`.
 
 ## Dependencies
 
