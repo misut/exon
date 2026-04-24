@@ -1,5 +1,6 @@
 import std;
 import commands;
+import fetch;
 import manifest;
 import manifest.system;
 
@@ -239,11 +240,57 @@ core = true
           "workspace root cmake: app added once");
 }
 
+void test_dependency_graph_paths_and_dedupe() {
+    auto m = manifest::Manifest{};
+    m.name = "app";
+    m.path_deps.emplace("middle", "../middle");
+    m.path_deps.emplace("leaf", "../leaf");
+
+    auto result = fetch::FetchResult{};
+    result.deps.push_back(fetch::FetchedDep{
+        .key = "leaf",
+        .name = "leaf",
+        .package_name = "leaf",
+        .path = std::filesystem::path{"/tmp/leaf"},
+        .is_path = true,
+    });
+    result.deps.push_back(fetch::FetchedDep{
+        .key = "middle",
+        .name = "middle",
+        .package_name = "middle",
+        .path = std::filesystem::path{"/tmp/middle"},
+        .is_path = true,
+        .dependency_names = {"leaf"},
+    });
+
+    auto graph = commands::build_dependency_graph("app", m, result, false);
+    check(graph.root_name == "app", "dependency graph: root name kept");
+    check(graph.root_dependencies.size() == 2,
+          "dependency graph: direct dependencies deduped");
+    check(graph.nodes.size() == 2, "dependency graph: nodes captured");
+    check(graph.nodes.at("middle").dependencies.size() == 1 &&
+              graph.nodes.at("middle").dependencies[0] == "leaf",
+          "dependency graph: transitive edge captured");
+
+    auto paths = commands::dependency_paths(graph, "leaf");
+    check(paths.size() == 2, "dependency graph: why finds direct and transitive paths");
+    auto has_direct = std::ranges::any_of(paths, [](auto const& path) {
+        return path.size() == 2 && path[0] == "app" && path[1] == "leaf";
+    });
+    auto has_transitive = std::ranges::any_of(paths, [](auto const& path) {
+        return path.size() == 3 && path[0] == "app" && path[1] == "middle" &&
+               path[2] == "leaf";
+    });
+    check(has_direct, "dependency graph: direct why path preserved");
+    check(has_transitive, "dependency graph: transitive why path preserved");
+}
+
 int main() {
     test_apply_workspace_defaults_for_member_package_and_build();
     test_select_workspace_members_orders_dependency_closure();
     test_cmd_init_workspace_and_cmd_new_updates_members();
     test_generate_workspace_root_cmake_uses_single_member_entries();
+    test_dependency_graph_paths_and_dedupe();
 
     if (failures > 0) {
         std::println("{} test(s) failed", failures);

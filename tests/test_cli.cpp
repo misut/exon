@@ -185,6 +185,12 @@ void test_commands_usage_lists_human_output_mode() {
     check(usage.find("update [pkg...] [--dry-run] [--precise <version>] "
                      "[--member a,b] [--exclude x,y]") != std::string::npos,
           "usage lists update package options");
+    check(usage.find("tree [--member a,b] [--exclude x,y] [--dev] "
+                     "[--features] [--output human|json]") != std::string::npos,
+          "usage lists tree command");
+    check(usage.find("why <pkg> [--member a,b] [--exclude x,y] [--dev] "
+                     "[--output human|json]") != std::string::npos,
+          "usage lists why command");
     check(usage.find("[--output human|json|wrapped|raw] [--show-output failed|all|none]") !=
               std::string::npos,
           "usage lists json output mode for test");
@@ -253,6 +259,14 @@ void test_readme_output_docs_match_usage() {
               "`exon update [pkg...] [--dry-run] [--precise <version>] [--member a,b] [--exclude x,y]`") !=
               std::string::npos,
           "README documents update package options");
+    check(readme.find(
+              "`exon tree [--member a,b] [--exclude x,y] [--dev] [--features] [--output human\\|json]`") !=
+              std::string::npos,
+          "README documents tree command");
+    check(readme.find(
+              "`exon why <pkg> [--member a,b] [--exclude x,y] [--dev] [--output human\\|json]`") !=
+              std::string::npos,
+          "README documents why command");
     check(readme.find("`exon version`") != std::string::npos,
           "README documents version command");
     check(readme.find("default to `human` output") != std::string::npos,

@@ -8,7 +8,8 @@ A quick reference of every exon subcommand.
   at `./name`
 - `exon new <name>` — create a new package at `./name` (always in a
   sibling directory, unlike `init`)
-- `exon info` — print resolved manifest and dependency tree
+- `exon info` — print basic package metadata; use `exon tree` for the
+  resolved dependency graph
 
 ## Build
 
@@ -43,12 +44,16 @@ environment variables are `EXON_COLOR`, `EXON_PROGRESS`, `EXON_UNICODE`, and
   `[dependencies.workspace]`
 - `exon add --dev ...` — write under `[dev-dependencies*]` instead
 - `exon remove <name>` — drop the dep entry from the manifest
-- `exon outdated [pkg...] [--member m[,n,...]] [--output human|json]`
+- `exon outdated [pkg...] [--member m[,n,...]] [--exclude x[,y,...]] [--output human|json]`
   — compare locked git dependencies with remote semver tags; non-git
   dependencies are reported as skipped
-- `exon update [pkg...] [--dry-run] [--precise <version>] [--member m[,n,...]]`
+- `exon update [pkg...] [--dry-run] [--precise <version>] [--member m[,n,...]] [--exclude x[,y,...]]`
   — refresh lockfile entries to the newest compatible git tag, or lock one
   package to a precise version that still satisfies its manifest requirement
+- `exon tree [--member m[,n,...]] [--exclude x[,y,...]] [--dev] [--features] [--output human|json]`
+  — print the resolved dependency graph, deduping repeated packages as `(*)`
+- `exon why <pkg> [--member m[,n,...]] [--exclude x[,y,...]] [--dev] [--output human|json]`
+  — print the dependency path from the selected root to a package
 
 ## Generation
 
