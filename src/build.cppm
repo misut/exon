@@ -861,8 +861,9 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         // Use pre-scanned resolved manifest for feature filtering and linking
         auto cached_it = resolved_dep_manifests.find(dep.path.string());
 
-        // filter .cppm files by features if consumer selected specific features
-        if (!dep.features.empty() && cached_it != resolved_dep_manifests.end()) {
+        // If the provider declares a [features] table, include only the
+        // module basenames selected by default + consumer features.
+        if (!dep.is_path && cached_it != resolved_dep_manifests.end()) {
             auto const& dep_m = cached_it->second;
             if (!dep_m.features.empty()) {
                 auto modules = manifest::resolve_features(

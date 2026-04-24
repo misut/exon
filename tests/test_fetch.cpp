@@ -767,6 +767,81 @@ middle = "../middle"
     unsetenv("EXON_CACHE_DIR");
 }
 
+void test_fetch_duplicate_feature_requests_are_additive() {
+    TmpWorkspace ws{"exon_test_fetch_feature_union"};
+    auto cache = ws.root / "cache";
+    setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
+
+    auto repos = ws.root / "repos";
+    fs::create_directories(repos);
+    TmpGitRepo feat_repo{repos, "featlib"};
+    feat_repo.write("exon.toml", R"([package]
+name = "featlib"
+version = "0.1.0"
+type = "lib"
+standard = 23
+
+[features]
+x = ["x"]
+y = ["y"]
+)");
+    feat_repo.write("src/featlib.cppm", "export module featlib;");
+    feat_repo.write("src/x.cppm", "export module featlib.x;");
+    feat_repo.write("src/y.cppm", "export module featlib.y;");
+    feat_repo.init_and_tag("v0.1.0");
+
+    ws.write("middle/exon.toml", std::format(R"([package]
+name = "middle"
+version = "0.1.0"
+type = "lib"
+standard = 23
+
+[dependencies]
+"{}" = {{ version = "0.1.0", features = ["x"] }}
+)", feat_repo.key()));
+    ws.write("middle/src/middle.cppm", "export module middle;");
+
+    ws.write("app/exon.toml", std::format(R"([package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+"{}" = {{ version = "0.1.0", features = ["y"] }}
+
+[dependencies.path]
+middle = "../middle"
+)", feat_repo.key()));
+    ws.write("app/src/main.cpp", "int main() {}");
+
+    try {
+        auto result = fetch_project(ws.root / "app");
+
+        auto it = std::ranges::find_if(result.deps, [](auto const& dep) {
+            return dep.name == "featlib";
+        });
+        check(it != result.deps.end(), "feature union: featlib resolved");
+        if (it != result.deps.end()) {
+            check(std::ranges::find(it->features, "x") != it->features.end(),
+                  "feature union: transitive feature kept");
+            check(std::ranges::find(it->features, "y") != it->features.end(),
+                  "feature union: root feature kept");
+        }
+
+        auto const* locked = result.lock_file.find(feat_repo.key(), "0.1.0");
+        check(locked != nullptr, "feature union: lock entry exists");
+        if (locked) {
+            check(std::ranges::find(locked->features, "x") != locked->features.end(),
+                  "feature union: lock keeps transitive feature");
+            check(std::ranges::find(locked->features, "y") != locked->features.end(),
+                  "feature union: lock keeps root feature");
+        }
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "  exception: {}", e.what());
+        ++failures;
+    }
+    unsetenv("EXON_CACHE_DIR");
+}
+
 void test_fetch_root_direct_git_overrides_transitive_version() {
     TmpWorkspace ws{"exon_test_fetch_root_git_override"};
     auto cache = ws.root / "cache";
@@ -1157,6 +1232,8 @@ int main() {
     run("test_fetch_git_transitive", test_fetch_git_transitive);
     run("test_fetch_path_with_subdir_dep", test_fetch_path_with_subdir_dep);
     run("test_fetch_path_with_featured_dep", test_fetch_path_with_featured_dep);
+    run("test_fetch_duplicate_feature_requests_are_additive",
+        test_fetch_duplicate_feature_requests_are_additive);
     run("test_fetch_root_direct_git_overrides_transitive_version",
         test_fetch_root_direct_git_overrides_transitive_version);
     run("test_fetch_no_lock_selects_latest_compatible",

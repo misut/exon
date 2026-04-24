@@ -521,6 +521,71 @@ empty = { version = "1.0.0", features = [] }
     check(m.vcpkg_deps.at("empty").features.empty(), "vcpkg features: empty array");
 }
 
+void test_git_dependency_features() {
+    auto input = R"(
+[package]
+name = "app"
+version = "1.0.0"
+
+[dependencies]
+"github.com/user/featlib" = { version = "0.1.0", features = ["json"], default-features = false }
+
+[dev-dependencies]
+"github.com/user/test-featlib" = { version = "0.2.0", features = ["mock"] }
+
+[features]
+default = ["core"]
+json = ["json"]
+mock = ["mock"]
+combo = ["json", "mock"]
+)";
+
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    check(m.featured_deps.size() == 1, "git features: one regular dep");
+    auto const& dep = m.featured_deps.at("github.com/user/featlib");
+    check(dep.version == "0.1.0", "git features: version parsed");
+    check(dep.features.size() == 1 && dep.features[0] == "json",
+          "git features: selected feature parsed");
+    check(!dep.default_features, "git features: default-features=false parsed");
+
+    check(m.dev_featured_deps.size() == 1, "git features: one dev dep");
+    check(m.dev_featured_deps.at("github.com/user/test-featlib").features[0] == "mock",
+          "git features: dev selected feature parsed");
+    check(m.dev_featured_deps.at("github.com/user/test-featlib").default_features,
+          "git features: dev default features enabled by default");
+
+    check(m.features.size() == 4, "git features: provider features parsed");
+    check(m.features.at("default")[0] == "core", "git features: default maps to module");
+    check(m.features.at("combo").size() == 2, "git features: feature can expand features/modules");
+}
+
+void test_resolve_git_features_to_modules() {
+    auto provider = std::map<std::string, std::vector<std::string>>{
+        {"default", {"core"}},
+        {"json", {"json"}},
+        {"extra", {"json", "extra"}},
+    };
+
+    auto default_modules = manifest::resolve_features(provider, {}, true);
+    check(default_modules.size() == 1 && default_modules.contains("core"),
+          "git features: default can name a module basename");
+
+    auto selected_modules = manifest::resolve_features(provider, {"extra"}, false);
+    check(selected_modules.size() == 2, "git features: selected feature expands modules");
+    check(selected_modules.contains("json"), "git features: nested module included");
+    check(selected_modules.contains("extra"), "git features: selected module included");
+
+    bool threw = false;
+    try {
+        (void)manifest::resolve_features(provider, {"missing"}, true);
+    } catch (std::runtime_error const&) {
+        threw = true;
+    }
+    check(threw, "git features: unknown selected feature throws");
+}
+
 void test_subdir_deps() {
     auto input = R"(
 [package]
@@ -964,6 +1029,8 @@ int main() {
     test_resolve_workspace_member();
     test_vcpkg_deps();
     test_vcpkg_deps_with_features();
+    test_git_dependency_features();
+    test_resolve_git_features_to_modules();
     test_subdir_deps();
     test_subdir_deps_missing_fields();
     test_platforms_specific();

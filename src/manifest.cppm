@@ -824,12 +824,8 @@ std::set<std::string> resolve_features(
 
     // collect active feature names
     std::set<std::string> active;
-    if (use_defaults) {
-        if (auto it = provider_features.find("default"); it != provider_features.end()) {
-            for (auto const& f : it->second)
-                active.insert(f);
-        }
-    }
+    if (use_defaults && provider_features.contains("default"))
+        active.insert("default");
     for (auto const& f : selected)
         active.insert(f);
 
@@ -851,7 +847,7 @@ std::set<std::string> resolve_features(
         if (it == provider_features.end())
             return;
         for (auto const& entry : it->second) {
-            if (provider_features.contains(entry))
+            if (entry != name && provider_features.contains(entry))
                 self(entry); // entry is another feature name
             else
                 modules.insert(entry); // entry is a module basename
