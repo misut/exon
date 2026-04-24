@@ -3,7 +3,8 @@
 exon is part of the misut C++23 workspace:
 
 - [intron](https://github.com/misut/intron) — toolchain manager
-  (llvm, cmake, ninja, wasi-sdk, wasmtime) that pairs with exon
+  (llvm, cmake, ninja, wasi-sdk, wasmtime, android-ndk) that pairs
+  with exon
 - [phenotype](https://github.com/misut/phenotype) — cross-platform UI
   framework and WebGPU 2D renderer
 - [codon](https://github.com/misut/codon) — documentation-site

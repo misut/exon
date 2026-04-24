@@ -1878,17 +1878,18 @@ int cmd_run(int argc, char* argv[]) {
             return command_error(runnable_target.error());
         bool is_wasm = !target.empty() && target.starts_with("wasm32");
         bool is_android = !target.empty() && target.ends_with("-linux-android");
+        if (is_android)
+            return command_error(
+                "cannot `exon run` an Android target on the host",
+                "use `exon build --target aarch64-linux-android`, then deploy the artifact "
+                "to a device or emulator");
+
         int rc = build::system::run(runnable_target->root,
                                     runnable_target->resolved_manifest,
                                     runnable_target->raw_manifest,
                                     release, target);
         if (rc != 0)
             return rc;
-
-        if (is_android)
-            throw std::runtime_error(
-                "cannot `exon run` an Android target on the host; deploy the produced library "
-                "to a device or emulator instead");
 
         auto project = build::project_context(runnable_target->root, release, target);
         core::ProcessSpec spec{

@@ -13,6 +13,8 @@ CMake by hand.
   builds
 - WebAssembly cross-compilation (`exon build --target wasm32-wasi`)
   using wasi-sdk
+- Android arm64 cross-compilation
+  (`exon build --target aarch64-linux-android`) using Android NDK
 - Workspaces with shared build flags, path and workspace deps, and
   selective builds
 - Hooks into the rest of the workspace toolchain: pairs with
@@ -36,4 +38,7 @@ exon run
 
 # Cross-compile to WebAssembly
 exon build --target wasm32-wasi
+
+# Cross-compile to Android arm64
+exon build --target aarch64-linux-android
 ```

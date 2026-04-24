@@ -35,6 +35,12 @@ rendering can be controlled with `--color`, `--progress`, `--unicode`, and
 environment variables are `EXON_COLOR`, `EXON_PROGRESS`, `EXON_UNICODE`, and
 `EXON_HYPERLINKS`.
 
+Supported cross targets are `wasm32-wasi` and `aarch64-linux-android`.
+Android builds require `android-ndk` via intron or `ANDROID_NDK_HOME`.
+`exon test --target aarch64-linux-android` is build-only on the host;
+`exon run --target aarch64-linux-android` fails early and expects you to
+deploy the artifact to a device or emulator.
+
 ## Dependencies
 
 - `exon add <pkg> <version> [--features a,b] [--no-default-features]`
