@@ -1116,11 +1116,15 @@ reporting::ProgressSource as_progress_source(TestProgressCounter const& counter)
 
 std::string format_test_status_cell(reporting::ProcessResult const& result,
                                     bool color_enabled) {
+    constexpr auto test_status_width = std::size_t{4};
     if (result.timed_out)
-        return terminal::status_cell(terminal::StatusKind::timeout, color_enabled);
+        return terminal::status_cell(terminal::StatusKind::timeout, color_enabled,
+                                     test_status_width);
     if (result.exit_code == 0)
-        return terminal::status_cell(terminal::StatusKind::ok, color_enabled);
-    return terminal::status_cell(terminal::StatusKind::fail, color_enabled);
+        return terminal::status_cell(terminal::StatusKind::ok, color_enabled,
+                                     test_status_width);
+    return terminal::status_cell(terminal::StatusKind::fail, color_enabled,
+                                 test_status_width);
 }
 
 void print_failure_excerpt(core::ProcessStep const& step,
