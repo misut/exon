@@ -395,26 +395,17 @@ void LiveProgressRenderer::render_once() {
         return;
     }
 
-    if (line_count > 1 || last_line_count_ > 1) {
-        if (last_line_count_ == 0)
-            progress_detail::write_raw("\r\x1b[2K");
-        else
-            clear_rendered_frame();
-        progress_detail::write_raw(text);
-        std::fflush(stdout);
-        last_width_ = progress_detail::rendered_last_line_width(text);
-        last_line_count_ = line_count;
-        return;
-    }
-
+    auto text_line = text;
+    if (auto newline = text_line.find('\n'); newline != std::string::npos)
+        text_line.resize(newline);
     progress_detail::write_raw("\r");
-    progress_detail::write_raw(text);
-    if (text.size() < last_width_) {
-        auto padding = std::string(last_width_ - text.size(), ' ');
+    progress_detail::write_raw(text_line);
+    if (text_line.size() < last_width_) {
+        auto padding = std::string(last_width_ - text_line.size(), ' ');
         progress_detail::write_raw(padding);
     }
     std::fflush(stdout);
-    last_width_ = text.size();
+    last_width_ = text_line.size();
     last_line_count_ = 1;
 }
 
@@ -449,6 +440,7 @@ void LiveProgressRenderer::clear_line() {
             progress_detail::write_raw("\x1b[?25h");
         std::fflush(stdout);
         cursor_hidden_ = false;
+        last_line_count_ = 0;
         return;
     }
 
@@ -478,7 +470,7 @@ std::unique_ptr<LiveProgressRenderer> make_live_progress_renderer() {
 #else
     if (!progress_enabled_for_stdout())
         return {};
-    return std::make_unique<LiveProgressRenderer>(LiveProgressRenderMode::carriage_return);
+    return std::make_unique<LiveProgressRenderer>(LiveProgressRenderMode::vt);
 #endif
 }
 

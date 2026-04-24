@@ -248,6 +248,8 @@ void test_readme_output_docs_match_usage() {
     check(readme.find("active phase label shimmers from left to right") !=
               std::string::npos,
           "README documents progress label shimmer");
+    check(readme.find("latest CMake/Ninja output lines") != std::string::npos,
+          "README documents live tool output tail");
     check(readme.find("When stdout is not a TTY") != std::string::npos,
           "README documents non-tty fallback");
     check(readme.find("NO_COLOR=1") != std::string::npos,

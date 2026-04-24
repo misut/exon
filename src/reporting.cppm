@@ -54,6 +54,7 @@ struct ProgressSnapshot {
     std::chrono::milliseconds remaining{0};
     std::string_view label;
     std::string detail;
+    std::vector<std::string> detail_lines;
 };
 
 struct ProgressSource {

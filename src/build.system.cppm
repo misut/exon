@@ -1061,30 +1061,108 @@ private:
     std::optional<NinjaProgressUpdate> latest_;
 };
 
-reporting::ProgressSource indeterminate_progress_source(std::string_view label) {
+class LineTailBuffer {
+public:
+    explicit LineTailBuffer(std::size_t max_lines = 3)
+        : max_lines_(max_lines) {}
+
+    void observe(std::string_view chunk, bool stderr_stream) {
+        (void)stderr_stream;
+        if (chunk.empty())
+            return;
+
+        auto lock = std::lock_guard{mutex_};
+        for (auto ch : chunk) {
+            if (ch == '\n' || ch == '\r') {
+                consume_pending_locked();
+                continue;
+            }
+            pending_.push_back(ch);
+        }
+    }
+
+    void finish() {
+        auto lock = std::lock_guard{mutex_};
+        consume_pending_locked();
+    }
+
+    std::vector<std::string> snapshot() const {
+        auto lock = std::lock_guard{mutex_};
+        if (max_lines_ == 0)
+            return {};
+        auto out = std::vector<std::string>{lines_.begin(), lines_.end()};
+        auto pending = sanitized_pending_locked();
+        if (!pending.empty()) {
+            if (out.size() >= max_lines_)
+                out.erase(out.begin());
+            out.push_back(std::move(pending));
+        }
+        return out;
+    }
+
+private:
+    std::string sanitized_pending_locked() const {
+        auto stripped = strip_ninja_progress_prefix_view(pending_);
+        if (!has_visible_text(stripped))
+            return {};
+        return std::string{stripped};
+    }
+
+    void consume_pending_locked() {
+        auto line = sanitized_pending_locked();
+        pending_.clear();
+        if (line.empty())
+            return;
+        if (max_lines_ == 0)
+            return;
+        lines_.push_back(std::move(line));
+        while (lines_.size() > max_lines_)
+            lines_.pop_front();
+    }
+
+    std::size_t max_lines_ = 3;
+    mutable std::mutex mutex_;
+    std::deque<std::string> lines_;
+    std::string pending_;
+};
+
+reporting::ProgressSource indeterminate_progress_source(std::string_view label,
+                                                        LineTailBuffer const* tail = nullptr) {
     auto owned_label = std::string{label};
     return reporting::ProgressSource{
-        .poll = [label = std::move(owned_label)]()
+        .poll = [label = std::move(owned_label), tail]()
             -> std::optional<reporting::ProgressSnapshot> {
-            return reporting::ProgressSnapshot{.label = label};
+            return reporting::ProgressSnapshot{
+                .label = label,
+                .detail_lines = tail ? tail->snapshot() : std::vector<std::string>{},
+            };
         },
     };
 }
 
 reporting::ProgressSource as_progress_source(NinjaProgressTracker& tracker,
-                                             std::string_view label = {}) {
+                                             std::string_view label = {},
+                                             LineTailBuffer const* tail = nullptr) {
     auto owned_label = std::string{label};
     return reporting::ProgressSource{
-        .poll = [&tracker, label = std::move(owned_label)]()
+        .poll = [&tracker, label = std::move(owned_label), tail]()
             -> std::optional<reporting::ProgressSnapshot> {
             auto snap = tracker.snapshot();
-            if (!snap)
+            auto detail_lines = tail ? tail->snapshot() : std::vector<std::string>{};
+            if (!snap && tail == nullptr)
                 return std::nullopt;
+            if (!snap) {
+                return reporting::ProgressSnapshot{
+                    .label = label,
+                    .detail_lines = std::move(detail_lines),
+                };
+            }
             return reporting::ProgressSnapshot{
                 .done = snap->finished,
                 .total = snap->total,
                 .percent = snap->percent,
                 .label = label,
+                .detail_lines = std::move(detail_lines),
             };
         },
     };
@@ -1156,25 +1234,28 @@ std::optional<StepFailure> run_steps_human(std::vector<core::ProcessStep> const&
         auto observer = reporting::system::OutputObserver{};
         auto renderer = std::unique_ptr<reporting::system::LiveProgressRenderer>{};
         auto tracker = NinjaProgressTracker{};
+        auto output_tail = LineTailBuffer{};
         auto enable_live_progress = false;
         if (use_ninja_status) {
             renderer = reporting::system::make_live_progress_renderer();
             enable_live_progress = renderer && renderer->active();
             if (enable_live_progress) {
-                observer = [&tracker](std::string_view chunk, bool stderr_stream) {
+                observer = [&tracker, &output_tail](std::string_view chunk, bool stderr_stream) {
                     tracker.observe(chunk, stderr_stream);
+                    output_tail.observe(chunk, stderr_stream);
                 };
-                renderer->start(as_progress_source(tracker, stage));
+                renderer->start(as_progress_source(tracker, stage, &output_tail));
             }
         }
 
         auto result = run_step(step, reporting::StreamMode::capture,
                                enable_live_progress ? human_ninja_status_format
                                                     : std::string_view{},
-                               std::move(observer));
+                               observer);
 
         if (enable_live_progress) {
             tracker.finish();
+            output_tail.finish();
             renderer->refresh();
             renderer->stop();
         }
@@ -1193,18 +1274,30 @@ std::optional<StepFailure> run_configure_steps_human(std::vector<core::ProcessSt
     maybe_print_windows_native_toolchain_warning(request);
     auto renderer = reporting::system::make_live_progress_renderer();
     auto live = renderer && renderer->active() && !steps.empty();
+    auto output_tail = LineTailBuffer{};
+    auto observer = reporting::system::OutputObserver{};
     if (live)
-        renderer->start(indeterminate_progress_source("configure"));
+        observer = [&output_tail](std::string_view chunk, bool stderr_stream) {
+            output_tail.observe(chunk, stderr_stream);
+        };
+    if (live)
+        renderer->start(indeterminate_progress_source("configure", &output_tail));
     for (auto const& step : steps) {
-        auto result = run_step(step, reporting::StreamMode::capture);
+        auto result = run_step(step, reporting::StreamMode::capture, {}, observer);
         if (result.exit_code != 0) {
-            if (live)
+            if (live) {
+                output_tail.finish();
+                renderer->refresh();
                 renderer->stop();
+            }
             return StepFailure{.step = step, .result = std::move(result)};
         }
     }
-    if (live)
+    if (live) {
+        output_tail.finish();
+        renderer->refresh();
         renderer->stop();
+    }
     return std::nullopt;
 }
 

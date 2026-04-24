@@ -29,6 +29,7 @@ struct ProgressSnapshot {
     std::chrono::milliseconds remaining{0};
     std::string_view label;
     std::string detail;
+    std::vector<std::string> detail_lines;
 };
 
 namespace ansi {
@@ -210,6 +211,16 @@ void append_progress_timing(std::string& out, ProgressSnapshot const& snapshot) 
         out += std::format(" {:.1f}/s", snapshot.rate);
 }
 
+void append_progress_detail_lines(std::string& out, ProgressSnapshot const& snapshot) {
+    for (auto const& line : snapshot.detail_lines) {
+        if (line.empty())
+            continue;
+        out.push_back('\n');
+        out.append("    ");
+        out += line;
+    }
+}
+
 std::string format_progress_frame(ProgressSnapshot const& snapshot,
                                   std::size_t frame_index,
                                   bool color_enabled = false) {
@@ -225,6 +236,7 @@ std::string format_progress_frame(ProgressSnapshot const& snapshot,
         append_progress_timing(out, snapshot);
         if (!snapshot.detail.empty())
             out += std::format("\n{}", style(snapshot.detail, StyleRole::dim, color_enabled));
+        append_progress_detail_lines(out, snapshot);
         return out;
     }
 
@@ -238,6 +250,7 @@ std::string format_progress_frame(ProgressSnapshot const& snapshot,
     append_progress_timing(out, snapshot);
     if (!snapshot.detail.empty())
         out += std::format("\n{}", style(snapshot.detail, StyleRole::dim, color_enabled));
+    append_progress_detail_lines(out, snapshot);
     return out;
 }
 
