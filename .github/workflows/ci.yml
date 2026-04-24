@@ -12,6 +12,10 @@ on:
       - ".intron.toml"
       - ".claude/**"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   build:
     strategy:
@@ -36,7 +40,7 @@ jobs:
           sed -n 's/^"vfox:misut\/mise-exon"[[:space:]]*=[[:space:]]*"\([^"]*\)"$/exon=\1/p' mise.toml >> "$GITHUB_OUTPUT"
 
       - name: Cache toolchains
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.intron/toolchains
           key: intron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.intron.toml') }}
@@ -114,9 +118,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
-      - name: Setup MSVC
-        uses: ilammy/msvc-dev-cmd@v1
-
       - name: Install toolchains
         shell: pwsh
         run: |
@@ -127,20 +128,26 @@ jobs:
       - name: Bootstrap build
         shell: pwsh
         run: |
+          Invoke-Expression (& intron env | Out-String)
           cmake -B build -G Ninja
           cmake --build build --target exon
 
       - name: Self-host build
         shell: pwsh
-        run: .\build\exon.exe build
+        run: |
+          Invoke-Expression (& intron env | Out-String)
+          .\build\exon.exe build
 
       - name: Self-host test
         shell: pwsh
-        run: .\.exon\debug\exon.exe test --timeout 60
+        run: |
+          Invoke-Expression (& intron env | Out-String)
+          .\.exon\debug\exon.exe test --timeout 60
 
       - name: Windows ASan smoke
         shell: pwsh
         run: |
+          Invoke-Expression (& intron env | Out-String)
           $smoke = Join-Path $env:RUNNER_TEMP "exon-asan-smoke"
           Remove-Item -LiteralPath $smoke -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path (Join-Path $smoke "src") | Out-Null

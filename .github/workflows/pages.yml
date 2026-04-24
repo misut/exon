@@ -18,6 +18,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   # Pin the codon release and the phenotype tag that shipped with it.
   # When codon publishes a new reader.wasm, bump both in lockstep.
   CODON_TAG: v0.1.1
@@ -60,7 +61,7 @@ jobs:
             -o dist/phenotype.js
           ls -la dist/
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v4
         with:
           path: dist
 
