@@ -50,6 +50,10 @@ struct FetchRequest {
     std::filesystem::path lock_path;
     bool include_dev = false;
     std::optional<toolchain::Platform> platform = std::nullopt;
+    std::vector<std::string> update_packages;
+    std::optional<std::string> precise_version = std::nullopt;
+    bool update_all = false;
+    bool dry_run = false;
 };
 
 struct FetchPlan {
@@ -58,6 +62,18 @@ struct FetchPlan {
     std::optional<toolchain::Platform> platform = std::nullopt;
     bool include_dev = false;
     std::vector<FetchRoot> roots;
+};
+
+struct DependencyUpdateStatus {
+    std::string key;
+    std::string package_name;
+    std::string requirement;
+    std::string current_version;
+    std::string latest_compatible_version;
+    std::string latest_version;
+    std::string status;
+    std::string reason;
+    bool is_dev = false;
 };
 
 bool has_dependencies(manifest::Manifest const& m, bool include_dev = false) {

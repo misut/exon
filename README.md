@@ -96,7 +96,8 @@ hello, world!
 | `exon add [--dev] --vcpkg <name> <ver> [--features a,b]` | Add a vcpkg dependency |
 | `exon add [--dev] --git <repo> --version <v> --subdir <dir> [--name <n>]` | Add a git dep pointing to a subdirectory |
 | `exon remove <pkg>` | Remove a dependency |
-| `exon update [--member a,b] [--exclude x,y]` | Update dependencies |
+| `exon outdated [pkg...] [--member a,b] [--exclude x,y] [--output human\|json]` | Check git dependencies for newer semver tags |
+| `exon update [pkg...] [--dry-run] [--precise <version>] [--member a,b] [--exclude x,y]` | Update lockfile entries to latest compatible versions |
 | `exon sync [--member a,b] [--exclude x,y]` | Sync CMakeLists.txt with exon.toml |
 | `exon fmt` | Format source files with clang-format |
 | `exon version` | Show exon version |
@@ -254,7 +255,7 @@ ldflags = ["-fsanitize=address"]
 
 Workspace roots are not runnable packages themselves. From the root:
 
-- `exon build`, `exon check`, `exon test`, `exon sync`, `exon clean`, and `exon update` accept `--member a,b` and `--exclude x,y`
+- `exon build`, `exon check`, `exon test`, `exon sync`, `exon clean`, `exon outdated`, and `exon update` accept `--member a,b` and `--exclude x,y`
 - `exon run --member <name>` runs a member package
 - root builds use a unified graph under `.exon/workspace/<profile>` (or `.exon/workspace/<target>/<profile>` for cross-target builds)
 - member execution order follows workspace dependency order, not the declaration order in `members = [...]`
@@ -347,11 +348,26 @@ Fetched from GitHub (or any git remote) and built from source.
 "github.com/misut/tomlcpp" = "0.2.0"
 ```
 
-The version becomes a git tag (`v0.2.0`). The short name (`tomlcpp`) becomes the CMake target.
+The version is a Cargo-style requirement. A bare version such as `0.2.0` means `^0.2.0`; use `=0.2.0` for an exact pin. Exon selects the newest compatible stable semver tag from either `v0.2.0` or `0.2.0`, then records the selected version and commit in `exon.lock`. The short name (`tomlcpp`) becomes the CMake target.
 
 ```sh
 exon add github.com/misut/tomlcpp 0.2.0
 exon add --dev github.com/user/testlib 0.1.0
+```
+
+Use `exon outdated` to compare locked git dependencies with remote semver tags. Path, workspace, find, vcpkg, and raw CMake dependencies are reported as skipped because they do not resolve through git tags.
+
+```sh
+exon outdated
+exon outdated github.com/misut/tomlcpp --output json
+```
+
+Use `exon update` to refresh `exon.lock` without rebuilding. With no package argument it updates every git dependency to the newest compatible tag. With a package argument it performs a conservative update for that dependency and only changes transitive dependencies when the resolved graph requires it. `--dry-run` prints the lockfile changes without writing `exon.lock`; `--precise <version>` locks one package to a specific version that still satisfies the manifest requirement.
+
+```sh
+exon update
+exon update github.com/misut/tomlcpp --dry-run
+exon update github.com/misut/tomlcpp --precise 0.3.1
 ```
 
 **Depending on a package inside a remote monorepo**: use inline-table syntax with `subdir`. The TOML key becomes the CMake target name.

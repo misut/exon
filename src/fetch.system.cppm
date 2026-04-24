@@ -6,6 +6,7 @@ import manifest;
 import manifest.system;
 import reporting;
 import reporting.system;
+import semver;
 import toolchain;
 import toolchain.system;
 import lock;
@@ -64,6 +65,9 @@ struct DiscoveryState {
     std::map<std::string, std::size_t> source_to_index;
     std::optional<toolchain::Platform> platform;
     std::function<void(std::string)> progress_detail;
+    std::vector<std::string> update_packages;
+    std::optional<std::string> precise_version;
+    bool update_all = false;
 };
 
 std::filesystem::path cache_dir() {
@@ -101,6 +105,125 @@ std::string to_git_tag(std::string const& version) {
     if (version.starts_with("v"))
         return version;
     return std::format("v{}", version);
+}
+
+std::string lock_name(DependencySpec const& spec) {
+    if (spec.kind == DependencyKind::subdir)
+        return std::format("{}#{}", spec.key, spec.subdir);
+    return spec.key;
+}
+
+lock::LockedDep const* find_locked_by_name(lock::LockFile const& lf,
+                                           std::string const& name) {
+    for (auto const& dep : lf.packages) {
+        if (dep.name == name)
+            return &dep;
+    }
+    return nullptr;
+}
+
+bool package_filter_matches(std::vector<std::string> const& filters,
+                            DependencySpec const& spec,
+                            lock::LockedDep const* locked = nullptr) {
+    if (filters.empty())
+        return false;
+    auto const locked_name = lock_name(spec);
+    for (auto const& filter : filters) {
+        if (filter == spec.key || filter == spec.requested_name || filter == locked_name)
+            return true;
+        if (locked && (filter == locked->package || filter == locked->name))
+            return true;
+    }
+    return false;
+}
+
+bool should_update(DependencySpec const& spec, DiscoveryState const& state,
+                   lock::LockedDep const* locked) {
+    if (spec.kind == DependencyKind::path)
+        return false;
+    return state.update_all || package_filter_matches(state.update_packages, spec, locked);
+}
+
+struct RemoteVersion {
+    semver::Version version;
+    std::string text;
+    std::string tag;
+    std::string commit;
+};
+
+std::optional<RemoteVersion> parse_remote_tag(std::string_view line) {
+    auto tab = line.find('\t');
+    if (tab == std::string_view::npos)
+        return std::nullopt;
+    auto commit = std::string{line.substr(0, tab)};
+    auto ref = line.substr(tab + 1);
+    constexpr auto prefix = std::string_view{"refs/tags/"};
+    if (!ref.starts_with(prefix))
+        return std::nullopt;
+    auto tag = ref.substr(prefix.size());
+
+    auto parsed = semver::try_parse(tag);
+    if (!parsed && tag.starts_with("v"))
+        parsed = semver::try_parse(tag.substr(1));
+    if (!parsed)
+        return std::nullopt;
+
+    return RemoteVersion{
+        .version = *parsed,
+        .text = semver::to_string(*parsed),
+        .tag = std::string{tag},
+        .commit = std::move(commit),
+    };
+}
+
+std::vector<RemoteVersion> list_remote_versions(std::string const& repo,
+                                                bool allow_prerelease) {
+    auto result = reporting::system::run_process(
+        core::ProcessSpec{
+            .program = "git",
+            .args = {"ls-remote", "--tags", "--refs", to_git_url(repo)},
+        },
+        reporting::StreamMode::capture);
+    if (result.exit_code != 0) {
+        auto detail = !result.stderr_text.empty() ? result.stderr_text : result.stdout_text;
+        while (!detail.empty() && (detail.front() == '\n' || detail.front() == '\r'))
+            detail.erase(detail.begin());
+        if (auto end = detail.find_first_of("\r\n"); end != std::string::npos)
+            detail = detail.substr(0, end);
+        if (!detail.empty())
+            throw std::runtime_error(std::format("failed to list tags for {}: {}", repo, detail));
+        throw std::runtime_error(std::format("failed to list tags for {}", repo));
+    }
+
+    auto versions = std::vector<RemoteVersion>{};
+    auto stream = std::istringstream{result.stdout_text};
+    auto line = std::string{};
+    while (std::getline(stream, line)) {
+        auto parsed = parse_remote_tag(line);
+        if (!parsed)
+            continue;
+        if (parsed->version.is_prerelease() && !allow_prerelease)
+            continue;
+        versions.push_back(std::move(*parsed));
+    }
+
+    std::ranges::sort(versions, [](RemoteVersion const& lhs, RemoteVersion const& rhs) {
+        if (lhs.version != rhs.version)
+            return lhs.version < rhs.version;
+        return lhs.tag < rhs.tag;
+    });
+    versions.erase(std::ranges::unique(versions, {}, &RemoteVersion::text).begin(),
+                   versions.end());
+    return versions;
+}
+
+std::optional<RemoteVersion> latest_satisfying(std::vector<RemoteVersion> const& versions,
+                                               semver::Range const& range) {
+    for (auto it = versions.rbegin(); it != versions.rend(); ++it) {
+        if (semver::satisfies(it->version, range))
+            return *it;
+    }
+    return std::nullopt;
 }
 
 std::string get_git_commit(std::filesystem::path const& repo_path) {
@@ -233,35 +356,97 @@ MaterializedGitSource materialize_git_source(std::string const& repo, std::strin
 
     std::filesystem::create_directories(dep_cache);
     auto git_url = to_git_url(repo);
+    auto tags_to_try = std::vector<std::string>{tag};
+    if (tag != version)
+        tags_to_try.push_back(version);
     if (quiet_dependency_output() || progress_detail) {
         report_dependency_status(progress_detail,
                                  std::format("  fetching: {} {}...", repo, tag));
-        auto result = reporting::system::run_process(
-            core::ProcessSpec{
-                .program = "git",
-                .args = {"clone", "--depth", "1", "--branch", tag, git_url,
-                         dep_cache.string()},
-            },
-            reporting::StreamMode::capture);
-        if (result.exit_code != 0) {
+        reporting::ProcessResult last_result;
+        auto fetched = false;
+        for (auto const& clone_tag : tags_to_try) {
             std::filesystem::remove_all(dep_cache);
-            auto detail = first_line(!result.stderr_text.empty() ? result.stderr_text
-                                                                 : result.stdout_text);
+            std::filesystem::create_directories(dep_cache);
+            last_result = reporting::system::run_process(
+                core::ProcessSpec{
+                    .program = "git",
+                    .args = {"clone", "--depth", "1", "--branch", clone_tag, git_url,
+                             dep_cache.string()},
+                },
+                reporting::StreamMode::capture);
+            if (last_result.exit_code == 0) {
+                fetched = true;
+                break;
+            }
+        }
+        if (!fetched) {
+            std::filesystem::remove_all(dep_cache);
+            auto detail = first_line(!last_result.stderr_text.empty() ? last_result.stderr_text
+                                                                      : last_result.stdout_text);
             if (!detail.empty())
                 throw std::runtime_error(std::format("failed to fetch {} {}: {}", repo, tag, detail));
             throw std::runtime_error(std::format("failed to fetch {} {}", repo, tag));
         }
     } else {
-        auto cmd = std::format("git clone --depth 1 --branch {} {} {} 2>&1", tag, git_url,
-                               toolchain::shell_quote(dep_cache.string()));
         std::println("  fetching: {} {}...", repo, tag);
-        int rc = std::system(cmd.c_str());
-        if (rc != 0) {
+        auto fetched = false;
+        for (auto const& clone_tag : tags_to_try) {
+            std::filesystem::remove_all(dep_cache);
+            std::filesystem::create_directories(dep_cache);
+            auto cmd = std::format("git clone --depth 1 --branch {} {} {} 2>&1", clone_tag,
+                                   git_url, toolchain::shell_quote(dep_cache.string()));
+            int rc = std::system(cmd.c_str());
+            if (rc == 0) {
+                fetched = true;
+                break;
+            }
+        }
+        if (!fetched) {
             std::filesystem::remove_all(dep_cache);
             throw std::runtime_error(std::format("failed to fetch {} {}", repo, tag));
         }
     }
     return {.path = dep_cache, .commit = get_git_commit(dep_cache)};
+}
+
+DependencySpec resolve_git_version(DependencySpec spec, DiscoveryState const& state) {
+    if (spec.kind == DependencyKind::path)
+        return spec;
+
+    auto range = semver::parse_range(spec.version);
+    auto locked = find_locked_by_name(state.existing_lock, lock_name(spec));
+    auto updating = should_update(spec, state, locked);
+
+    if (!updating && locked) {
+        if (auto locked_version = semver::try_parse(locked->version);
+            locked_version && semver::satisfies(*locked_version, range)) {
+            spec.version = semver::to_string(*locked_version);
+            return spec;
+        }
+    }
+
+    if (updating && state.precise_version) {
+        auto precise = semver::parse(*state.precise_version);
+        if (!semver::satisfies(precise, range)) {
+            throw std::runtime_error(std::format(
+                "precise version {} does not satisfy requirement '{}' for '{}'",
+                semver::to_string(precise), spec.version,
+                spec.requested_name.empty() ? spec.key : spec.requested_name));
+        }
+        spec.version = semver::to_string(precise);
+        return spec;
+    }
+
+    auto versions = list_remote_versions(spec.key, range.allows_prerelease);
+    auto selected = latest_satisfying(versions, range);
+    if (!selected) {
+        throw std::runtime_error(std::format(
+            "no compatible semver tag found for '{}' matching '{}'",
+            spec.requested_name.empty() ? spec.key : spec.requested_name,
+            spec.version));
+    }
+    spec.version = selected->text;
+    return spec;
 }
 
 Candidate materialize_candidate(DependencySpec const& spec, DiscoveryState const& state) {
@@ -421,19 +606,20 @@ std::vector<DependencySpec> collect_child_specs(Candidate const& candidate, bool
 }
 
 std::size_t discover_candidate(DependencySpec const& spec, DiscoveryState& state) {
-    auto source_id = source_identity(spec);
+    auto resolved_spec = resolve_git_version(spec, state);
+    auto source_id = source_identity(resolved_spec);
     auto existing = state.source_to_index.find(source_id);
     if (existing == state.source_to_index.end()) {
-        auto candidate = materialize_candidate(spec, state);
-        merge_request(candidate, spec);
-        candidate.processed_regular_children = !spec.is_dev;
-        candidate.processed_dev_children = spec.is_dev;
+        auto candidate = materialize_candidate(resolved_spec, state);
+        merge_request(candidate, resolved_spec);
+        candidate.processed_regular_children = !resolved_spec.is_dev;
+        candidate.processed_dev_children = resolved_spec.is_dev;
 
         auto index = state.candidates.size();
         state.source_to_index.emplace(source_id, index);
         state.candidates.push_back(std::move(candidate));
 
-        auto child_specs = collect_child_specs(state.candidates[index], spec.is_dev);
+        auto child_specs = collect_child_specs(state.candidates[index], resolved_spec.is_dev);
         for (auto const& child_spec : child_specs) {
             auto child_index = discover_candidate(child_spec, state);
             add_unique(state.candidates[index].dependency_names,
@@ -444,18 +630,18 @@ std::size_t discover_candidate(DependencySpec const& spec, DiscoveryState& state
 
     auto index = existing->second;
     auto& candidate = state.candidates[index];
-    auto needs_children = spec.is_dev
+    auto needs_children = resolved_spec.is_dev
         ? !candidate.processed_dev_children
         : !candidate.processed_regular_children;
-    merge_request(candidate, spec);
+    merge_request(candidate, resolved_spec);
 
     if (needs_children) {
-        if (spec.is_dev)
+        if (resolved_spec.is_dev)
             candidate.processed_dev_children = true;
         else
             candidate.processed_regular_children = true;
 
-        auto child_specs = collect_child_specs(candidate, spec.is_dev);
+        auto child_specs = collect_child_specs(candidate, resolved_spec.is_dev);
         for (auto const& child_spec : child_specs) {
             auto child_index = discover_candidate(child_spec, state);
             add_unique(candidate.dependency_names, state.candidates[child_index].package_name);
@@ -688,6 +874,152 @@ reporting::ProgressSource as_progress_source(FetchProgressCounter const& counter
     };
 }
 
+bool status_matches_filter(fetch::DependencyUpdateStatus const& status,
+                           std::vector<std::string> const& filters) {
+    if (filters.empty())
+        return true;
+    for (auto const& filter : filters) {
+        if (filter == status.key || filter == status.package_name)
+            return true;
+    }
+    return false;
+}
+
+fetch::DependencyUpdateStatus inspect_git_dependency(std::string key,
+                                                     std::string repo,
+                                                     std::string lock_name,
+                                                     std::string requirement,
+                                                     bool is_dev,
+                                                     lock::LockFile const& existing_lock) {
+    fetch::DependencyUpdateStatus status{
+        .key = std::move(key),
+        .requirement = requirement,
+        .is_dev = is_dev,
+    };
+
+    auto locked = detail::find_locked_by_name(existing_lock, lock_name);
+    if (locked) {
+        status.package_name = locked->package;
+        status.current_version = locked->version;
+    }
+
+    auto range = semver::parse_range(requirement);
+    auto versions = detail::list_remote_versions(repo, range.allows_prerelease);
+    if (!versions.empty())
+        status.latest_version = versions.back().text;
+    auto compatible = detail::latest_satisfying(versions, range);
+    if (compatible)
+        status.latest_compatible_version = compatible->text;
+
+    if (!compatible) {
+        status.status = "skipped";
+        status.reason = "no compatible semver tag";
+        return status;
+    }
+    if (!locked) {
+        status.status = "not-locked";
+        status.reason = "dependency is not present in exon.lock";
+        return status;
+    }
+
+    auto locked_version = semver::try_parse(locked->version);
+    if (!locked_version || !semver::satisfies(*locked_version, range)) {
+        status.status = "update-available";
+        status.reason = "locked version does not satisfy manifest requirement";
+        return status;
+    }
+    if (*locked_version < compatible->version) {
+        status.status = "update-available";
+        return status;
+    }
+    if (!status.latest_version.empty() && *locked_version < versions.back().version) {
+        status.status = "current";
+        status.reason = "newer versions are outside the requirement";
+        return status;
+    }
+    status.status = "current";
+    return status;
+}
+
+std::vector<fetch::DependencyUpdateStatus>
+inspect_dependencies(fetch::FetchRequest const& request,
+                     std::vector<std::string> const& filters = {}) {
+    auto existing_lock = lock::system::load(request.lock_path.string());
+    auto statuses = std::vector<fetch::DependencyUpdateStatus>{};
+
+    auto append_if_match = [&](fetch::DependencyUpdateStatus status) {
+        if (status_matches_filter(status, filters))
+            statuses.push_back(std::move(status));
+    };
+
+    auto append_git_map = [&](auto const& deps, bool is_dev) {
+        for (auto const& [repo, requirement] : deps) {
+            auto status = inspect_git_dependency(repo, repo, repo, requirement, is_dev,
+                                                 existing_lock);
+            append_if_match(std::move(status));
+        }
+    };
+
+    auto append_featured_map = [&](auto const& deps, bool is_dev) {
+        for (auto const& [repo, dep] : deps) {
+            auto status = inspect_git_dependency(repo, repo, repo, dep.version, is_dev,
+                                                 existing_lock);
+            append_if_match(std::move(status));
+        }
+    };
+
+    auto append_subdir_map = [&](auto const& deps, bool is_dev) {
+        for (auto const& [name, dep] : deps) {
+            auto status = inspect_git_dependency(name, dep.repo,
+                                                 std::format("{}#{}", dep.repo, dep.subdir),
+                                                 dep.version, is_dev, existing_lock);
+            append_if_match(std::move(status));
+        }
+    };
+
+    auto append_skipped = [&](std::string key, bool is_dev, std::string reason) {
+        append_if_match(fetch::DependencyUpdateStatus{
+            .key = key,
+            .package_name = key,
+            .status = "skipped",
+            .reason = std::move(reason),
+            .is_dev = is_dev,
+        });
+    };
+
+    append_git_map(request.manifest.dependencies, false);
+    append_featured_map(request.manifest.featured_deps, false);
+    append_subdir_map(request.manifest.subdir_deps, false);
+    for (auto const& [name, _] : request.manifest.path_deps)
+        append_skipped(name, false, "path dependency");
+    for (auto const& name : request.manifest.workspace_deps)
+        append_skipped(name, false, "workspace dependency");
+    for (auto const& [name, _] : request.manifest.find_deps)
+        append_skipped(name, false, "find dependency");
+    for (auto const& [name, _] : request.manifest.vcpkg_deps)
+        append_skipped(name, false, "vcpkg dependency");
+    for (auto const& [name, _] : request.manifest.cmake_deps)
+        append_skipped(name, false, "cmake dependency");
+
+    if (request.include_dev) {
+        append_git_map(request.manifest.dev_dependencies, true);
+        append_featured_map(request.manifest.dev_featured_deps, true);
+        append_subdir_map(request.manifest.dev_subdir_deps, true);
+        for (auto const& [name, _] : request.manifest.dev_path_deps)
+            append_skipped(name, true, "path dependency");
+        for (auto const& name : request.manifest.dev_workspace_deps)
+            append_skipped(name, true, "workspace dependency");
+        for (auto const& [name, _] : request.manifest.dev_find_deps)
+            append_skipped(name, true, "find dependency");
+        for (auto const& [name, _] : request.manifest.dev_vcpkg_deps)
+            append_skipped(name, true, "vcpkg dependency");
+        for (auto const& [name, _] : request.manifest.dev_cmake_deps)
+            append_skipped(name, true, "cmake dependency");
+    }
+
+    return statuses;
+}
+
 fetch::FetchResult fetch_all(fetch::FetchRequest const& request) {
     fetch::FetchResult result;
     if (!fetch::has_dependencies(request.manifest, request.include_dev))
@@ -726,6 +1058,9 @@ fetch::FetchResult fetch_all(fetch::FetchRequest const& request) {
         .existing_lock = existing_lock,
         .platform = request.platform,
         .progress_detail = std::move(progress_detail),
+        .update_packages = request.update_packages,
+        .precise_version = request.precise_version,
+        .update_all = request.update_all,
     };
 
     auto fetch_plan = fetch::plan(request);
@@ -760,7 +1095,8 @@ fetch::FetchResult fetch_all(fetch::FetchRequest const& request) {
     }
 
     result.lock_file = detail::build_selected_lock(result.deps);
-    lock::system::save(result.lock_file, request.lock_path.string());
+    if (!request.dry_run)
+        lock::system::save(result.lock_file, request.lock_path.string());
 
     if (renderer)
         renderer->stop();

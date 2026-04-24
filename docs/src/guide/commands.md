@@ -43,7 +43,12 @@ environment variables are `EXON_COLOR`, `EXON_PROGRESS`, `EXON_UNICODE`, and
   `[dependencies.workspace]`
 - `exon add --dev ...` — write under `[dev-dependencies*]` instead
 - `exon remove <name>` — drop the dep entry from the manifest
-- `exon update [--member m[,n,...]]` — refresh the lockfile
+- `exon outdated [pkg...] [--member m[,n,...]] [--output human|json]`
+  — compare locked git dependencies with remote semver tags; non-git
+  dependencies are reported as skipped
+- `exon update [pkg...] [--dry-run] [--precise <version>] [--member m[,n,...]]`
+  — refresh lockfile entries to the newest compatible git tag, or lock one
+  package to a precise version that still satisfies its manifest requirement
 
 ## Generation
 
