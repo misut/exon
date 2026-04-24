@@ -1,0 +1,14 @@
+[book]
+title       = "exon"
+authors     = ["Geunryeol Park (misut)"]
+language    = "en"
+description = "A Cargo-inspired package manager for C++23."
+
+[build]
+src  = "src"
+dest = "book"
+
+[output.html]
+default-theme = "auto"
+search        = true
+edit-url      = "https://github.com/misut/exon/edit/main/docs/{path}"

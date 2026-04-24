@@ -1,0 +1,66 @@
+name: Deploy docs to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  # Pin the codon release and the phenotype tag that shipped with it.
+  # When codon publishes a new reader.wasm, bump both in lockstep.
+  CODON_TAG: v0.1.0
+  PHENOTYPE_TAG: v0.13.0
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install wasmtime
+        uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+          version: "26.0.0"
+
+      - name: Fetch codon artifacts
+        run: |
+          gh release download "$CODON_TAG" --repo misut/codon \
+            --pattern 'codon.wasm' --pattern 'reader.wasm' --pattern 'index.html'
+          chmod +x codon.wasm
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Build docs
+        run: |
+          wasmtime --dir=. codon.wasm build docs dist
+
+      - name: Assemble site
+        run: |
+          cp index.html dist/index.html
+          cp reader.wasm dist/reader.wasm
+          curl -sSfL \
+            "https://raw.githubusercontent.com/misut/phenotype/$PHENOTYPE_TAG/shim/phenotype.js" \
+            -o dist/phenotype.js
+          ls -la dist/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
