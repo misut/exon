@@ -519,7 +519,8 @@ platforms = [
 ]
 ```
 
-Known values: `os` = `linux`, `macos`, `windows`; `arch` = `x86_64`, `aarch64`.
+Known values: `os` = `linux`, `macos`, `windows`, `wasi`, `android`; `arch` =
+`x86_64`, `aarch64`, `wasm32`.
 
 If the host platform does not match any entry, `exon build`/`run`/`test`/`check` fail early with a clear error. Omitting `platforms` entirely means the package supports all platforms (backward compatible with existing manifests).
 
@@ -584,6 +585,27 @@ int main() {
 }
 ```
 
+## Android
+
+Build Android arm64 artifacts with `--target aarch64-linux-android`. Exon uses
+the Android NDK CMake toolchain, keeps the default API level at `33`, and writes
+output under `.exon/aarch64-linux-android/{debug,release}/`.
+
+```sh
+# install Android NDK
+intron install android-ndk <version>
+
+# build
+exon build --target aarch64-linux-android
+
+# tests are compiled only; run the artifact on a device or emulator
+exon test --target aarch64-linux-android
+```
+
+`exon run --target aarch64-linux-android` fails early because host execution is
+not meaningful for Android binaries. Use `exon build` or `exon test` to verify
+the build, then deploy the produced artifact with Android tooling.
+
 ## Features
 
 - **C++23 `import std;`** — automatically detected when `standard >= 23` and clang with libc++ modules is available
@@ -602,6 +624,8 @@ int main() {
 - **Self-hosting** — exon builds itself with `exon build`
 - **Cross-platform** — macOS (ARM64), Linux (x86_64, aarch64), and Windows (x86_64, MSVC)
 - **WebAssembly** — `--target wasm32-wasi` cross-compiles to WASM via wasi-sdk
+- **Android** — `--target aarch64-linux-android` cross-compiles arm64 Android
+  artifacts via Android NDK
 - **Platform targeting** — `platforms = [{ os = "linux" }, ...]` declares supported platforms; build fails early on unsupported hosts
 
 ## License

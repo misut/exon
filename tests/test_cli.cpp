@@ -197,6 +197,8 @@ void test_commands_usage_lists_human_output_mode() {
     check(usage.find("[--output human|json|wrapped|raw] [--show-output failed|all|none]") !=
               std::string::npos,
           "usage lists json output mode for test");
+    check(usage.find("aarch64-linux-android") != std::string::npos,
+          "usage lists Android target");
 }
 
 void test_commands_reporting_defaults() {
@@ -276,6 +278,18 @@ void test_readme_output_docs_match_usage() {
           "README documents why command");
     check(readme.find("`exon version`") != std::string::npos,
           "README documents version command");
+    check(readme.find("`os` = `linux`, `macos`, `windows`, `wasi`, `android`") !=
+              std::string::npos,
+          "README documents known platform OS values");
+    check(readme.find("`arch` =\n`x86_64`, `aarch64`, `wasm32`") !=
+              std::string::npos,
+          "README documents known platform arch values");
+    check(readme.find("exon build --target aarch64-linux-android") !=
+              std::string::npos,
+          "README documents Android build target");
+    check(readme.find("exon test --target aarch64-linux-android") !=
+              std::string::npos,
+          "README documents Android build-only tests");
     check(readme.find("default to `human` output") != std::string::npos,
           "README documents human default");
     check(readme.find("interactive terminal") != std::string::npos,

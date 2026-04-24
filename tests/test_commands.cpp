@@ -285,12 +285,32 @@ void test_dependency_graph_paths_and_dedupe() {
     check(has_transitive, "dependency graph: transitive why path preserved");
 }
 
+void test_cmd_run_rejects_android_before_build() {
+    TmpDir tmp{"exon_test_run_android_early_error"};
+    tmp.write("exon.toml", R"([package]
+name = "app"
+version = "0.1.0"
+type = "bin"
+standard = 23
+)");
+    tmp.write("src/main.cpp", "int main() { return 0; }\n");
+
+    CwdGuard cwd{tmp.root};
+    auto rc = run_command(commands::cmd_run,
+                          {"exon", "run", "--target", "aarch64-linux-android"});
+
+    check(rc == 1, "cmd run android: rejected");
+    check(!std::filesystem::exists(tmp.root / ".exon"),
+          "cmd run android: rejected before build output");
+}
+
 int main() {
     test_apply_workspace_defaults_for_member_package_and_build();
     test_select_workspace_members_orders_dependency_closure();
     test_cmd_init_workspace_and_cmd_new_updates_members();
     test_generate_workspace_root_cmake_uses_single_member_entries();
     test_dependency_graph_paths_and_dedupe();
+    test_cmd_run_rejects_android_before_build();
 
     if (failures > 0) {
         std::println("{} test(s) failed", failures);

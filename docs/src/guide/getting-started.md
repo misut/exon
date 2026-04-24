@@ -75,3 +75,16 @@ exon build --target wasm32-wasi
 `intron install wasi-sdk 32`. Output goes to
 `.exon/wasm32-wasi/debug/hello`, and `wasmtime` can execute it
 directly.
+
+For Android arm64, install an Android NDK and build with the Android
+target:
+
+```sh
+intron install android-ndk <version>
+exon build --target aarch64-linux-android
+```
+
+Android output goes to `.exon/aarch64-linux-android/debug/hello`.
+`exon test --target aarch64-linux-android` compiles test binaries but
+does not run them on the host; deploy the artifact to a device or
+emulator to execute it.

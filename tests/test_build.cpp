@@ -714,6 +714,35 @@ void test_plan_test_emits_filtered_targets_and_run_steps() {
           "plan test: timeout propagates");
 }
 
+void test_plan_test_android_is_build_only() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() { return 0; }\n");
+    proj.write("tests/test_app.cpp", "int main() { return 0; }\n");
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+
+    build::BuildRequest request{
+        .project = build::project_context(proj.root, false, "aarch64-linux-android"),
+        .manifest = m,
+        .toolchain = make_tc(),
+        .with_tests = true,
+        .build_targets = {"test-test_app"},
+        .test_names = {"test-test_app"},
+    };
+
+    auto plan = build::plan_test(request);
+
+    check(plan.build_steps.size() == 1, "android test: builds test target");
+    check(plan.run_steps.empty(), "android test: no host run steps");
+    check(plan.success_message ==
+              "android test build succeeded; deploy to device to run",
+          "android test: build-only success message");
+}
+
 void test_stale_self_host_bootstrap_message_for_macos_exon_repo() {
     TmpProject proj;
     write_fake_exon_repo(proj);
@@ -1627,6 +1656,8 @@ int main() {
         test_plan_build_uses_host_manifest_for_exon_and_raw_manifest_for_root_sync);
     run("test_plan_test_emits_filtered_targets_and_run_steps",
         test_plan_test_emits_filtered_targets_and_run_steps);
+    run("test_plan_test_android_is_build_only",
+        test_plan_test_android_is_build_only);
     run("test_stale_self_host_bootstrap_message_for_macos_exon_repo",
         test_stale_self_host_bootstrap_message_for_macos_exon_repo);
     run("test_stale_self_host_bootstrap_message_skips_fresh_or_non_macos_cases",
