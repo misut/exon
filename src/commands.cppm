@@ -78,8 +78,10 @@ std::string usage_text() {
             {"add [--dev] --git <repo> --version <ver> --subdir <dir> [--name <n>]",
                                                    "add a git dep pointing to a subdirectory"},
             {"remove <pkg>",                       "remove a dependency"},
-            {"update [--member a,b] [--exclude x,y]",
-                                                   "update dependencies to latest compatible versions"},
+            {"outdated [pkg...] [--member a,b] [--exclude x,y] [--output human|json]",
+                                                   "check git dependencies for newer versions"},
+            {"update [pkg...] [--dry-run] [--precise <version>] [--member a,b] [--exclude x,y]",
+                                                   "update lockfile entries to latest compatible versions"},
             {"sync [--member a,b] [--exclude x,y]","sync CMakeLists.txt with exon.toml"},
             {"fmt",                                "format source files with clang-format"},
             {"version",                            "show exon version"},
@@ -92,10 +94,10 @@ std::string usage_text() {
 }
 
 std::span<std::string_view const> command_names() {
-    static constexpr auto names = std::array<std::string_view, 17>{
+    static constexpr auto names = std::array<std::string_view, 18>{
         "init", "new", "info", "build", "status", "doctor", "check", "run",
-        "debug", "test", "clean", "add", "remove", "update", "sync", "fmt",
-        "version",
+        "debug", "test", "clean", "add", "remove", "outdated", "update", "sync",
+        "fmt", "version",
     };
     return std::span{names};
 }
@@ -239,6 +241,112 @@ bool manifest_has_any_dependencies(manifest::Manifest const& m) {
            !m.dev_workspace_deps.empty() || !m.dev_vcpkg_deps.empty() ||
            !m.dev_subdir_deps.empty() || !m.dev_featured_deps.empty() ||
            !m.dev_cmake_deps.empty() || !m.find_deps.empty() || !m.dev_find_deps.empty();
+}
+
+bool manifest_has_git_dependencies(manifest::Manifest const& m, bool include_dev = false) {
+    auto regular = !m.dependencies.empty() || !m.subdir_deps.empty() || !m.featured_deps.empty();
+    auto dev = include_dev &&
+        (!m.dev_dependencies.empty() || !m.dev_subdir_deps.empty() ||
+         !m.dev_featured_deps.empty());
+    return regular || dev;
+}
+
+lock::LockedDep const* find_locked_by_name(lock::LockFile const& lf,
+                                           std::string const& name) {
+    for (auto const& dep : lf.packages) {
+        if (dep.name == name)
+            return &dep;
+    }
+    return nullptr;
+}
+
+std::string display_version(std::string const& version) {
+    return version.empty() ? "-" : version;
+}
+
+void print_dependency_statuses(std::vector<fetch::DependencyUpdateStatus> const& statuses) {
+    if (statuses.empty()) {
+        print_status(terminal::StatusKind::skip, "no matching dependencies");
+        return;
+    }
+    std::println("{:<28} {:<12} {:<12} {:<12} {:<18} {}",
+                 "dependency", "current", "compatible", "latest", "status", "note");
+    for (auto const& status : statuses) {
+        auto note = status.reason;
+        if (status.is_dev)
+            note = note.empty() ? "dev" : std::format("dev; {}", note);
+        std::println("{:<28} {:<12} {:<12} {:<12} {:<18} {}",
+                     status.key,
+                     display_version(status.current_version),
+                     display_version(status.latest_compatible_version),
+                     display_version(status.latest_version),
+                     status.status,
+                     note);
+    }
+}
+
+void emit_dependency_status_json(std::vector<fetch::DependencyUpdateStatus> const& statuses) {
+    for (auto const& status : statuses) {
+        reporting::emit_json_event("dependency-status", {
+            reporting::json_string("key", status.key),
+            reporting::json_string("package", status.package_name),
+            reporting::json_string("requirement", status.requirement),
+            reporting::json_string("current", status.current_version),
+            reporting::json_string("latest_compatible", status.latest_compatible_version),
+            reporting::json_string("latest", status.latest_version),
+            reporting::json_string("status", status.status),
+            reporting::json_string("reason", status.reason),
+            reporting::json_bool("dev", status.is_dev),
+        });
+    }
+    reporting::emit_json_event("summary", {
+        reporting::json_number("dependencies", static_cast<long long>(statuses.size())),
+    });
+}
+
+std::vector<fetch::DependencyUpdateStatus>
+dependency_statuses_for_project(std::filesystem::path const& project_root,
+                                manifest::Manifest const& manifest,
+                                std::vector<std::string> const& filters) {
+    return fetch::system::inspect_dependencies({
+        .manifest = manifest,
+        .project_root = project_root,
+        .lock_path = project_root / "exon.lock",
+        .include_dev = true,
+    }, filters);
+}
+
+void print_update_diff(lock::LockFile const& before,
+                       lock::LockFile const& after,
+                       bool dry_run) {
+    auto changed = 0;
+    for (auto const& dep : after.packages) {
+        auto old = find_locked_by_name(before, dep.name);
+        if (!old) {
+            ++changed;
+            std::println("{} {} {}",
+                         terminal::status_cell(dry_run ? terminal::StatusKind::skip
+                                                       : terminal::StatusKind::ok,
+                                               reporting::system::stdout_is_tty()),
+                         dry_run ? "would lock" : "locked",
+                         std::format("{} {}", dep.name, dep.version));
+            continue;
+        }
+        if (old->version != dep.version || old->commit != dep.commit) {
+            ++changed;
+            std::println("{} {} {} {} -> {}",
+                         terminal::status_cell(dry_run ? terminal::StatusKind::skip
+                                                       : terminal::StatusKind::ok,
+                                               reporting::system::stdout_is_tty()),
+                         dry_run ? "would update" : "updated",
+                         dep.name,
+                         old->version,
+                         dep.version);
+        }
+    }
+    if (changed == 0)
+        print_status(terminal::StatusKind::ok, dry_run ? "lockfile already up to date"
+                                                       : "dependencies already up to date");
 }
 
 WorkspaceMember load_workspace_member(std::filesystem::path const& workspace_root,
@@ -1917,45 +2025,118 @@ int cmd_remove(int argc, char* argv[]) {
     }
 }
 
-int cmd_update(int argc, char* argv[]) {
+reporting::OutputMode parse_dependency_output_mode(std::string_view value) {
+    if (value.empty() || value == "human")
+        return reporting::OutputMode::human;
+    if (value == "json")
+        return reporting::OutputMode::json;
+    throw std::runtime_error(
+        std::format("invalid --output '{}': expected human or json", value));
+}
+
+int cmd_outdated(int argc, char* argv[]) {
     try {
-        auto args = cli::parse(argc, argv, 2, workspace_select_defs());
+        auto args = cli::parse(argc, argv, 2,
+                               workspace_select_defs({cli::Option{"--output"}}));
         auto project_root = std::filesystem::current_path();
         auto manifest_path = project_root / "exon.toml";
         if (!std::filesystem::exists(manifest_path)) {
             std::println(std::cerr, "error: exon.toml not found. run 'exon init' first");
             return 1;
         }
-        auto m = load_manifest(project_root);
-        if (manifest::is_workspace(m)) {
-            auto selection = select_workspace_members(project_root, m, {},
+        auto output = parse_dependency_output_mode(args.get("--output"));
+        auto scoped_options = reporting::ScopedOptionsContext{
+            reporting::Options{.output = output}};
+        auto filters = std::vector<std::string>{args.positional().begin(),
+                                                args.positional().end()};
+        auto raw_m = load_manifest(project_root);
+        auto statuses = std::vector<fetch::DependencyUpdateStatus>{};
+        if (manifest::is_workspace(raw_m)) {
+            auto selection = select_workspace_members(project_root, raw_m, {},
+                                                      args.get_list("--member"),
+                                                      args.get_list("--exclude"),
+                                                      false, false);
+            for (auto const& member : selection.members) {
+                auto member_statuses =
+                    dependency_statuses_for_project(member.path, member.resolved_manifest, filters);
+                statuses.insert(statuses.end(),
+                                std::make_move_iterator(member_statuses.begin()),
+                                std::make_move_iterator(member_statuses.end()));
+            }
+        } else {
+            if (!args.get_list("--member").empty() || !args.get_list("--exclude").empty())
+                return command_error("--member and --exclude require a workspace root");
+            statuses = dependency_statuses_for_project(project_root,
+                                                       resolve_manifest(raw_m),
+                                                       filters);
+        }
+        if (output == reporting::OutputMode::json)
+            emit_dependency_status_json(statuses);
+        else
+            print_dependency_statuses(statuses);
+        return 0;
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
+}
+
+int cmd_update(int argc, char* argv[]) {
+    try {
+        auto args = cli::parse(argc, argv, 2,
+                               workspace_select_defs({cli::Flag{"--dry-run"},
+                                                      cli::Option{"--precise"}}));
+        auto project_root = std::filesystem::current_path();
+        auto manifest_path = project_root / "exon.toml";
+        if (!std::filesystem::exists(manifest_path)) {
+            std::println(std::cerr, "error: exon.toml not found. run 'exon init' first");
+            return 1;
+        }
+
+        auto filters = std::vector<std::string>{args.positional().begin(),
+                                                args.positional().end()};
+        auto precise = std::string{args.get("--precise")};
+        if (!precise.empty() && filters.size() != 1)
+            return command_error("--precise requires exactly one package argument");
+        auto dry_run = args.has("--dry-run");
+
+        auto update_project = [&](std::filesystem::path const& root,
+                                  manifest::Manifest const& m) -> int {
+            if (!manifest_has_git_dependencies(m, true)) {
+                print_status(terminal::StatusKind::skip, "no git dependencies to update");
+                return 0;
+            }
+            auto lock_path = root / "exon.lock";
+            auto before = lock::system::load(lock_path.string());
+            auto result = fetch::system::fetch_all({
+                .manifest = m,
+                .project_root = root,
+                .lock_path = lock_path,
+                .include_dev = true,
+                .update_packages = filters,
+                .precise_version = precise.empty()
+                    ? std::optional<std::string>{}
+                    : std::optional<std::string>{precise},
+                .update_all = filters.empty(),
+                .dry_run = dry_run,
+            });
+            print_update_diff(before, result.lock_file, dry_run);
+            return 0;
+        };
+
+        auto raw_m = load_manifest(project_root);
+        if (manifest::is_workspace(raw_m)) {
+            auto selection = select_workspace_members(project_root, raw_m, {},
                                                       args.get_list("--member"),
                                                       args.get_list("--exclude"),
                                                       false, false);
             return run_selected_workspace_members(project_root, selection, [&](auto const& member) {
-                auto lock_path = member.path / "exon.lock";
-                if (std::filesystem::exists(lock_path))
-                    std::filesystem::remove(lock_path);
-                if (!manifest_has_any_dependencies(member.raw_manifest)) {
-                    print_status(terminal::StatusKind::skip, "no dependencies to update");
-                    return 0;
-                }
-                return build::system::run(member.path, member.resolved_manifest, member.raw_manifest);
+                return update_project(member.path, member.resolved_manifest);
             });
         }
         if (!args.get_list("--member").empty() || !args.get_list("--exclude").empty())
             return command_error("--member and --exclude require a workspace root");
-
-        auto lock_path = project_root / "exon.lock";
-        if (std::filesystem::exists(lock_path))
-            std::filesystem::remove(lock_path);
-
-        if (!manifest_has_any_dependencies(m)) {
-            print_status(terminal::StatusKind::skip, "no dependencies to update");
-            return 0;
-        }
-
-        return build::system::run(project_root, m);
+        return update_project(project_root, resolve_manifest(raw_m));
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;

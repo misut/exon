@@ -179,6 +179,12 @@ void test_commands_usage_lists_human_output_mode() {
           "usage lists status command");
     check(usage.find("doctor [--output human|json]") != std::string::npos,
           "usage lists doctor alias");
+    check(usage.find("outdated [pkg...] [--member a,b] [--exclude x,y] "
+                     "[--output human|json]") != std::string::npos,
+          "usage lists outdated command");
+    check(usage.find("update [pkg...] [--dry-run] [--precise <version>] "
+                     "[--member a,b] [--exclude x,y]") != std::string::npos,
+          "usage lists update package options");
     check(usage.find("[--output human|json|wrapped|raw] [--show-output failed|all|none]") !=
               std::string::npos,
           "usage lists json output mode for test");
@@ -239,6 +245,14 @@ void test_readme_output_docs_match_usage() {
               "`exon add [--dev] --git <repo> --version <v> --subdir <dir> [--name <n>]`") !=
               std::string::npos,
           "README documents git subdir add name override");
+    check(readme.find(
+              "`exon outdated [pkg...] [--member a,b] [--exclude x,y] [--output human\\|json]`") !=
+              std::string::npos,
+          "README documents outdated command");
+    check(readme.find(
+              "`exon update [pkg...] [--dry-run] [--precise <version>] [--member a,b] [--exclude x,y]`") !=
+              std::string::npos,
+          "README documents update package options");
     check(readme.find("`exon version`") != std::string::npos,
           "README documents version command");
     check(readme.find("default to `human` output") != std::string::npos,

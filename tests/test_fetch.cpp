@@ -801,7 +801,7 @@ type = "lib"
 standard = 23
 
 [dependencies]
-"{}" = "1.0.3"
+"{}" = "=1.0.3"
 )", cppx_repo.key()));
     txn_repo.write("src/txn.cppm", "export module txn;");
     txn_repo.init_and_tag("v0.6.1");
@@ -853,6 +853,148 @@ version = "0.1.0"
     unsetenv("EXON_CACHE_DIR");
 }
 
+void test_fetch_no_lock_selects_latest_compatible() {
+    TmpWorkspace ws{"exon_test_fetch_latest_compatible"};
+    auto cache = ws.root / "cache";
+    setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
+
+    auto repos = ws.root / "repos";
+    fs::create_directories(repos);
+
+    TmpGitRepo lib_repo{repos, "lib"};
+    lib_repo.write("exon.toml", R"([package]
+name = "lib"
+version = "1.0.0"
+type = "lib"
+standard = 23
+)");
+    lib_repo.write("src/lib.cppm", "export module lib;");
+    lib_repo.init_and_tag("v1.0.0");
+    lib_repo.write("exon.toml", R"([package]
+name = "lib"
+version = "1.2.0"
+type = "lib"
+standard = 23
+)");
+    lib_repo.commit_and_tag("v1.2.0");
+
+    ws.write("app/exon.toml", std::format(R"([package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+"{}" = "1.0.0"
+)", lib_repo.key()));
+    ws.write("app/src/main.cpp", "int main() { return 0; }\n");
+
+    try {
+        auto result = fetch_project(ws.root / "app");
+
+        check(result.deps.size() == 1, "latest compatible: one dep");
+        if (!result.deps.empty())
+            check(result.deps[0].version == "1.2.0",
+                  "latest compatible: bare requirement selects newest compatible");
+        check(result.lock_file.find(lib_repo.key(), "1.2.0") != nullptr,
+              "latest compatible: selected version locked");
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "  exception: {}", e.what());
+        ++failures;
+    }
+    unsetenv("EXON_CACHE_DIR");
+}
+
+void test_fetch_lock_reuse_and_update_controls() {
+    TmpWorkspace ws{"exon_test_fetch_update_controls"};
+    auto cache = ws.root / "cache";
+    setenv("EXON_CACHE_DIR", cache.string().c_str(), 1);
+
+    auto repos = ws.root / "repos";
+    fs::create_directories(repos);
+
+    TmpGitRepo lib_repo{repos, "lib"};
+    lib_repo.write("exon.toml", R"([package]
+name = "lib"
+version = "1.0.0"
+type = "lib"
+standard = 23
+)");
+    lib_repo.write("src/lib.cppm", "export module lib;");
+    lib_repo.init_and_tag("v1.0.0");
+
+    ws.write("app/exon.toml", std::format(R"([package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+"{}" = "1.0.0"
+)", lib_repo.key()));
+    ws.write("app/src/main.cpp", "int main() { return 0; }\n");
+
+    try {
+        auto app_root = ws.root / "app";
+        auto first = fetch_project(app_root);
+        check(!first.deps.empty() && first.deps[0].version == "1.0.0",
+              "lock reuse: initial lock selects 1.0.0");
+
+        lib_repo.write("exon.toml", R"([package]
+name = "lib"
+version = "1.1.0"
+type = "lib"
+standard = 23
+)");
+        lib_repo.commit_and_tag("v1.1.0");
+
+        auto second = fetch_project(app_root);
+        check(!second.deps.empty() && second.deps[0].version == "1.0.0",
+              "lock reuse: compatible locked version is reused");
+
+        auto manifest = load_project_manifest(app_root);
+        auto updated = fetch::system::fetch_all({
+            .manifest = manifest,
+            .project_root = app_root,
+            .lock_path = app_root / "exon.lock",
+            .update_all = true,
+        });
+        check(!updated.deps.empty() && updated.deps[0].version == "1.1.0",
+              "update all: newest compatible version selected");
+
+        lib_repo.write("exon.toml", R"([package]
+name = "lib"
+version = "1.2.0"
+type = "lib"
+standard = 23
+)");
+        lib_repo.commit_and_tag("v1.2.0");
+
+        auto dry_run = fetch::system::fetch_all({
+            .manifest = manifest,
+            .project_root = app_root,
+            .lock_path = app_root / "exon.lock",
+            .update_all = true,
+            .dry_run = true,
+        });
+        check(!dry_run.deps.empty() && dry_run.deps[0].version == "1.2.0",
+              "dry run: computes newest compatible version");
+        auto lock_after_dry_run = lock::system::load((app_root / "exon.lock").string());
+        check(lock_after_dry_run.find(lib_repo.key(), "1.1.0") != nullptr,
+              "dry run: existing lockfile remains unchanged");
+
+        auto precise = fetch::system::fetch_all({
+            .manifest = manifest,
+            .project_root = app_root,
+            .lock_path = app_root / "exon.lock",
+            .update_packages = {lib_repo.key()},
+            .precise_version = std::string{"1.0.0"},
+        });
+        check(!precise.deps.empty() && precise.deps[0].version == "1.0.0",
+              "precise update: requested compatible version selected");
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "  exception: {}", e.what());
+        ++failures;
+    }
+    unsetenv("EXON_CACHE_DIR");
+}
+
 void test_fetch_root_path_overrides_transitive_git() {
     TmpWorkspace ws{"exon_test_fetch_root_path_override"};
     auto cache = ws.root / "cache";
@@ -878,7 +1020,7 @@ type = "lib"
 standard = 23
 
 [dependencies]
-"{}" = "1.0.3"
+"{}" = "=1.0.3"
 )", cppx_repo.key()));
     ws.write("ui/src/ui.cppm", "export module ui;");
 
@@ -955,7 +1097,7 @@ type = "lib"
 standard = 23
 
 [dependencies]
-"{}" = "1.0.3"
+"{}" = "=1.0.3"
 )", cppx_repo.key()));
     ws.write("left/src/left.cppm", "export module left;");
 
@@ -966,7 +1108,7 @@ type = "lib"
 standard = 23
 
 [dependencies]
-"{}" = "1.2.0"
+"{}" = "=1.2.0"
 )", cppx_repo.key()));
     ws.write("right/src/right.cppm", "export module right;");
 
@@ -1017,6 +1159,10 @@ int main() {
     run("test_fetch_path_with_featured_dep", test_fetch_path_with_featured_dep);
     run("test_fetch_root_direct_git_overrides_transitive_version",
         test_fetch_root_direct_git_overrides_transitive_version);
+    run("test_fetch_no_lock_selects_latest_compatible",
+        test_fetch_no_lock_selects_latest_compatible);
+    run("test_fetch_lock_reuse_and_update_controls",
+        test_fetch_lock_reuse_and_update_controls);
     run("test_fetch_root_path_overrides_transitive_git",
         test_fetch_root_path_overrides_transitive_git);
     run("test_fetch_conflicting_transitive_versions_fail",

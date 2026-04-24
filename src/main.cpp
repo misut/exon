@@ -47,6 +47,8 @@ int main(int argc, char* argv[]) {
         return commands::cmd_add(argc, argv);
     if (command == "remove")
         return commands::cmd_remove(argc, argv);
+    if (command == "outdated")
+        return commands::cmd_outdated(argc, argv);
     if (command == "update")
         return commands::cmd_update(argc, argv);
     if (command == "sync")
