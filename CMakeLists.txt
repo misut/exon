@@ -21,7 +21,7 @@ include(FetchContent)
 if(NOT TARGET cppx)
     FetchContent_Declare(cppx
         GIT_REPOSITORY https://github.com/misut/cppx.git
-        GIT_TAG v1.7.0
+        GIT_TAG v1.8.0
         GIT_SHALLOW ON
     )
     FetchContent_MakeAvailable(cppx)
@@ -55,8 +55,6 @@ target_sources(exon-modules
     ${CMAKE_CURRENT_SOURCE_DIR}/src/reporting.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/semver.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/templates.cppm
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/terminal.cppm
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/terminal.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/toolchain.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/toolchain.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vcpkg.cppm
@@ -91,8 +89,6 @@ set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/reporting.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/semver.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/templates.cppm
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/terminal.cppm
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/terminal.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/toolchain.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/toolchain.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vcpkg.cppm
@@ -181,14 +177,6 @@ target_sources(test-test_semver PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_semver.cpp
 )
 target_link_libraries(test-test_semver PRIVATE
-    exon-modules
-)
-
-add_executable(test-test_terminal)
-target_sources(test-test_terminal PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_terminal.cpp
-)
-target_link_libraries(test-test_terminal PRIVATE
     exon-modules
 )
 

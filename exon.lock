@@ -3,8 +3,8 @@
 [[package]]
 name = "github.com/misut/cppx"
 package = "cppx"
-version = "1.7.0"
-commit = "05eab6942d47ba6ddd4ea4b9813f9b8ae3bc75a0"
+version = "1.8.0"
+commit = "146c3af34012b6875585046d16249f4b6fdb6fa7"
 
 [[package]]
 name = "github.com/misut/tomlcpp"

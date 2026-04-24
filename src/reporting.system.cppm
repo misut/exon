@@ -16,9 +16,9 @@ module;
 export module reporting.system;
 import std;
 import core;
+import cppx.terminal;
+import cppx.terminal.system;
 import reporting;
-import terminal;
-import terminal.system;
 
 export namespace reporting::system {
 
@@ -67,10 +67,10 @@ public:
 
 private:
     explicit LiveProgressRenderer(
-        std::unique_ptr<terminal::system::LiveProgressRenderer> renderer);
+        std::unique_ptr<cppx::terminal::system::LiveProgressRenderer> renderer);
     friend std::unique_ptr<LiveProgressRenderer> make_live_progress_renderer();
 
-    std::unique_ptr<terminal::system::LiveProgressRenderer> renderer_;
+    std::unique_ptr<cppx::terminal::system::LiveProgressRenderer> renderer_;
 };
 
 std::unique_ptr<LiveProgressRenderer> make_live_progress_renderer();
@@ -79,75 +79,71 @@ std::unique_ptr<LiveProgressRenderer> make_live_progress_renderer();
 
 namespace reporting::system {
 
-#if defined(_WIN32)
+cppx::terminal::CapabilitySetting
+to_terminal_setting(CapabilitySetting setting) {
+    switch (setting) {
+    case CapabilitySetting::auto_detect:
+        return cppx::terminal::CapabilitySetting::auto_detect;
+    case CapabilitySetting::always:
+        return cppx::terminal::CapabilitySetting::always;
+    case CapabilitySetting::never:
+        return cppx::terminal::CapabilitySetting::never;
+    }
+    return cppx::terminal::CapabilitySetting::auto_detect;
+}
+
+std::optional<cppx::terminal::CapabilitySetting>
+to_terminal_setting(std::optional<CapabilitySetting> setting) {
+    if (!setting)
+        return std::nullopt;
+    return to_terminal_setting(*setting);
+}
+
+cppx::terminal::TerminalOptions terminal_options() {
+    return cppx::terminal::TerminalOptions{
+        .color = to_terminal_setting(current_options.color),
+        .progress = to_terminal_setting(current_options.progress),
+        .unicode = to_terminal_setting(current_options.unicode),
+        .hyperlinks = to_terminal_setting(current_options.hyperlinks),
+        .color_env = "EXON_COLOR",
+        .progress_env = "EXON_PROGRESS",
+        .unicode_env = "EXON_UNICODE",
+        .hyperlinks_env = "EXON_HYPERLINKS",
+        .progress_allowed = current_options.output != OutputMode::json,
+    };
+}
 
 void enable_vt_on_windows() {
-    terminal::system::enable_vt_on_windows();
+    cppx::terminal::system::enable_vt_on_windows();
 }
 
 bool stdout_is_tty() {
-    return terminal::system::stdout_is_tty();
+    return cppx::terminal::system::stdout_color_enabled(terminal_options());
 }
 
 bool stdout_is_terminal() {
-    return terminal::system::stdout_is_terminal();
+    return cppx::terminal::system::stdout_is_terminal();
 }
 
 bool stderr_is_tty() {
-    return terminal::system::stderr_is_tty();
+    return cppx::terminal::system::stderr_color_enabled(terminal_options());
 }
 
 bool stderr_is_terminal() {
-    return terminal::system::stderr_is_terminal();
+    return cppx::terminal::system::stderr_is_terminal();
 }
 
 bool stdout_hyperlinks_enabled() {
-    return terminal::system::stdout_hyperlinks_enabled();
+    return cppx::terminal::system::stdout_hyperlinks_enabled(terminal_options());
 }
 
 bool stdout_unicode_enabled() {
-    return terminal::system::stdout_unicode_enabled();
+    return cppx::terminal::system::stdout_unicode_enabled(terminal_options());
 }
 
 std::size_t terminal_width() {
-    return terminal::system::terminal_width();
+    return cppx::terminal::system::terminal_width();
 }
-
-#else
-
-void enable_vt_on_windows() {
-    terminal::system::enable_vt_on_windows();
-}
-
-bool stdout_is_tty() {
-    return terminal::system::stdout_is_tty();
-}
-
-bool stdout_is_terminal() {
-    return terminal::system::stdout_is_terminal();
-}
-
-bool stderr_is_tty() {
-    return terminal::system::stderr_is_tty();
-}
-
-bool stderr_is_terminal() {
-    return terminal::system::stderr_is_terminal();
-}
-
-bool stdout_hyperlinks_enabled() {
-    return terminal::system::stdout_hyperlinks_enabled();
-}
-
-bool stdout_unicode_enabled() {
-    return terminal::system::stdout_unicode_enabled();
-}
-
-std::size_t terminal_width() {
-    return terminal::system::terminal_width();
-}
-
-#endif
 
 namespace detail {
 
@@ -737,7 +733,7 @@ ProcessResult run_process(core::ProcessSpec const& spec, StreamMode mode,
 
 std::string format_progress_frame(ProgressSnapshot const& snapshot,
                                   std::size_t frame_index) {
-    return terminal::format_progress_frame({
+    return cppx::terminal::format_progress_frame({
         .done = snapshot.done,
         .total = snapshot.total,
         .percent = snapshot.percent,
@@ -745,26 +741,28 @@ std::string format_progress_frame(ProgressSnapshot const& snapshot,
         .elapsed = snapshot.elapsed,
         .remaining = snapshot.remaining,
         .label = snapshot.label,
+        .detail = snapshot.detail,
+        .detail_lines = snapshot.detail_lines,
     }, frame_index, stdout_is_tty());
 }
 
-terminal::system::LiveProgressRenderMode to_terminal_mode(
+cppx::terminal::system::LiveProgressRenderMode to_terminal_mode(
     LiveProgressRenderMode mode) {
     switch (mode) {
     case LiveProgressRenderMode::disabled:
-        return terminal::system::LiveProgressRenderMode::disabled;
+        return cppx::terminal::system::LiveProgressRenderMode::disabled;
     case LiveProgressRenderMode::carriage_return:
-        return terminal::system::LiveProgressRenderMode::carriage_return;
+        return cppx::terminal::system::LiveProgressRenderMode::carriage_return;
     case LiveProgressRenderMode::vt:
-        return terminal::system::LiveProgressRenderMode::vt;
+        return cppx::terminal::system::LiveProgressRenderMode::vt;
     }
-    return terminal::system::LiveProgressRenderMode::disabled;
+    return cppx::terminal::system::LiveProgressRenderMode::disabled;
 }
 
-terminal::system::ProgressSource to_terminal_source(ProgressSource source) {
-    return terminal::system::ProgressSource{
+cppx::terminal::system::ProgressSource to_terminal_source(ProgressSource source) {
+    return cppx::terminal::system::ProgressSource{
         .poll = [source = std::move(source)]() mutable
-            -> std::optional<terminal::ProgressSnapshot> {
+            -> std::optional<cppx::terminal::ProgressSnapshot> {
             if (!source.poll)
                 return std::nullopt;
 
@@ -772,7 +770,7 @@ terminal::system::ProgressSource to_terminal_source(ProgressSource source) {
             if (!snapshot)
                 return std::nullopt;
 
-            return terminal::ProgressSnapshot{
+            return cppx::terminal::ProgressSnapshot{
                 .done = snapshot->done,
                 .total = snapshot->total,
                 .percent = snapshot->percent,
@@ -781,7 +779,7 @@ terminal::system::ProgressSource to_terminal_source(ProgressSource source) {
                 .remaining = snapshot->remaining,
                 .label = snapshot->label,
                 .detail = std::move(snapshot->detail),
-                .detail_lines = snapshot->detail_lines,
+                .detail_lines = std::move(snapshot->detail_lines),
             };
         },
     };
@@ -790,21 +788,16 @@ terminal::system::ProgressSource to_terminal_source(ProgressSource source) {
 LiveProgressRenderer::LiveProgressRenderer(LiveProgressRenderMode mode
 #if defined(_WIN32)
                                            ,
-                                           HANDLE handle,
-                                           DWORD original_console_mode,
-                                           bool restore_console_mode
+                                           HANDLE,
+                                           DWORD,
+                                           bool
 #endif
                                            )
-    : renderer_(std::make_unique<terminal::system::LiveProgressRenderer>(
-          to_terminal_mode(mode)
-#if defined(_WIN32)
-          ,
-          handle, original_console_mode, restore_console_mode
-#endif
-          )) {}
+    : renderer_(std::make_unique<cppx::terminal::system::LiveProgressRenderer>(
+          to_terminal_mode(mode), terminal_options())) {}
 
 LiveProgressRenderer::LiveProgressRenderer(
-    std::unique_ptr<terminal::system::LiveProgressRenderer> renderer)
+    std::unique_ptr<cppx::terminal::system::LiveProgressRenderer> renderer)
     : renderer_(std::move(renderer)) {}
 
 LiveProgressRenderer::~LiveProgressRenderer() {
@@ -832,7 +825,7 @@ void LiveProgressRenderer::stop() {
 }
 
 std::unique_ptr<LiveProgressRenderer> make_live_progress_renderer() {
-    auto renderer = terminal::system::make_live_progress_renderer();
+    auto renderer = cppx::terminal::system::make_live_progress_renderer(terminal_options());
     if (!renderer)
         return {};
     return std::unique_ptr<LiveProgressRenderer>(

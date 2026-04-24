@@ -10,17 +10,19 @@ import cppx.fs;
 import cppx.fs.system;
 import cppx.process;
 import cppx.process.system;
+import cppx.terminal;
 import fetch;
 import fetch.system;
 import manifest;
 import manifest.system;
 import reporting;
 import reporting.system;
-import terminal;
 import toml;
 import toolchain;
 import toolchain.system;
 import vcpkg.system;
+
+namespace terminal = cppx::terminal;
 
 export namespace build::system {
 

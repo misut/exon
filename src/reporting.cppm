@@ -1,5 +1,6 @@
 export module reporting;
 import std;
+import cppx.terminal;
 
 export namespace reporting {
 
@@ -74,12 +75,17 @@ std::optional<OutputMode> parse_output_mode(std::string_view value) {
 }
 
 std::optional<CapabilitySetting> parse_capability_setting(std::string_view value) {
-    if (value == "auto")
+    auto setting = cppx::terminal::parse_capability_setting(value);
+    if (!setting)
+        return std::nullopt;
+    switch (*setting) {
+    case cppx::terminal::CapabilitySetting::auto_detect:
         return CapabilitySetting::auto_detect;
-    if (value == "always")
+    case cppx::terminal::CapabilitySetting::always:
         return CapabilitySetting::always;
-    if (value == "never")
+    case cppx::terminal::CapabilitySetting::never:
         return CapabilitySetting::never;
+    }
     return std::nullopt;
 }
 
@@ -110,11 +116,11 @@ std::string_view to_string(OutputMode mode) {
 std::string_view to_string(CapabilitySetting setting) {
     switch (setting) {
     case CapabilitySetting::auto_detect:
-        return "auto";
+        return cppx::terminal::to_string(cppx::terminal::CapabilitySetting::auto_detect);
     case CapabilitySetting::always:
-        return "always";
+        return cppx::terminal::to_string(cppx::terminal::CapabilitySetting::always);
     case CapabilitySetting::never:
-        return "never";
+        return cppx::terminal::to_string(cppx::terminal::CapabilitySetting::never);
     }
     return "auto";
 }
