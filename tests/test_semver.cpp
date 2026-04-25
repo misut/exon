@@ -1,17 +1,6 @@
 import std;
 import semver;
 
-#if defined(_WIN32)
-// Disable Windows crash dialogs so failures surface as exit codes instead of blocking UI.
-extern "C" unsigned int __stdcall SetErrorMode(unsigned int);
-extern "C" int _set_abort_behavior(unsigned int, unsigned int);
-static int _crash_suppression = []() {
-    SetErrorMode(0x0001u | 0x0002u);
-    _set_abort_behavior(0, 0x1u | 0x4u);
-    return 0;
-}();
-#endif
-
 int failures = 0;
 
 void check(bool cond, std::string_view msg) {
