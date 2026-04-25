@@ -15,13 +15,6 @@ static int unsetenv(char const* name) {
     return _putenv_s(name, "");
 }
 constexpr auto null_redirect = ">NUL 2>&1";
-extern "C" unsigned int __stdcall SetErrorMode(unsigned int);
-extern "C" int _set_abort_behavior(unsigned int, unsigned int);
-static int _crash_suppression = []() {
-    SetErrorMode(0x0001u | 0x0002u);
-    _set_abort_behavior(0, 0x1u | 0x4u);
-    return 0;
-}();
 #else
 extern "C" int setenv(char const* name, char const* value, int overwrite);
 extern "C" int unsetenv(char const* name);

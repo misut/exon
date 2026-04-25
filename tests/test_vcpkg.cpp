@@ -3,18 +3,6 @@ import vcpkg;
 import vcpkg.system;
 import manifest;
 
-#if defined(_WIN32)
-// Disable Windows crash dialogs ("abort() has been called", GP-fault popup)
-// in test binaries so failures surface as exit codes instead of blocking UI.
-extern "C" unsigned int __stdcall SetErrorMode(unsigned int);
-extern "C" int _set_abort_behavior(unsigned int, unsigned int);
-static int _crash_suppression = []() {
-    SetErrorMode(0x0001u | 0x0002u);   // SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX
-    _set_abort_behavior(0, 0x1u | 0x4u); // ~(_WRITE_ABORT_MSG | _CALL_REPORTFAULT)
-    return 0;
-}();
-#endif
-
 int failures = 0;
 
 void check(bool cond, std::string_view msg) {
