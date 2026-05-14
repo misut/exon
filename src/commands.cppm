@@ -1296,17 +1296,129 @@ std::string dist_archive_filename(std::string_view package_name, std::string_vie
                        dist_archive_extension(platform));
 }
 
+std::uint32_t zip_crc32(std::span<char const> bytes) {
+    auto crc = std::uint32_t{0xffffffffU};
+    for (auto byte : bytes) {
+        crc ^= static_cast<unsigned char>(byte);
+        for (auto bit = 0; bit != 8; ++bit)
+            crc = (crc >> 1) ^ (0xedb88320U & (0U - (crc & 1U)));
+    }
+    return crc ^ 0xffffffffU;
+}
+
+void write_le16(std::ostream& out, std::uint16_t value) {
+    out.put(static_cast<char>(value & 0xffU));
+    out.put(static_cast<char>((value >> 8U) & 0xffU));
+}
+
+void write_le32(std::ostream& out, std::uint32_t value) {
+    write_le16(out, static_cast<std::uint16_t>(value & 0xffffU));
+    write_le16(out, static_cast<std::uint16_t>((value >> 16U) & 0xffffU));
+}
+
+std::uint32_t checked_zip32(std::uintmax_t value, std::string_view label) {
+    if (value > std::numeric_limits<std::uint32_t>::max())
+        throw std::runtime_error{std::format("{} exceeds ZIP32 limit", label)};
+    return static_cast<std::uint32_t>(value);
+}
+
+std::uint32_t zip_position(std::ostream& out, std::string_view label) {
+    auto position = out.tellp();
+    if (position < std::ostream::pos_type{0})
+        throw std::runtime_error{std::format("failed to query ZIP {}", label)};
+    return checked_zip32(static_cast<std::uintmax_t>(position), label);
+}
+
+void write_stored_zip_archive(std::filesystem::path const& source,
+                              std::filesystem::path const& archive,
+                              std::string_view entry_name) {
+    if (entry_name.empty() || entry_name.size() > std::numeric_limits<std::uint16_t>::max())
+        throw std::runtime_error{"invalid ZIP entry name"};
+
+    auto size = checked_zip32(std::filesystem::file_size(source), "entry size");
+    auto data = std::vector<char>(size);
+    auto input = std::ifstream{source, std::ios::binary};
+    if (!input)
+        throw std::runtime_error{std::format("failed to open {}", source.string())};
+    if (!data.empty())
+        input.read(data.data(), static_cast<std::streamsize>(data.size()));
+    if (input.gcount() != static_cast<std::streamsize>(data.size()))
+        throw std::runtime_error{std::format("failed to read {}", source.string())};
+
+    auto output = std::ofstream{archive, std::ios::binary | std::ios::trunc};
+    if (!output)
+        throw std::runtime_error{std::format("failed to create {}", archive.string())};
+
+    auto const name_length = static_cast<std::uint16_t>(entry_name.size());
+    auto const crc = zip_crc32(data);
+    auto const dos_time = std::uint16_t{0};
+    auto const dos_date = std::uint16_t{0x0021}; // 1980-01-01, the ZIP minimum date.
+
+    auto local_header_offset = zip_position(output, "local header offset");
+    write_le32(output, 0x04034b50U);
+    write_le16(output, 20);
+    write_le16(output, 0);
+    write_le16(output, 0);
+    write_le16(output, dos_time);
+    write_le16(output, dos_date);
+    write_le32(output, crc);
+    write_le32(output, size);
+    write_le32(output, size);
+    write_le16(output, name_length);
+    write_le16(output, 0);
+    output.write(entry_name.data(), static_cast<std::streamsize>(entry_name.size()));
+    if (!data.empty())
+        output.write(data.data(), static_cast<std::streamsize>(data.size()));
+
+    auto central_directory_offset = zip_position(output, "central directory offset");
+    write_le32(output, 0x02014b50U);
+    write_le16(output, 20);
+    write_le16(output, 20);
+    write_le16(output, 0);
+    write_le16(output, 0);
+    write_le16(output, dos_time);
+    write_le16(output, dos_date);
+    write_le32(output, crc);
+    write_le32(output, size);
+    write_le32(output, size);
+    write_le16(output, name_length);
+    write_le16(output, 0);
+    write_le16(output, 0);
+    write_le16(output, 0);
+    write_le16(output, 0);
+    write_le32(output, 0);
+    write_le32(output, local_header_offset);
+    output.write(entry_name.data(), static_cast<std::streamsize>(entry_name.size()));
+
+    auto central_directory_end = zip_position(output, "central directory end");
+    auto central_directory_size =
+        checked_zip32(central_directory_end - central_directory_offset, "central directory size");
+    write_le32(output, 0x06054b50U);
+    write_le16(output, 0);
+    write_le16(output, 0);
+    write_le16(output, 1);
+    write_le16(output, 1);
+    write_le32(output, central_directory_size);
+    write_le32(output, central_directory_offset);
+    write_le16(output, 0);
+
+    if (!output)
+        throw std::runtime_error{std::format("failed to write {}", archive.string())};
+}
+
 core::ProcessSpec dist_archive_command(std::string cmake, std::filesystem::path const& build_dir,
                                        std::filesystem::path const& archive,
                                        std::string_view executable_filename,
                                        std::string_view platform) {
+    if (dist_platform_is_windows(platform))
+        throw std::invalid_argument{"Windows dist archives are written as ZIP directly"};
     return core::ProcessSpec{
         .program = std::move(cmake),
         .args =
             {
                 "-E",
                 "tar",
-                std::string{dist_platform_is_windows(platform) ? "cf" : "czf"},
+                "czf",
                 archive.string(),
                 std::string{executable_filename},
             },
@@ -2803,12 +2915,23 @@ int cmd_dist(int argc, char* argv[]) {
         std::error_code ec;
         std::filesystem::remove(archive, ec);
 
-        auto tc = toolchain::system::detect();
-        auto spec = dist_archive_command(tc.cmake, project.build_dir, archive, executable_filename,
-                                         platform);
         auto started = std::chrono::steady_clock::now();
-        auto result =
-            reporting::system::run_process(spec, reporting::stream_mode_for(options.output));
+        auto result = reporting::ProcessResult{};
+        auto archive_error = std::string{};
+        if (dist_platform_is_windows(platform)) {
+            try {
+                write_stored_zip_archive(executable, archive, executable_filename);
+            } catch (std::exception const& e) {
+                result.exit_code = 1;
+                archive_error = e.what();
+            }
+        } else {
+            auto tc = toolchain::system::detect();
+            auto spec = dist_archive_command(tc.cmake, project.build_dir, archive,
+                                             executable_filename, platform);
+            result =
+                reporting::system::run_process(spec, reporting::stream_mode_for(options.output));
+        }
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started);
         if (result.exit_code != 0) {
@@ -2819,7 +2942,10 @@ int cmd_dist(int argc, char* argv[]) {
                         reporting::json_string("severity", "error"),
                         reporting::json_string("message", "archive command failed"),
                         reporting::json_number("exit_code", result.exit_code),
-                        reporting::json_string("stderr_excerpt", first_line(result.stderr_text)),
+                        reporting::json_string(
+                            "stderr_excerpt",
+                            archive_error.empty() ? first_line(result.stderr_text)
+                                                  : archive_error),
                     });
                 reporting::emit_json_event(
                     "summary", {
@@ -2828,7 +2954,9 @@ int cmd_dist(int argc, char* argv[]) {
                                    reporting::json_number("elapsed_ms", elapsed.count()),
                                });
             } else {
-                auto hint = first_non_empty_line(result.stderr_text, result.stdout_text);
+                auto hint = archive_error.empty()
+                                ? first_non_empty_line(result.stderr_text, result.stdout_text)
+                                : archive_error;
                 if (hint.empty())
                     hint = std::format("archive command exited with code {}", result.exit_code);
                 command_error("failed to package archive", hint);

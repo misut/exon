@@ -143,6 +143,12 @@ jobs:
         run: |
           Invoke-Expression (& intron env | Out-String)
           .\.exon\debug\exon.exe dist --release --version ${{ github.ref_name }}
+          $expanded = Join-Path $env:RUNNER_TEMP "exon-release-dist"
+          Remove-Item -LiteralPath $expanded -Recurse -Force -ErrorAction SilentlyContinue
+          Expand-Archive -LiteralPath "exon-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip" -DestinationPath $expanded -Force
+          if (-not (Test-Path (Join-Path $expanded "exon.exe"))) {
+            throw "release dist archive did not contain exon.exe at archive root"
+          }
           .\.exon\release\exon.exe info
 
       - name: Upload artifact

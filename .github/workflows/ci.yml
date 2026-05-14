@@ -232,3 +232,18 @@ jobs:
       - name: Verify
         shell: pwsh
         run: .\.exon\debug\exon.exe info
+
+      - name: Dist smoke
+        shell: pwsh
+        run: |
+          Invoke-Expression (& intron env | Out-String)
+          $dist = Join-Path $env:RUNNER_TEMP "exon-dist"
+          $expanded = Join-Path $env:RUNNER_TEMP "exon-dist-expanded"
+          Remove-Item -LiteralPath $dist -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath $expanded -Recurse -Force -ErrorAction SilentlyContinue
+          .\.exon\debug\exon.exe dist --release --version v0.0.0-ci --output-dir $dist
+          $archive = Join-Path $dist "exon-v0.0.0-ci-x86_64-pc-windows-msvc.zip"
+          Expand-Archive -LiteralPath $archive -DestinationPath $expanded -Force
+          if (-not (Test-Path (Join-Path $expanded "exon.exe"))) {
+            throw "dist archive did not contain exon.exe at archive root"
+          }
