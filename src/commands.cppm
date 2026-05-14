@@ -4,6 +4,7 @@ import cli;
 import core;
 import cppx.fs;
 import cppx.fs.system;
+import cppx.cli;
 import cppx.terminal;
 import toml;
 import manifest;
@@ -25,6 +26,7 @@ import toolchain.system;
 namespace terminal = cppx::terminal;
 
 export namespace commands {
+namespace cxcli = cppx::cli;
 
 #ifndef EXON_PKG_VERSION
 #define EXON_PKG_VERSION "dev"
@@ -43,6 +45,383 @@ int command_error(std::string_view msg, std::string_view hint) {
             .hints = {std::string{hint}},
         },
         reporting::system::stderr_is_tty());
+}
+
+cxcli::OptionSpec make_flag(std::string name, std::string description,
+                            std::string category = {}) {
+    return {
+        .name = std::move(name),
+        .description = std::move(description),
+        .category = std::move(category),
+    };
+}
+
+cxcli::OptionSpec make_option(std::string name, std::string value_name,
+                              std::string description, std::vector<std::string> value_hints = {},
+                              std::string category = {}) {
+    return {
+        .name = std::move(name),
+        .arity = cxcli::OptionArity::one,
+        .value_name = std::move(value_name),
+        .description = std::move(description),
+        .category = std::move(category),
+        .value_hints = std::move(value_hints),
+    };
+}
+
+cxcli::OptionSpec make_repeatable_option(std::string name, std::string value_name,
+                                         std::string description, std::string category = {}) {
+    auto option = make_option(std::move(name), std::move(value_name),
+                              std::move(description), {}, std::move(category));
+    option.repeatable = true;
+    return option;
+}
+
+std::vector<std::string> output_modes() {
+    return {"human", "json", "wrapped", "raw"};
+}
+
+std::vector<std::string> json_output_modes() {
+    return {"human", "json"};
+}
+
+std::vector<std::string> capability_modes() {
+    return {"auto", "always", "never"};
+}
+
+std::vector<std::string> target_hints() {
+    return {"wasm32-wasi", "aarch64-linux-android"};
+}
+
+std::vector<cxcli::OptionSpec> workspace_options() {
+    return {
+        make_repeatable_option("member", "names", "select workspace members", "workspace"),
+        make_repeatable_option("exclude", "names", "exclude workspace members", "workspace"),
+    };
+}
+
+std::vector<cxcli::OptionSpec> reporting_options(bool include_show_output = false,
+                                                 bool json_only = false) {
+    auto options = std::vector<cxcli::OptionSpec>{
+        make_option("output", "mode", "select output format",
+                    json_only ? json_output_modes() : output_modes(), "output"),
+        make_option("color", "mode", "control ANSI color", capability_modes(), "output"),
+        make_option("progress", "mode", "control live progress", capability_modes(), "output"),
+        make_option("unicode", "mode", "control Unicode glyphs", capability_modes(), "output"),
+        make_option("hyperlinks", "mode", "control terminal hyperlinks", capability_modes(),
+                    "output"),
+    };
+    if (include_show_output) {
+        options.push_back(make_option("show-output", "mode", "select test output capture policy",
+                                      {"failed", "all", "none"}, "output"));
+    }
+    return options;
+}
+
+void append_options(std::vector<cxcli::OptionSpec>& into,
+                    std::vector<cxcli::OptionSpec> options) {
+    into.insert(into.end(), std::make_move_iterator(options.begin()),
+                std::make_move_iterator(options.end()));
+}
+
+std::vector<cxcli::OptionSpec> build_command_options(bool include_reporting = true) {
+    auto options = std::vector<cxcli::OptionSpec>{
+        make_flag("release", "build with release profile", "build"),
+        make_option("target", "triple", "select a target platform", target_hints(), "build"),
+    };
+    append_options(options, workspace_options());
+    if (include_reporting)
+        append_options(options, reporting_options());
+    return options;
+}
+
+cxcli::CommandSpec const& command_spec() {
+    static const auto spec = cxcli::CommandSpec{
+        .name = "exon",
+        .summary = "C++23 package and build tool",
+        .subcommands = {
+            cxcli::CommandSpec{
+                .name = "init",
+                .summary = "Create a new package or workspace",
+                .options = {
+                    make_flag("lib", "create a library package", "project"),
+                    make_flag("workspace", "create a workspace root", "project"),
+                },
+                .category = "project",
+                .positional_name = "name",
+                .positional_description = "package or workspace name",
+                .examples = {"exon init app", "exon init --workspace"},
+            },
+            cxcli::CommandSpec{
+                .name = "new",
+                .summary = "Create a new workspace member",
+                .options = {
+                    make_flag("lib", "create a library member", "project"),
+                    make_flag("bin", "create an executable member", "project"),
+                },
+                .category = "project",
+                .positional_name = "name",
+                .positional_description = "member name",
+                .examples = {"exon new --bin app", "exon new --lib core"},
+            },
+            cxcli::CommandSpec{
+                .name = "info",
+                .summary = "Show package information",
+                .allow_positionals = false,
+                .category = "project",
+            },
+            cxcli::CommandSpec{
+                .name = "build",
+                .summary = "Build the project or selected workspace members",
+                .options = build_command_options(),
+                .allow_positionals = false,
+                .category = "build",
+                .examples = {"exon build", "exon build --release --target wasm32-wasi"},
+            },
+            cxcli::CommandSpec{
+                .name = "dist",
+                .summary = "Build and package a release-compatible archive",
+                .options = [] {
+                    auto options = std::vector<cxcli::OptionSpec>{
+                        make_flag("release", "build with release profile", "build"),
+                        make_option("target", "triple", "select a target platform",
+                                    target_hints(), "build"),
+                        make_option("output-dir", "dir", "write the archive to a directory",
+                                    {}, "dist"),
+                        make_option("version", "version", "override the archive version label",
+                                    {}, "dist"),
+                    };
+                    append_options(options, reporting_options());
+                    return options;
+                }(),
+                .allow_positionals = false,
+                .category = "build",
+                .examples = {"exon dist --release --version v0.32.1 --output-dir dist"},
+            },
+            cxcli::CommandSpec{
+                .name = "status",
+                .summary = "Inspect project, toolchain, and terminal status",
+                .options = reporting_options(false, true),
+                .allow_positionals = false,
+                .category = "diagnostics",
+            },
+            cxcli::CommandSpec{
+                .name = "doctor",
+                .summary = "Alias for status",
+                .options = reporting_options(false, true),
+                .allow_positionals = false,
+                .category = "diagnostics",
+            },
+            cxcli::CommandSpec{
+                .name = "check",
+                .summary = "Check syntax without linking",
+                .options = build_command_options(false),
+                .allow_positionals = false,
+                .category = "build",
+            },
+            cxcli::CommandSpec{
+                .name = "run",
+                .summary = "Build and run the selected executable",
+                .options = {
+                    make_flag("release", "build with release profile", "build"),
+                    make_option("target", "triple", "select a target platform", target_hints(),
+                                "build"),
+                    make_option("member", "name", "select a workspace member", {}, "workspace"),
+                },
+                .category = "build",
+                .positional_name = "args",
+                .positional_description = "arguments passed to the executable",
+                .examples = {"exon run -- --help", "exon run --member app"},
+            },
+            cxcli::CommandSpec{
+                .name = "debug",
+                .summary = "Build and open the selected executable in a native debugger",
+                .options = {
+                    make_flag("release", "build with release profile", "build"),
+                    make_option("debugger", "name", "select debugger",
+                                {"auto", "lldb", "gdb", "devenv", "cdb"}, "debug"),
+                    make_option("member", "name", "select a workspace member", {}, "workspace"),
+                    make_repeatable_option("exclude", "names", "exclude workspace members",
+                                           "workspace"),
+                },
+                .category = "build",
+                .positional_name = "args",
+                .positional_description = "arguments passed to the executable after --",
+            },
+            cxcli::CommandSpec{
+                .name = "test",
+                .summary = "Build and run tests",
+                .options = [] {
+                    auto options = build_command_options(false);
+                    options.push_back(make_option("timeout", "sec", "limit each test binary",
+                                                  {}, "test"));
+                    append_options(options, reporting_options(true));
+                    return options;
+                }(),
+                .allow_positionals = false,
+                .category = "build",
+            },
+            cxcli::CommandSpec{
+                .name = "clean",
+                .summary = "Remove build artifacts",
+                .options = workspace_options(),
+                .allow_positionals = false,
+                .category = "build",
+            },
+            cxcli::CommandSpec{
+                .name = "add",
+                .summary = "Add a dependency",
+                .options = {
+                    make_flag("dev", "add the dependency to dev-dependencies", "dependency"),
+                    make_option("features", "list", "enable dependency features", {}, "dependency"),
+                    make_flag("no-default-features", "disable default dependency features",
+                              "dependency"),
+                    make_option("path", "name", "add a local path dependency", {}, "dependency"),
+                    make_option("workspace", "name", "add a workspace member dependency", {},
+                                "dependency"),
+                    make_option("vcpkg", "name", "add a vcpkg dependency", {}, "dependency"),
+                    make_option("cmake", "name", "add a raw CMake dependency", {},
+                                "dependency"),
+                    make_option("git", "repo", "add a git dependency by URL", {}, "dependency"),
+                    make_option("version", "version", "set dependency version", {}, "dependency"),
+                    make_option("repo", "url", "set CMake dependency repository", {},
+                                "dependency"),
+                    make_option("tag", "tag", "set CMake dependency tag/ref", {}, "dependency"),
+                    make_option("targets", "targets", "set CMake dependency targets", {},
+                                "dependency"),
+                    make_repeatable_option("option", "K=V", "set a CMake dependency option",
+                                           "dependency"),
+                    make_option("shallow", "bool", "control shallow CMake dependency clone",
+                                {"true", "false"}, "dependency"),
+                    make_option("subdir", "dir", "select a git dependency subdirectory", {},
+                                "dependency"),
+                    make_option("name", "name", "override dependency package name", {},
+                                "dependency"),
+                },
+                .category = "dependency",
+                .positional_name = "pkg",
+                .positional_description = "package key, version, or path depending on mode",
+            },
+            cxcli::CommandSpec{
+                .name = "remove",
+                .summary = "Remove a dependency",
+                .category = "dependency",
+                .positional_name = "pkg",
+                .positional_description = "dependency key",
+            },
+            cxcli::CommandSpec{
+                .name = "outdated",
+                .summary = "Check git dependencies for newer semver tags",
+                .options = [] {
+                    auto options = workspace_options();
+                    options.push_back(make_option("output", "mode", "select output format",
+                                                  json_output_modes(), "output"));
+                    return options;
+                }(),
+                .category = "dependency",
+                .positional_name = "pkg",
+                .positional_description = "optional dependency filters",
+            },
+            cxcli::CommandSpec{
+                .name = "update",
+                .summary = "Update lockfile entries to latest compatible versions",
+                .options = [] {
+                    auto options = std::vector<cxcli::OptionSpec>{
+                        make_flag("dry-run", "show changes without writing exon.lock",
+                                  "dependency"),
+                        make_option("precise", "version", "pin one package to an exact version",
+                                    {}, "dependency"),
+                    };
+                    append_options(options, workspace_options());
+                    return options;
+                }(),
+                .category = "dependency",
+                .positional_name = "pkg",
+                .positional_description = "optional dependency filters",
+            },
+            cxcli::CommandSpec{
+                .name = "tree",
+                .summary = "Show the resolved dependency graph",
+                .options = [] {
+                    auto options = workspace_options();
+                    options.push_back(make_flag("dev", "include dev dependencies", "dependency"));
+                    options.push_back(make_flag("features", "show resolved feature details",
+                                                "dependency"));
+                    options.push_back(make_option("output", "mode", "select output format",
+                                                  json_output_modes(), "output"));
+                    return options;
+                }(),
+                .allow_positionals = false,
+                .category = "dependency",
+            },
+            cxcli::CommandSpec{
+                .name = "why",
+                .summary = "Show why a package is in the dependency graph",
+                .options = [] {
+                    auto options = workspace_options();
+                    options.push_back(make_flag("dev", "include dev dependencies", "dependency"));
+                    options.push_back(make_option("output", "mode", "select output format",
+                                                  json_output_modes(), "output"));
+                    return options;
+                }(),
+                .category = "dependency",
+                .positional_name = "pkg",
+                .positional_description = "dependency package name",
+            },
+            cxcli::CommandSpec{
+                .name = "sync",
+                .summary = "Sync CMakeLists.txt with exon.toml",
+                .options = workspace_options(),
+                .allow_positionals = false,
+                .category = "project",
+            },
+            cxcli::CommandSpec{
+                .name = "fmt",
+                .summary = "Format source files with clang-format",
+                .allow_positionals = false,
+                .category = "project",
+            },
+            cxcli::CommandSpec{
+                .name = "version",
+                .summary = "Show exon version",
+                .allow_positionals = false,
+                .category = "project",
+            },
+            cxcli::CommandSpec{
+                .name = "commands",
+                .summary = "Describe exon command metadata",
+                .options = {
+                    make_option("output", "mode", "select output format", json_output_modes(),
+                                "output"),
+                },
+                .allow_positionals = false,
+                .category = "cli",
+            },
+            cxcli::CommandSpec{
+                .name = "complete",
+                .summary = "Print completion candidates for a partial invocation",
+                .options = {
+                    make_option("output", "mode", "select completion output format",
+                                {"human", "json", "raw"}, "output"),
+                },
+                .category = "cli",
+                .positional_name = "words",
+                .positional_description = "current exon words after --; final word is the prefix",
+                .examples = {"exon complete -- build --ou",
+                             "exon complete --output json -- build --output j"},
+            },
+            cxcli::CommandSpec{
+                .name = "completion",
+                .summary = "Generate a shell completion script",
+                .category = "cli",
+                .positional_name = "shell",
+                .positional_description = "bash, zsh, or fish",
+                .examples = {"exon completion bash", "exon completion zsh"},
+            },
+        },
+        .allow_positionals = false,
+    };
+    return spec;
 }
 
 std::string usage_text() {
@@ -105,6 +484,10 @@ std::string usage_text() {
                     {"sync [--member a,b] [--exclude x,y]", "sync CMakeLists.txt with exon.toml"},
                     {"fmt", "format source files with clang-format"},
                     {"version", "show exon version"},
+                    {"commands [--output human|json]", "describe command metadata"},
+                    {"complete [--output human|json|raw] -- [words...]",
+                     "print completion candidates"},
+                    {"completion bash|zsh|fish", "generate a shell completion script"},
                 }},
             cli::Section{
                 "targets",
@@ -117,10 +500,11 @@ std::string usage_text() {
 }
 
 std::span<std::string_view const> command_names() {
-    static constexpr auto names = std::array<std::string_view, 21>{
+    static constexpr auto names = std::array<std::string_view, 24>{
         "init",     "new",    "info",  "build", "dist",  "status", "doctor",
         "check",    "run",    "debug", "test",  "clean", "add",    "remove",
         "outdated", "update", "sync",  "tree",  "why",   "fmt",    "version",
+        "commands", "complete", "completion",
     };
     return std::span{names};
 }
@@ -953,6 +1337,321 @@ reporting::Options parse_reporting_options(cli::Args const& args,
         args.get("--output"), include_show_output ? args.get("--show-output") : std::string_view{},
         args.get("--color"), args.get("--progress"), args.get("--unicode"),
         args.get("--hyperlinks"));
+}
+
+reporting::OutputMode parse_cli_data_output(std::string_view value, bool allow_raw = false) {
+    if (value.empty() || value == "human")
+        return reporting::OutputMode::human;
+    if (value == "json")
+        return reporting::OutputMode::json;
+    if (allow_raw && value == "raw")
+        return reporting::OutputMode::raw;
+    auto expected = allow_raw ? "human, json, or raw" : "human or json";
+    throw std::runtime_error(std::format("invalid --output '{}': expected {}", value, expected));
+}
+
+std::string option_arity_text(cxcli::OptionArity arity) {
+    switch (arity) {
+    case cxcli::OptionArity::none:
+        return "none";
+    case cxcli::OptionArity::one:
+        return "one";
+    }
+    return "none";
+}
+
+std::string completion_kind_text(cxcli::CompletionKind kind) {
+    switch (kind) {
+    case cxcli::CompletionKind::command:
+        return "command";
+    case cxcli::CompletionKind::option:
+        return "option";
+    case cxcli::CompletionKind::option_value:
+        return "option_value";
+    case cxcli::CompletionKind::positional:
+        return "positional";
+    }
+    return "command";
+}
+
+std::string json_string_array(std::span<std::string const> values) {
+    auto out = std::string{"["};
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i > 0)
+            out += ",";
+        out += std::format("\"{}\"", reporting::json_escape(values[i]));
+    }
+    out += "]";
+    return out;
+}
+
+std::string option_metadata_json(cxcli::OptionSpec const& option) {
+    auto out = std::format(
+        "{{\"name\":\"{}\",\"arity\":\"{}\",\"repeatable\":{},\"required\":{}",
+        reporting::json_escape(option.name), option_arity_text(option.arity),
+        option.repeatable ? "true" : "false", option.required ? "true" : "false");
+    if (option.short_name != '\0')
+        out += std::format(",\"short_name\":\"{}\"", option.short_name);
+    else
+        out += ",\"short_name\":null";
+    out += std::format(
+        ",\"value_name\":\"{}\",\"description\":\"{}\",\"category\":\"{}\",\"value_hints\":{},\"hidden\":{}}}",
+        reporting::json_escape(option.value_name), reporting::json_escape(option.description),
+        reporting::json_escape(option.category), json_string_array(option.value_hints),
+        option.hidden ? "true" : "false");
+    return out;
+}
+
+std::string option_metadata_array_json(std::span<cxcli::OptionSpec const> options) {
+    auto out = std::string{"["};
+    for (std::size_t i = 0; i < options.size(); ++i) {
+        if (i > 0)
+            out += ",";
+        out += option_metadata_json(options[i]);
+    }
+    out += "]";
+    return out;
+}
+
+std::string command_metadata_json(cxcli::CommandSpec const& command) {
+    return std::format(
+        "{{\"name\":\"{}\",\"aliases\":{},\"summary\":\"{}\",\"description\":\"{}\","
+        "\"category\":\"{}\",\"positional_name\":\"{}\",\"positional_description\":\"{}\","
+        "\"allow_positionals\":{},\"hidden\":{},\"examples\":{},\"options\":{}}}",
+        reporting::json_escape(command.name), json_string_array(command.aliases),
+        reporting::json_escape(command.summary), reporting::json_escape(command.description),
+        reporting::json_escape(command.category), reporting::json_escape(command.positional_name),
+        reporting::json_escape(command.positional_description),
+        command.allow_positionals ? "true" : "false", command.hidden ? "true" : "false",
+        json_string_array(command.examples), option_metadata_array_json(command.options));
+}
+
+std::string command_catalog_json(cxcli::CommandSpec const& root = command_spec()) {
+    auto out = std::string{"["};
+    auto first = true;
+    for (auto const& command : root.subcommands) {
+        if (command.hidden)
+            continue;
+        if (!first)
+            out += ",";
+        first = false;
+        out += command_metadata_json(command);
+    }
+    out += "]";
+    return out;
+}
+
+std::string completion_context_json(cxcli::CompletionContext const& context) {
+    return std::format(
+        "{{\"command_path\":{},\"after_terminator\":{},\"expects_option_value\":{},\"option_name\":\"{}\"}}",
+        json_string_array(context.command_path), context.after_terminator ? "true" : "false",
+        context.expects_option_value ? "true" : "false",
+        reporting::json_escape(context.option_name));
+}
+
+std::string completion_candidate_json(cxcli::CompletionCandidate const& candidate) {
+    return std::format(
+        "{{\"kind\":\"{}\",\"value\":\"{}\",\"description\":\"{}\",\"value_name\":\"{}\","
+        "\"category\":\"{}\",\"append_space\":{}}}",
+        completion_kind_text(candidate.kind), reporting::json_escape(candidate.value),
+        reporting::json_escape(candidate.description), reporting::json_escape(candidate.value_name),
+        reporting::json_escape(candidate.category), candidate.append_space ? "true" : "false");
+}
+
+std::string completion_candidates_json(std::span<cxcli::CompletionCandidate const> candidates) {
+    auto out = std::string{"["};
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        if (i > 0)
+            out += ",";
+        out += completion_candidate_json(candidates[i]);
+    }
+    out += "]";
+    return out;
+}
+
+std::vector<std::string> normalize_completion_words(std::vector<std::string> words) {
+    if (!words.empty() && words.front() == "exon")
+        words.erase(words.begin());
+    return words;
+}
+
+cxcli::CompletionResult complete_words(std::vector<std::string> words) {
+    words = normalize_completion_words(std::move(words));
+    auto prefix = std::string_view{};
+    auto args = std::vector<std::string_view>{};
+    if (!words.empty()) {
+        prefix = words.back();
+        args.reserve(words.size() - 1);
+        for (std::size_t i = 0; i + 1 < words.size(); ++i)
+            args.push_back(words[i]);
+    }
+    return cxcli::complete(command_spec(), args, prefix);
+}
+
+struct CompletionInvocation {
+    reporting::OutputMode output = reporting::OutputMode::human;
+    std::vector<std::string> words;
+};
+
+CompletionInvocation parse_completion_invocation(int argc, char* argv[]) {
+    auto invocation = CompletionInvocation{};
+    auto passthrough = false;
+    for (auto i = 2; i < argc; ++i) {
+        auto token = std::string_view{argv[i]};
+        if (passthrough) {
+            invocation.words.emplace_back(token);
+            continue;
+        }
+        if (token == "--") {
+            passthrough = true;
+            continue;
+        }
+        if (token == "--output") {
+            if (i + 1 >= argc)
+                throw std::runtime_error("--output requires a value");
+            invocation.output = parse_cli_data_output(argv[++i], true);
+            continue;
+        }
+        if (token.starts_with("--output=")) {
+            invocation.output = parse_cli_data_output(token.substr(9), true);
+            continue;
+        }
+        invocation.words.emplace_back(token);
+    }
+    return invocation;
+}
+
+void print_completion_result(cxcli::CompletionResult const& result,
+                             reporting::OutputMode output) {
+    if (output == reporting::OutputMode::json) {
+        reporting::emit_json_event(
+            "completion",
+            {
+                reporting::json_raw("context", completion_context_json(result.context)),
+                reporting::json_raw("candidates", completion_candidates_json(result.candidates)),
+            });
+        return;
+    }
+
+    for (auto const& candidate : result.candidates) {
+        if (output == reporting::OutputMode::raw || candidate.description.empty()) {
+            std::println("{}", candidate.value);
+        } else {
+            std::println("{}\t{}", candidate.value, candidate.description);
+        }
+    }
+}
+
+void print_command_metadata_human(cxcli::CommandSpec const& root) {
+    std::println("{:<12} {:<12} {}", "command", "category", "summary");
+    for (auto const& command : root.subcommands) {
+        if (command.hidden)
+            continue;
+        auto name = command.name;
+        if (!command.aliases.empty())
+            name += std::format(" ({})", join_strings(command.aliases, ","));
+        std::println("{:<12} {:<12} {}", name, command.category, command.summary);
+    }
+}
+
+std::string bash_completion_script() {
+    return R"(# bash completion for exon
+_exon_complete()
+{
+    local -a candidates
+    mapfile -t candidates < <(exon complete --output raw -- "${COMP_WORDS[@]:1}")
+    COMPREPLY=("${candidates[@]}")
+}
+
+complete -F _exon_complete exon
+)";
+}
+
+std::string zsh_completion_script() {
+    return R"(#compdef exon
+_exon()
+{
+    local -a candidates
+    candidates=("${(@f)$(exon complete --output raw -- ${words[@]:2})}")
+    compadd -a candidates
+}
+
+_exon "$@"
+)";
+}
+
+std::string fish_completion_script() {
+    return R"(function __exon_complete
+    set -l tokens (commandline -opc)
+    set -e tokens[1]
+    set -l current (commandline -ct)
+    if test (count $tokens) -gt 0
+        set tokens[-1] $current
+    else
+        set tokens $current
+    end
+    exon complete --output raw -- $tokens
+end
+
+complete -c exon -f -a '(__exon_complete)'
+)";
+}
+
+int cmd_commands(int argc, char* argv[]) {
+    try {
+        auto args = cli::parse(argc, argv, 2, {cli::Option{"--output"}});
+        if (!args.positional().empty())
+            return command_error("usage: exon commands [--output human|json]");
+        auto output = parse_cli_data_output(args.get("--output"));
+        if (output == reporting::OutputMode::json) {
+            reporting::emit_json_event(
+                "commands",
+                {
+                    reporting::json_string("version", version),
+                    reporting::json_raw("commands", command_catalog_json()),
+                });
+        } else {
+            print_command_metadata_human(command_spec());
+        }
+        return 0;
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
+}
+
+int cmd_complete(int argc, char* argv[]) {
+    try {
+        auto invocation = parse_completion_invocation(argc, argv);
+        print_completion_result(complete_words(std::move(invocation.words)), invocation.output);
+        return 0;
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
+}
+
+int cmd_completion(int argc, char* argv[]) {
+    try {
+        auto args = cli::parse(argc, argv, 2, {});
+        if (args.positional().size() != 1)
+            return command_error("usage: exon completion bash|zsh|fish");
+
+        auto shell = std::string_view{args.positional()[0]};
+        if (shell == "bash")
+            std::print("{}", bash_completion_script());
+        else if (shell == "zsh")
+            std::print("{}", zsh_completion_script());
+        else if (shell == "fish")
+            std::print("{}", fish_completion_script());
+        else
+            return command_error(std::format("unsupported shell: {}", shell),
+                                 "expected bash, zsh, or fish");
+        return 0;
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
 }
 
 int sync_workspace_member_cmake(WorkspaceMember const& member,
