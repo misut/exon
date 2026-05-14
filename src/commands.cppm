@@ -60,6 +60,9 @@ std::string usage_text() {
                      "[--progress auto|always|never] [--unicode auto|always|never] "
                      "[--hyperlinks auto|always|never]",
                      "build the project"},
+                    {"dist [--release] [--target <t>] [--output-dir <dir>] [--version <v>] "
+                     "[--output human|json|wrapped|raw]",
+                     "build and package a release-compatible archive"},
                     {"status [--output human|json]",
                      "inspect project, toolchain, and terminal status"},
                     {"doctor [--output human|json]", "alias for status"},
@@ -114,10 +117,10 @@ std::string usage_text() {
 }
 
 std::span<std::string_view const> command_names() {
-    static constexpr auto names = std::array<std::string_view, 20>{
-        "init",   "new",   "info", "build", "status", "doctor",  "check",
-        "run",    "debug", "test", "clean", "add",    "remove",  "outdated",
-        "update", "sync",  "tree", "why",   "fmt",    "version",
+    static constexpr auto names = std::array<std::string_view, 21>{
+        "init",     "new",    "info",  "build", "dist",  "status", "doctor",
+        "check",    "run",    "debug", "test",  "clean", "add",    "remove",
+        "outdated", "update", "sync",  "tree",  "why",   "fmt",    "version",
     };
     return std::span{names};
 }
@@ -1242,6 +1245,74 @@ std::vector<cli::ArgDef> const build_defs = {
     cli::Flag{"--release"},
     cli::Option{"--target"},
 };
+
+std::string dist_version_label(std::string_view requested_version, manifest::Manifest const& m) {
+    auto value = std::string{requested_version};
+    if (value.empty())
+        value = m.version.empty() ? "dev" : m.version;
+    if (value.empty())
+        value = "dev";
+    if (value == "dev" || value.starts_with('v'))
+        return value;
+    return "v" + value;
+}
+
+std::string dist_platform_label(toolchain::Platform const& platform) {
+    auto os = toolchain::platform_os_name(platform);
+    auto arch = toolchain::platform_arch_name(platform);
+    if (os == "macos" && !arch.empty())
+        return std::format("{}-apple-darwin", arch);
+    if (os == "linux" && !arch.empty())
+        return std::format("{}-linux-gnu", arch);
+    if (os == "windows" && !arch.empty())
+        return std::format("{}-pc-windows-msvc", arch);
+    return platform.to_string();
+}
+
+std::string dist_platform_label(std::string_view target) {
+    if (!target.empty())
+        return std::string{target};
+    return dist_platform_label(toolchain::detect_host_platform());
+}
+
+bool dist_platform_is_windows(std::string_view platform) {
+    return platform.find("windows") != std::string_view::npos || platform.ends_with("-msvc");
+}
+
+std::string_view dist_archive_extension(std::string_view platform) {
+    return dist_platform_is_windows(platform) ? ".zip" : ".tar.gz";
+}
+
+std::string dist_executable_filename(std::string_view package_name, std::string_view platform) {
+    auto filename = std::string{package_name};
+    if (dist_platform_is_windows(platform) && !filename.ends_with(".exe"))
+        filename += ".exe";
+    return filename;
+}
+
+std::string dist_archive_filename(std::string_view package_name, std::string_view version,
+                                  std::string_view platform) {
+    return std::format("{}-{}-{}{}", package_name, version, platform,
+                       dist_archive_extension(platform));
+}
+
+core::ProcessSpec dist_archive_command(std::string cmake, std::filesystem::path const& build_dir,
+                                       std::filesystem::path const& archive,
+                                       std::string_view executable_filename,
+                                       std::string_view platform) {
+    return core::ProcessSpec{
+        .program = std::move(cmake),
+        .args =
+            {
+                "-E",
+                "tar",
+                std::string{dist_platform_is_windows(platform) ? "cf" : "czf"},
+                archive.string(),
+                std::string{executable_filename},
+            },
+        .cwd = build_dir,
+    };
+}
 
 struct RunnableCommandTarget {
     std::filesystem::path root;
@@ -2673,6 +2744,126 @@ int cmd_build(int argc, char* argv[]) {
         if (m.name.empty())
             return command_error("package name is required in exon.toml");
         return build::system::run(project_root, m, raw_m, release, target, options);
+    } catch (std::exception const& e) {
+        std::println(std::cerr, "error: {}", e.what());
+        return 1;
+    }
+}
+
+int cmd_dist(int argc, char* argv[]) {
+    try {
+        auto args = cli::parse(argc, argv, 2,
+                               reporting_defs({
+                                   cli::Flag{"--release"},
+                                   cli::Option{"--target"},
+                                   cli::Option{"--output-dir"},
+                                   cli::Option{"--version"},
+                               }));
+        auto release = args.has("--release");
+        auto target = std::string{args.get("--target")};
+        auto options = parse_reporting_options(args);
+        auto scoped_options = reporting::ScopedOptionsContext{options};
+        auto project_root = std::filesystem::current_path();
+        auto raw_m = load_manifest(project_root);
+        if (manifest::is_workspace(raw_m)) {
+            return command_error(
+                "exon dist packages a single binary package",
+                "run from a package root or package a workspace member from its own directory");
+        }
+        if (!check_platform(raw_m, target))
+            return 1;
+        auto m = resolve_manifest(raw_m, target);
+        if (m.name.empty())
+            return command_error("package name is required in exon.toml");
+        if (m.type == "lib")
+            return command_error("exon dist packages executable packages only");
+
+        auto build_rc = build::system::run(project_root, m, raw_m, release, target, options);
+        if (build_rc != 0)
+            return build_rc;
+
+        auto platform = dist_platform_label(target);
+        auto executable_filename = dist_executable_filename(m.name, platform);
+        auto project = build::project_context(project_root, release, target);
+        auto executable = project.build_dir / executable_filename;
+        if (!std::filesystem::exists(executable)) {
+            return command_error(
+                std::format("build artifact not found: {}", executable.string()),
+                "rerun exon dist with the same --release and --target options used by the build");
+        }
+
+        auto output_dir_text = std::string{args.get("--output-dir")};
+        auto output_dir =
+            output_dir_text.empty() ? project_root : std::filesystem::path{output_dir_text};
+        std::filesystem::create_directories(output_dir);
+
+        auto archive_filename =
+            dist_archive_filename(m.name, dist_version_label(args.get("--version"), m), platform);
+        auto archive = std::filesystem::absolute(output_dir / archive_filename);
+        std::error_code ec;
+        std::filesystem::remove(archive, ec);
+
+        auto tc = toolchain::system::detect();
+        auto spec = dist_archive_command(tc.cmake, project.build_dir, archive, executable_filename,
+                                         platform);
+        auto started = std::chrono::steady_clock::now();
+        auto result =
+            reporting::system::run_process(spec, reporting::stream_mode_for(options.output));
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started);
+        if (result.exit_code != 0) {
+            if (options.output == reporting::OutputMode::json) {
+                reporting::emit_json_event(
+                    "diagnostic",
+                    {
+                        reporting::json_string("severity", "error"),
+                        reporting::json_string("message", "archive command failed"),
+                        reporting::json_number("exit_code", result.exit_code),
+                        reporting::json_string("stderr_excerpt", first_line(result.stderr_text)),
+                    });
+                reporting::emit_json_event(
+                    "summary", {
+                                   reporting::json_string("verb", "dist"),
+                                   reporting::json_bool("success", false),
+                                   reporting::json_number("elapsed_ms", elapsed.count()),
+                               });
+            } else {
+                auto hint = first_non_empty_line(result.stderr_text, result.stdout_text);
+                if (hint.empty())
+                    hint = std::format("archive command exited with code {}", result.exit_code);
+                command_error("failed to package archive", hint);
+            }
+            return result.exit_code == 0 ? 1 : result.exit_code;
+        }
+
+        if (options.output == reporting::OutputMode::json) {
+            reporting::emit_json_event(
+                "artifact",
+                {
+                    reporting::json_string("label", "archive"),
+                    reporting::json_string(
+                        "path", build::system::detail::display_path(archive, project_root)),
+                    reporting::json_string("absolute_path", archive.generic_string()),
+                    reporting::json_string("platform", platform),
+                    reporting::json_string("format",
+                                           dist_platform_is_windows(platform) ? "zip" : "tar.gz"),
+                });
+            reporting::emit_json_event("summary",
+                                       {
+                                           reporting::json_string("verb", "dist"),
+                                           reporting::json_bool("success", true),
+                                           reporting::json_string("profile", project.profile),
+                                           reporting::json_string("target", platform),
+                                           reporting::json_number("elapsed_ms", elapsed.count()),
+                                       });
+        } else {
+            auto rel = build::system::detail::display_path(archive, project_root);
+            if (options.output == reporting::OutputMode::raw)
+                std::println("packaged: {}", rel);
+            else
+                print_status(terminal::StatusKind::ok, std::format("packaged {}", rel));
+        }
+        return 0;
     } catch (std::exception const& e) {
         std::println(std::cerr, "error: {}", e.what());
         return 1;

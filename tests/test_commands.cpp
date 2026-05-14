@@ -4,6 +4,7 @@ import fetch;
 import manifest;
 import manifest.system;
 import reporting;
+import toolchain;
 
 int failures = 0;
 
@@ -349,6 +350,68 @@ standard = 23
     }
 }
 
+void test_dist_naming_matches_release_artifacts() {
+    auto m = manifest::Manifest{};
+    m.name = "exon";
+    m.version = "0.31.0";
+
+    auto version = commands::dist_version_label({}, m);
+    check(version == "v0.31.0", "dist naming: manifest version gains v prefix");
+    check(commands::dist_version_label("v1.2.3", m) == "v1.2.3",
+          "dist naming: explicit v version kept");
+    check(commands::dist_version_label("1.2.3", m) == "v1.2.3",
+          "dist naming: explicit bare version gains v prefix");
+
+    check(commands::dist_archive_filename("exon", version, "aarch64-apple-darwin") ==
+              "exon-v0.31.0-aarch64-apple-darwin.tar.gz",
+          "dist naming: macOS artifact name matches release format");
+    check(commands::dist_archive_filename("exon", version, "x86_64-linux-gnu") ==
+              "exon-v0.31.0-x86_64-linux-gnu.tar.gz",
+          "dist naming: Linux artifact name matches release format");
+    check(commands::dist_archive_filename("exon", version, "x86_64-pc-windows-msvc") ==
+              "exon-v0.31.0-x86_64-pc-windows-msvc.zip",
+          "dist naming: Windows artifact name matches release format");
+    check(commands::dist_platform_label(toolchain::make_platform("macos", "aarch64")) ==
+              "aarch64-apple-darwin",
+          "dist naming: macOS host platform maps to release triple");
+    check(commands::dist_platform_label(toolchain::make_platform("linux", "x86_64")) ==
+              "x86_64-linux-gnu",
+          "dist naming: Linux host platform maps to release triple");
+    check(commands::dist_platform_label(toolchain::make_platform("windows", "x86_64")) ==
+              "x86_64-pc-windows-msvc",
+          "dist naming: Windows host platform maps to release triple");
+    check(commands::dist_executable_filename("exon", "x86_64-pc-windows-msvc") == "exon.exe",
+          "dist naming: Windows archive uses exe payload");
+    check(commands::dist_executable_filename("exon", "x86_64-linux-gnu") == "exon",
+          "dist naming: POSIX archive uses bare payload");
+}
+
+void test_dist_archive_command_uses_build_dir_payload() {
+    auto spec = commands::dist_archive_command(
+        "/tools/cmake",
+        std::filesystem::path{"/repo/.exon/release"},
+        std::filesystem::path{"/repo/exon-v0.31.0-x86_64-linux-gnu.tar.gz"},
+        "exon",
+        "x86_64-linux-gnu");
+
+    check(spec.program == "/tools/cmake", "dist command: cmake program kept");
+    check(spec.cwd == std::filesystem::path{"/repo/.exon/release"},
+          "dist command: archive cwd is build dir");
+    check(spec.args.size() == 5, "dist command: cmake -E tar args emitted");
+    check(spec.args[0] == "-E" && spec.args[1] == "tar" && spec.args[2] == "czf",
+          "dist command: POSIX archive uses compressed tar");
+    check(spec.args[4] == "exon", "dist command: payload is root executable");
+
+    auto zip_spec = commands::dist_archive_command(
+        "cmake",
+        std::filesystem::path{"C:/repo/.exon/release"},
+        std::filesystem::path{"C:/repo/exon-v0.31.0-x86_64-pc-windows-msvc.zip"},
+        "exon.exe",
+        "x86_64-pc-windows-msvc");
+    check(zip_spec.args[2] == "cf", "dist command: Windows archive uses zip-compatible mode");
+    check(zip_spec.args[4] == "exon.exe", "dist command: Windows payload is exe");
+}
+
 std::string sample_intron_status_json() {
     return R"({
   "version": "0.22.0",
@@ -463,6 +526,8 @@ int main() {
     test_dependency_graph_paths_and_dedupe();
     test_cmd_run_rejects_android_before_build();
     test_cmd_add_cmake_dependency();
+    test_dist_naming_matches_release_artifacts();
+    test_dist_archive_command_uses_build_dir_payload();
     test_intron_status_json_success_parses_toolchain();
     test_intron_status_json_parse_failure_is_structured();
     test_intron_status_command_failure_hints_upgrade();

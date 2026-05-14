@@ -173,6 +173,9 @@ void test_commands_usage_lists_human_output_mode() {
     auto usage = commands::usage_text();
     check(usage.find("[--output human|json|wrapped|raw]") != std::string::npos,
           "usage lists json output mode");
+    check(usage.find("dist [--release] [--target <t>] [--output-dir <dir>] "
+                     "[--version <v>]") != std::string::npos,
+          "usage lists dist command");
     check(usage.find("[--color auto|always|never]") != std::string::npos,
           "usage lists color capability");
     check(usage.find("status [--output human|json]") != std::string::npos,

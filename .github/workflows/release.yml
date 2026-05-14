@@ -65,20 +65,15 @@ jobs:
           fi
           exon build
 
-      - name: Current-source release build
+      - name: Current-source release dist
         run: |
           eval "$(intron env)"
           if [ "$RUNNER_OS" = "Linux" ]; then
             LLVM_ROOT="$HOME/.intron/toolchains/llvm/22.1.2"
             export LD_LIBRARY_PATH="$(dirname "$(find "$LLVM_ROOT" -name "libc++.so" -print -quit)"):${LD_LIBRARY_PATH:-}"
           fi
-          ./.exon/debug/exon build --release
+          ./.exon/debug/exon dist --release --version ${{ github.ref_name }}
           ./.exon/release/exon info
-
-      - name: Package
-        run: |
-          tar -czf exon-${{ github.ref_name }}-${{ matrix.platform }}.tar.gz \
-            -C .exon/release exon
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -143,15 +138,12 @@ jobs:
           Invoke-Expression (& intron env | Out-String)
           exon build
 
-      - name: Current-source release build
+      - name: Current-source release dist
         shell: pwsh
         run: |
           Invoke-Expression (& intron env | Out-String)
-          .\.exon\debug\exon.exe build --release
-
-      - name: Package
-        shell: pwsh
-        run: Compress-Archive -Path .exon/release/exon.exe -DestinationPath exon-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
+          .\.exon\debug\exon.exe dist --release --version ${{ github.ref_name }}
+          .\.exon\release\exon.exe info
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7

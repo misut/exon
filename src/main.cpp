@@ -33,6 +33,8 @@ int main(int argc, char* argv[]) {
         return commands::cmd_status(argc, argv);
     if (command == "build")
         return commands::cmd_build(argc, argv);
+    if (command == "dist")
+        return commands::cmd_dist(argc, argv);
     if (command == "check")
         return commands::cmd_check(argc, argv);
     if (command == "run")
