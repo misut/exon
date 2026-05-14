@@ -58,6 +58,23 @@ std::string read_text(std::filesystem::path const& path) {
     return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
 }
 
+std::vector<char> read_bytes(std::filesystem::path const& path) {
+    auto file = std::ifstream{path, std::ios::binary};
+    return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+}
+
+std::uint16_t read_le16(std::vector<char> const& bytes, std::size_t offset) {
+    auto lo = static_cast<std::uint16_t>(static_cast<unsigned char>(bytes.at(offset)));
+    auto hi = static_cast<std::uint16_t>(static_cast<unsigned char>(bytes.at(offset + 1)));
+    return static_cast<std::uint16_t>(lo | (hi << 8U));
+}
+
+std::uint32_t read_le32(std::vector<char> const& bytes, std::size_t offset) {
+    auto lo = static_cast<std::uint32_t>(read_le16(bytes, offset));
+    auto hi = static_cast<std::uint32_t>(read_le16(bytes, offset + 2));
+    return lo | (hi << 16U);
+}
+
 void test_apply_workspace_defaults_for_member_package_and_build() {
     auto workspace = manifest::parse(R"(
 [workspace]
@@ -402,14 +419,54 @@ void test_dist_archive_command_uses_build_dir_payload() {
           "dist command: POSIX archive uses compressed tar");
     check(spec.args[4] == "exon", "dist command: payload is root executable");
 
-    auto zip_spec = commands::dist_archive_command(
-        "cmake",
-        std::filesystem::path{"C:/repo/.exon/release"},
-        std::filesystem::path{"C:/repo/exon-v0.31.0-x86_64-pc-windows-msvc.zip"},
-        "exon.exe",
-        "x86_64-pc-windows-msvc");
-    check(zip_spec.args[2] == "cf", "dist command: Windows archive uses zip-compatible mode");
-    check(zip_spec.args[4] == "exon.exe", "dist command: Windows payload is exe");
+    auto threw = false;
+    try {
+        (void)commands::dist_archive_command(
+            "cmake",
+            std::filesystem::path{"C:/repo/.exon/release"},
+            std::filesystem::path{"C:/repo/exon-v0.31.0-x86_64-pc-windows-msvc.zip"},
+            "exon.exe",
+            "x86_64-pc-windows-msvc");
+    } catch (std::invalid_argument const&) {
+        threw = true;
+    }
+    check(threw, "dist command: Windows archive bypasses CMake tar");
+}
+
+void test_dist_zip_archive_is_valid_zip() {
+    TmpDir tmp{"exon_test_dist_zip_archive"};
+    auto executable = tmp.root / "build" / "exon.exe";
+    std::filesystem::create_directories(executable.parent_path());
+    auto executable_file = std::ofstream{executable, std::ios::binary};
+    executable_file << "hello zip\n";
+    executable_file.close();
+    auto archive = tmp.root / "exon.zip";
+
+    commands::write_stored_zip_archive(executable, archive, "exon.exe");
+
+    auto bytes = read_bytes(archive);
+    check(bytes.size() > 100, "dist zip: archive has ZIP structure");
+    check(read_le32(bytes, 0) == 0x04034b50U, "dist zip: local file header signature");
+    check(read_le16(bytes, 8) == 0, "dist zip: stores executable without fake tar payload");
+    check(read_le32(bytes, 14) == commands::zip_crc32(std::span<char const>{"hello zip\n", 10}),
+          "dist zip: local header CRC matches payload");
+    check(read_le32(bytes, 18) == 10 && read_le32(bytes, 22) == 10,
+          "dist zip: local header sizes match payload");
+
+    auto name_length = read_le16(bytes, 26);
+    auto extra_length = read_le16(bytes, 28);
+    auto payload_offset = std::size_t{30} + name_length + extra_length;
+    auto entry_name = std::string_view{bytes.data() + 30, name_length};
+    auto payload = std::string_view{bytes.data() + payload_offset, 10};
+    check(entry_name == "exon.exe", "dist zip: entry name is archive root executable");
+    check(payload == "hello zip\n", "dist zip: payload bytes are preserved");
+
+    auto eocd_offset = bytes.size() - 22;
+    check(read_le32(bytes, eocd_offset) == 0x06054b50U, "dist zip: end record signature");
+    check(read_le16(bytes, eocd_offset + 10) == 1, "dist zip: one central directory entry");
+    auto central_offset = read_le32(bytes, eocd_offset + 16);
+    check(read_le32(bytes, central_offset) == 0x02014b50U,
+          "dist zip: central directory signature");
 }
 
 std::string sample_intron_status_json() {
@@ -528,6 +585,7 @@ int main() {
     test_cmd_add_cmake_dependency();
     test_dist_naming_matches_release_artifacts();
     test_dist_archive_command_uses_build_dir_payload();
+    test_dist_zip_archive_is_valid_zip();
     test_intron_status_json_success_parses_toolchain();
     test_intron_status_json_parse_failure_is_structured();
     test_intron_status_command_failure_hints_upgrade();
