@@ -16,7 +16,8 @@ A quick reference of every exon subcommand.
 - `exon build [--release] [--target <t>] [--output human|json|wrapped|raw]`
   — fetch, configure, build
 - `exon status [--output human|json]` — inspect the current package or
-  workspace, detected tools, build cache, and terminal capability policy
+  workspace, `intron status` toolchain diagnostics, detected tools, build
+  cache, and terminal capability policy
 - `exon doctor [--output human|json]` — alias for `status`
 - `exon check [--target <t>]` — parse and type-check only (no linking)
 - `exon run [--release] [-- args...]` — build then run the first

@@ -87,7 +87,7 @@ standard = 23
     proj.write("src/build.cppm", "export module build;\n");
     proj.write("src/toolchain.cppm", "export module toolchain;\n");
     proj.write("tests/test_build.cpp", "int main() { return 0; }\n");
-    proj.write("build/exon", "");
+    proj.write(".exon/debug/exon", "");
 }
 
 void test_basic_bin() {
@@ -732,11 +732,11 @@ void test_plan_test_android_is_build_only() {
           "android test: build-only success message");
 }
 
-void test_stale_self_host_bootstrap_message_for_macos_exon_repo() {
+void test_stale_self_host_executable_message_for_macos_exon_repo() {
     TmpProject proj;
     write_fake_exon_repo(proj);
 
-    auto executable = proj.root / "build" / "exon";
+    auto executable = proj.root / ".exon" / "debug" / "exon";
     auto newest_input = proj.root / "src" / "build.cppm";
     auto older_input = proj.root / "src" / "toolchain.cppm";
     auto manifest_path = proj.root / "exon.toml";
@@ -750,24 +750,30 @@ void test_stale_self_host_bootstrap_message_for_macos_exon_repo() {
     manifest::Manifest m;
     m.name = "exon";
 
-    auto message = build::stale_self_host_bootstrap_message(
+    auto message = build::stale_self_host_executable_message(
         m, proj.root, executable, toolchain::make_platform("macos", "aarch64"));
 
-    check(message.has_value(), "stale bootstrap: macOS exon repo is guarded");
+    check(message.has_value(), "stale self-host: macOS exon repo is guarded");
     check(message && message->contains("src/build.cppm"),
-          "stale bootstrap: newest input called out");
-    check(message && message->contains("cmake --build build --target exon --parallel 1"),
-          "stale bootstrap: rebuild command is documented");
+          "stale self-host: newest input called out");
+    check(message && message->contains("mise exec -- exon build"),
+          "stale self-host: released seed rebuild command is documented");
 }
 
-void test_stale_self_host_bootstrap_message_skips_fresh_or_non_macos_cases() {
+void test_stale_self_host_executable_message_skips_fresh_external_or_non_macos_cases() {
     TmpProject proj;
     write_fake_exon_repo(proj);
 
-    auto executable = proj.root / "build" / "exon";
+    auto executable = proj.root / ".exon" / "debug" / "exon";
+    auto external_seed = std::filesystem::temp_directory_path() / "exon_seed_executable";
     auto base = std::filesystem::file_time_type::clock::now();
 
     std::filesystem::last_write_time(executable, base);
+    {
+        auto file = std::ofstream{external_seed};
+        file << "";
+    }
+    std::filesystem::last_write_time(external_seed, base - std::chrono::hours{4});
     std::filesystem::last_write_time(proj.root / "src" / "build.cppm", base - std::chrono::hours{1});
     std::filesystem::last_write_time(proj.root / "src" / "toolchain.cppm",
                                      base - std::chrono::hours{2});
@@ -775,20 +781,26 @@ void test_stale_self_host_bootstrap_message_skips_fresh_or_non_macos_cases() {
 
     manifest::Manifest exon_repo;
     exon_repo.name = "exon";
-    auto fresh_message = build::stale_self_host_bootstrap_message(
+    auto fresh_message = build::stale_self_host_executable_message(
         exon_repo, proj.root, executable, toolchain::make_platform("macos", "aarch64"));
-    check(!fresh_message.has_value(), "stale bootstrap: fresh bootstrap is allowed");
+    check(!fresh_message.has_value(), "stale self-host: fresh executable is allowed");
 
     std::filesystem::last_write_time(proj.root / "src" / "build.cppm", base + std::chrono::hours{1});
-    auto linux_message = build::stale_self_host_bootstrap_message(
+    auto external_message = build::stale_self_host_executable_message(
+        exon_repo, proj.root, external_seed, toolchain::make_platform("macos", "aarch64"));
+    check(!external_message.has_value(), "stale self-host: external released seed is allowed");
+
+    auto linux_message = build::stale_self_host_executable_message(
         exon_repo, proj.root, executable, toolchain::make_platform("linux", "x86_64"));
-    check(!linux_message.has_value(), "stale bootstrap: non-macOS host is ignored");
+    check(!linux_message.has_value(), "stale self-host: non-macOS host is ignored");
 
     manifest::Manifest app_repo;
     app_repo.name = "app";
-    auto app_message = build::stale_self_host_bootstrap_message(
+    auto app_message = build::stale_self_host_executable_message(
         app_repo, proj.root, executable, toolchain::make_platform("macos", "aarch64"));
-    check(!app_message.has_value(), "stale bootstrap: non-exon project is ignored");
+    check(!app_message.has_value(), "stale self-host: non-exon project is ignored");
+
+    std::filesystem::remove(external_seed);
 }
 
 void test_user_cxxflags_env_only() {
@@ -1680,10 +1692,10 @@ int main() {
         test_plan_test_emits_filtered_targets_and_run_steps);
     run("test_plan_test_android_is_build_only",
         test_plan_test_android_is_build_only);
-    run("test_stale_self_host_bootstrap_message_for_macos_exon_repo",
-        test_stale_self_host_bootstrap_message_for_macos_exon_repo);
-    run("test_stale_self_host_bootstrap_message_skips_fresh_or_non_macos_cases",
-        test_stale_self_host_bootstrap_message_skips_fresh_or_non_macos_cases);
+    run("test_stale_self_host_executable_message_for_macos_exon_repo",
+        test_stale_self_host_executable_message_for_macos_exon_repo);
+    run("test_stale_self_host_executable_message_skips_fresh_external_or_non_macos_cases",
+        test_stale_self_host_executable_message_skips_fresh_external_or_non_macos_cases);
     run("test_user_cxxflags_env_only", test_user_cxxflags_env_only);
     run("test_generate_cmake_base_build_flags", test_generate_cmake_base_build_flags);
     run("test_generate_cmake_bin_modules_build_flags_apply_to_exec",

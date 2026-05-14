@@ -337,7 +337,7 @@ build::BuildRequest do_prepare_request(
     bool with_tests,
     std::string_view filter,
     std::optional<std::chrono::milliseconds> timeout) {
-    build::ensure_fresh_self_host_bootstrap(build_manifest, project_root);
+    build::ensure_fresh_self_host_executable(build_manifest, project_root);
     ensure_intron_tools(project_root);
 
     bool is_cross = !target.empty();

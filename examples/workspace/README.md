@@ -50,4 +50,4 @@ exon run --release --member hello
 
 The debug and release runs print different profile labels because the workspace root injects profile-specific compiler flags through `[workspace.build.debug]` and `[workspace.build.release]`.
 
-When you are working on the `exon` repository itself, use your current-source binary instead of a stale installed one. From the repo root, that is typically `./build/exon`.
+When you are working on the `exon` repository itself, use your current-source binary instead of a stale installed one. From the repo root, that is typically `./.exon/debug/exon`.

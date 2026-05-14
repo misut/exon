@@ -121,13 +121,31 @@ bool is_exon_self_host_project(manifest::Manifest const& m,
     });
 }
 
-std::array<std::filesystem::path, 3> self_host_bootstrap_inputs(
+std::array<std::filesystem::path, 3> self_host_freshness_inputs(
     std::filesystem::path const& project_root) {
     return {
         project_root / "exon.toml",
         project_root / "src" / "build.cppm",
         project_root / "src" / "toolchain.cppm",
     };
+}
+
+bool path_is_under(std::filesystem::path const& path,
+                   std::filesystem::path const& root) {
+    std::error_code ec;
+    auto canonical_path = std::filesystem::weakly_canonical(path, ec);
+    if (ec)
+        return false;
+    auto canonical_root = std::filesystem::weakly_canonical(root, ec);
+    if (ec)
+        return false;
+    auto path_it = canonical_path.begin();
+    auto root_it = canonical_root.begin();
+    for (; root_it != canonical_root.end(); ++root_it, ++path_it) {
+        if (path_it == canonical_path.end() || *path_it != *root_it)
+            return false;
+    }
+    return true;
 }
 
 std::string display_path(std::filesystem::path const& path,
@@ -674,7 +692,7 @@ core::ProcessSpec configure_command(toolchain::Toolchain const& tc,
                                  android_sysroot, any_cmake_deps);
 }
 
-std::optional<std::string> stale_self_host_bootstrap_message(
+std::optional<std::string> stale_self_host_executable_message(
     manifest::Manifest const& m, std::filesystem::path const& project_root,
     std::filesystem::path const& executable_path, toolchain::Platform const& host) {
     if (host.os != toolchain::OS::MacOS || executable_path.empty() ||
@@ -685,6 +703,8 @@ std::optional<std::string> stale_self_host_bootstrap_message(
     std::error_code ec;
     if (!std::filesystem::exists(executable_path, ec) || ec)
         return std::nullopt;
+    if (!detail::path_is_under(executable_path, project_root))
+        return std::nullopt;
     auto executable_time = std::filesystem::last_write_time(executable_path, ec);
     if (ec)
         return std::nullopt;
@@ -692,7 +712,7 @@ std::optional<std::string> stale_self_host_bootstrap_message(
     std::filesystem::path newest_input;
     std::filesystem::file_time_type newest_input_time;
     bool has_newer_input = false;
-    for (auto const& input : detail::self_host_bootstrap_inputs(project_root)) {
+    for (auto const& input : detail::self_host_freshness_inputs(project_root)) {
         auto input_time = std::filesystem::last_write_time(input, ec);
         if (ec) {
             ec.clear();
@@ -710,21 +730,22 @@ std::optional<std::string> stale_self_host_bootstrap_message(
     auto executable_display = detail::display_path(executable_path, project_root);
     auto newest_input_display = detail::display_path(newest_input, project_root);
     return std::format(
-        "stale bootstrap executable '{}': '{}' is newer. Rebuild the bootstrap binary before "
+        "stale self-host executable '{}': '{}' is newer. Rebuild current source with the "
+        "released seed before "
         "running `exon build`, `exon check`, `exon run`, or `exon test` in the exon repo.\n"
-        "  cmake -S . -B build -G Ninja\n"
-        "  cmake --build build --target exon --parallel 1\n"
-        "If build/ points at an older source tree, remove it first.",
+        "  mise exec -- exon build\n"
+        "  # or, when using a copied local seed: ./.exon/seed/bin/exon build\n"
+        "Then rerun with ./.exon/debug/exon if you need the current-source binary.",
         executable_display, newest_input_display);
 }
 
-void ensure_fresh_self_host_bootstrap(manifest::Manifest const& m,
-                                      std::filesystem::path const& project_root) {
+void ensure_fresh_self_host_executable(manifest::Manifest const& m,
+                                       std::filesystem::path const& project_root) {
     auto executable_path = detail::current_executable_path();
     if (!executable_path)
         return;
-    if (auto message = stale_self_host_bootstrap_message(m, project_root, *executable_path,
-                                                         toolchain::detect_host_platform())) {
+    if (auto message = stale_self_host_executable_message(m, project_root, *executable_path,
+                                                          toolchain::detect_host_platform())) {
         throw std::runtime_error(*message);
     }
 }

@@ -3,6 +3,7 @@ import commands;
 import fetch;
 import manifest;
 import manifest.system;
+import reporting;
 
 int failures = 0;
 
@@ -348,6 +349,112 @@ standard = 23
     }
 }
 
+std::string sample_intron_status_json() {
+    return R"({
+  "version": "0.22.0",
+  "platform": {"name": "macos", "triple": "aarch64-apple-darwin"},
+  "project_config": {"found": true, "path": "/repo/.intron.toml"},
+  "effective_toolchain": {
+    "cmake": {"version": "4.3.1", "source": "project"},
+    "llvm": {"version": "22.1.2", "source": "project.macos"}
+  },
+  "tools": {
+    "cmake": {
+      "version": "4.3.1",
+      "installed": true,
+      "system": false,
+      "path": "/tools/cmake/4.3.1",
+      "binaries": {"cmake": "/tools/cmake/4.3.1/bin/cmake"}
+    },
+    "ninja": {
+      "version": "1.13.2",
+      "installed": false,
+      "system": false,
+      "path": "/tools/ninja/1.13.2",
+      "binaries": {}
+    }
+  },
+  "environment": {
+    "available": true,
+    "error": null,
+    "assignments": {"PATH": "/tools/cmake/bin:/tools/ninja"},
+    "path_entries": ["/tools/cmake/bin", "/tools/ninja"]
+  },
+  "network": {"env": null, "selected_backend": "auto"},
+  "msvc": {"configured": false, "available": false, "status": "not_applicable"},
+  "diagnostics": []
+})";
+}
+
+void test_intron_status_json_success_parses_toolchain() {
+    auto status = commands::intron_status_from_process(
+        "intron",
+        reporting::ProcessResult{
+            .exit_code = 0,
+            .stdout_text = sample_intron_status_json(),
+        },
+        std::filesystem::path{"/repo"});
+
+    check(status.ok, "intron status: json parsed");
+    check(status.version == "0.22.0", "intron status: version parsed");
+    check(status.platform_triple == "aarch64-apple-darwin",
+          "intron status: platform triple parsed");
+    check(status.tools.size() == 2, "intron status: tools parsed");
+    check(status.tools[0].name == "cmake" && status.tools[0].installed,
+          "intron status: installed tool parsed");
+    check(status.tools[1].name == "ninja" && !status.tools[1].installed,
+          "intron status: missing tool parsed");
+    check(!status.hints.empty() && status.hints[0] == "run: intron install",
+          "intron status: missing tool hint added");
+
+    auto json = commands::intron_json(status);
+    check(json.contains("\"available\":true"), "intron status json: available");
+    check(json.contains("\"ok\":true"), "intron status json: ok");
+    check(json.contains("\"effective_toolchain\""),
+          "intron status json: preserves raw toolchain object");
+}
+
+void test_intron_status_json_parse_failure_is_structured() {
+    auto status = commands::intron_status_from_process(
+        "intron",
+        reporting::ProcessResult{
+            .exit_code = 0,
+            .stdout_text = "not json",
+        },
+        std::filesystem::path{"/repo"});
+
+    check(!status.ok, "intron status parse failure: not ok");
+    check(status.error.contains("failed to parse intron status JSON"),
+          "intron status parse failure: error recorded");
+    auto json = commands::intron_json(status);
+    check(json.contains("\"available\":true"),
+          "intron status parse failure json: command available");
+    check(json.contains("\"ok\":false"),
+          "intron status parse failure json: not ok");
+    check(json.contains("intron status --output json"),
+          "intron status parse failure json: rerun hint");
+}
+
+void test_intron_status_command_failure_hints_upgrade() {
+    auto status = commands::intron_status_from_process(
+        "intron",
+        reporting::ProcessResult{
+            .exit_code = 2,
+            .stderr_text = "unknown command: status\n",
+        },
+        std::filesystem::path{"/repo"});
+
+    check(!status.ok, "intron status command failure: not ok");
+    check(status.command_available, "intron status command failure: command available");
+    check(!status.hints.empty() && status.hints[0].contains("v0.22.0"),
+          "intron status command failure: upgrade hint");
+    auto json = commands::intron_json(status);
+    check(json.contains("\"exit_code\":2"),
+          "intron status command failure json: exit code");
+    check(json.contains("upgrade intron"),
+          "intron status command failure json: upgrade hint");
+}
+
 int main() {
     test_apply_workspace_defaults_for_member_package_and_build();
     test_select_workspace_members_orders_dependency_closure();
@@ -356,6 +463,9 @@ int main() {
     test_dependency_graph_paths_and_dedupe();
     test_cmd_run_rejects_android_before_build();
     test_cmd_add_cmake_dependency();
+    test_intron_status_json_success_parses_toolchain();
+    test_intron_status_json_parse_failure_is_structured();
+    test_intron_status_command_failure_hints_upgrade();
 
     if (failures > 0) {
         std::println("{} test(s) failed", failures);
