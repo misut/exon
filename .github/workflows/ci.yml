@@ -120,6 +120,13 @@ jobs:
         if: runner.os == 'macOS'
         run: .exon/release/exon info
 
+      - name: Dist smoke
+        if: runner.os == 'macOS'
+        run: |
+          eval "$(intron env)"
+          ./.exon/debug/exon dist --release --version v0.0.0-ci --output-dir "$RUNNER_TEMP/exon-dist"
+          cmake -E tar tf "$RUNNER_TEMP/exon-dist/exon-v0.0.0-ci-${{ matrix.platform }}.tar.gz" | grep -qx exon
+
   windows:
     runs-on: windows-2022
     steps:

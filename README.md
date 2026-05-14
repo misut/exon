@@ -98,6 +98,7 @@ hello, world!
 | `exon new --lib\|--bin <name>` | Create a new workspace member from the workspace root |
 | `exon info` | Show package information |
 | `exon build [--release] [--target <t>] [--member a,b] [--exclude x,y] [--output human\|json\|wrapped\|raw] [--color auto\|always\|never] [--progress auto\|always\|never] [--unicode auto\|always\|never] [--hyperlinks auto\|always\|never]` | Build the project or selected workspace members |
+| `exon dist [--release] [--target <t>] [--output-dir <dir>] [--version <v>] [--output human\|json\|wrapped\|raw]` | Build and package a release-compatible archive |
 | `exon status [--output human\|json]` | Inspect project, toolchain, and terminal status |
 | `exon doctor [--output human\|json]` | Alias for `exon status` |
 | `exon check [--release] [--target <t>] [--member a,b] [--exclude x,y]` | Check syntax without linking |
@@ -318,6 +319,16 @@ Workspace builds keep the active member inline in each indexed stage header, for
 `exon test --timeout <sec>` is also available for long-running or hung tests. On Windows, timeout uses a native process runner that terminates the full child process tree instead of leaving stale `cmake`, `ninja`, or test processes behind.
 
 `exon status` (or `exon doctor`) gives a TUI-lite snapshot of the current package/workspace, lockfile, build cache, `intron status` toolchain diagnostics, exon's detected tools, and terminal capability policy. Human output calls out missing tools, untrusted `mise.toml` files, environment/PATH issues, and stale current-source binaries with concrete rerun commands. Use `exon status --output json` when another tool needs the same information; the status event keeps the older flattened fields and adds structured `intron` and `toolchain` objects.
+
+### Distribution Archives
+
+`exon dist --release` builds the current binary package and creates the same archive shape used by exon releases: `<name>-v<version>-<platform>.tar.gz` on macOS/Linux and `<name>-v<version>-<platform>.zip` on Windows. The archive payload is the executable at the archive root (`exon` or `exon.exe`), so consumers that already unpack release assets can consume `exon dist` output unchanged.
+
+Use `--version <v>` when packaging from a Git tag or CI variable, and `--output-dir <dir>` to place artifacts outside the project root:
+
+```sh
+exon dist --release --version v0.31.0 --output-dir dist
+```
 
 ### Windows Toolchain Troubleshooting
 
@@ -665,6 +676,7 @@ the build, then deploy the produced artifact with Android tooling.
 - **Lock file** — `exon.lock` for reproducible builds (git deps only)
 - **Incremental builds** — CMake configuration is cached and skipped when unchanged
 - **Build profiles** — debug (default) and release (`--release`, statically links libc++ for portable binaries)
+- **Distribution archives** — `exon dist --release` creates release-compatible tar/zip artifacts
 - **Dev dependencies** — `[dev-dependencies.*]` for test-only packages, excluded from builds
 - **Five dependency kinds** — git, find_package, local path, workspace sibling, vcpkg
 - **Workspaces** — monorepos with `[workspace] members = [...]`, shared `[workspace.package]` / `[workspace.build.*]` defaults, dependency-ordered root commands, and unified workspace builds
