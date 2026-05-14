@@ -1,5 +1,6 @@
 import std;
 import cli;
+import cppx.cli;
 import commands;
 import reporting;
 
@@ -182,6 +183,13 @@ void test_commands_usage_lists_human_output_mode() {
           "usage lists status command");
     check(usage.find("doctor [--output human|json]") != std::string::npos,
           "usage lists doctor alias");
+    check(usage.find("commands [--output human|json]") != std::string::npos,
+          "usage lists commands metadata command");
+    check(usage.find("complete [--output human|json|raw] -- [words...]") !=
+              std::string::npos,
+          "usage lists complete command");
+    check(usage.find("completion bash|zsh|fish") != std::string::npos,
+          "usage lists shell completion command");
     check(usage.find("add [--dev] <pkg> <ver> [--features a,b] "
                      "[--no-default-features]") != std::string::npos,
           "usage lists git dependency feature options");
@@ -242,6 +250,64 @@ void test_commands_suggest_unknown_command() {
           "commands ignore distant command names");
 }
 
+bool has_candidate(cppx::cli::CompletionResult const& result, std::string_view value) {
+    return std::ranges::any_of(result.candidates, [&](auto const& candidate) {
+        return candidate.value == value;
+    });
+}
+
+void test_commands_spec_drives_cppx_completion() {
+    auto const& spec = commands::command_spec();
+    auto names = cppx::cli::command_names(spec);
+    check(std::ranges::find(names, "commands") != names.end(),
+          "cppx command spec lists commands metadata command");
+    check(std::ranges::find(names, "complete") != names.end(),
+          "cppx command spec lists complete command");
+    check(std::ranges::find(names, "completion") != names.end(),
+          "cppx command spec lists completion script command");
+
+    auto command_completion = cppx::cli::complete(spec, std::vector<std::string_view>{}, "co");
+    check(has_candidate(command_completion, "commands"),
+          "cppx completion includes commands command");
+    check(has_candidate(command_completion, "complete"),
+          "cppx completion includes complete command");
+    check(has_candidate(command_completion, "completion"),
+          "cppx completion includes completion command");
+
+    auto build_output = cppx::cli::complete(
+        spec, std::vector<std::string_view>{"build", "--output"}, "j");
+    check(build_output.context.expects_option_value,
+          "cppx completion detects build output value context");
+    check(has_candidate(build_output, "json"),
+          "cppx completion suggests json output value");
+
+    auto dist_target = cppx::cli::complete(
+        spec, std::vector<std::string_view>{"dist", "--target"}, "was");
+    check(has_candidate(dist_target, "wasm32-wasi"),
+          "cppx completion suggests known dist target");
+}
+
+void test_commands_completion_words_normalize_program_name() {
+    auto result = commands::complete_words({"exon", "build", "--output", "j"});
+    check(result.context.expects_option_value,
+          "completion words normalize leading program name");
+    check(has_candidate(result, "json"),
+          "completion words returns output value hints");
+}
+
+void test_commands_metadata_json_includes_options() {
+    auto json = commands::command_catalog_json();
+    check(json.find("\"name\":\"build\"") != std::string::npos,
+          "command metadata json includes build command");
+    check(json.find("\"name\":\"complete\"") != std::string::npos,
+          "command metadata json includes complete command");
+    check(json.find("\"name\":\"output\"") != std::string::npos,
+          "command metadata json includes option metadata");
+    check(json.find("\"value_hints\":[\"human\",\"json\",\"wrapped\",\"raw\"]") !=
+              std::string::npos,
+          "command metadata json includes output value hints");
+}
+
 void test_readme_output_docs_match_usage() {
     auto readme = read_text(std::filesystem::current_path() / "README.md");
     check(readme.find(
@@ -294,6 +360,13 @@ void test_readme_output_docs_match_usage() {
           "README documents why command");
     check(readme.find("`exon version`") != std::string::npos,
           "README documents version command");
+    check(readme.find("`exon commands [--output human\\|json]`") != std::string::npos,
+          "README documents command metadata");
+    check(readme.find("`exon complete [--output human\\|json\\|raw] -- [words...]`") !=
+              std::string::npos,
+          "README documents completion candidates");
+    check(readme.find("`exon completion bash\\|zsh\\|fish`") != std::string::npos,
+          "README documents shell completion scripts");
     check(readme.find("`os` = `linux`, `macos`, `windows`, `wasi`, `android`") !=
               std::string::npos,
           "README documents known platform OS values");
@@ -362,6 +435,9 @@ int main() {
     test_commands_reporting_defaults();
     test_commands_reporting_capabilities();
     test_commands_suggest_unknown_command();
+    test_commands_spec_drives_cppx_completion();
+    test_commands_completion_words_normalize_program_name();
+    test_commands_metadata_json_includes_options();
     test_readme_output_docs_match_usage();
 
     if (failures > 0) {

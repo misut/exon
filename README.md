@@ -120,6 +120,9 @@ hello, world!
 | `exon sync [--member a,b] [--exclude x,y]` | Sync CMakeLists.txt with exon.toml |
 | `exon fmt` | Format source files with clang-format |
 | `exon version` | Show exon version |
+| `exon commands [--output human\|json]` | Describe command metadata |
+| `exon complete [--output human\|json\|raw] -- [words...]` | Print completion candidates |
+| `exon completion bash\|zsh\|fish` | Generate a shell completion script |
 
 ### Native debugging
 
@@ -328,6 +331,25 @@ Use `--version <v>` when packaging from a Git tag or CI variable, and `--output-
 
 ```sh
 exon dist --release --version v0.31.0 --output-dir dist
+```
+
+### Command Metadata and Completion
+
+`exon commands --output json` emits the command registry used by the CLI completion path. Each command includes category, summary, positional metadata, examples, and option metadata such as value names and known value hints.
+
+`exon complete` prints candidates for a partial invocation. Pass words after `--`; the final word is treated as the current prefix:
+
+```sh
+exon complete -- build --ou
+exon complete --output raw -- build --output j
+```
+
+Shell completion scripts can be generated directly:
+
+```sh
+exon completion bash
+exon completion zsh
+exon completion fish
 ```
 
 ### Windows Toolchain Troubleshooting

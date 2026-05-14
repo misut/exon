@@ -61,6 +61,12 @@ int main(int argc, char* argv[]) {
         return commands::cmd_sync(argc, argv);
     if (command == "fmt")
         return commands::cmd_fmt();
+    if (command == "commands")
+        return commands::cmd_commands(argc, argv);
+    if (command == "complete")
+        return commands::cmd_complete(argc, argv);
+    if (command == "completion")
+        return commands::cmd_completion(argc, argv);
 
     auto rc = commands::unknown_command(command);
     std::print(std::cerr, "{}", commands::usage_text());
