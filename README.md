@@ -29,29 +29,44 @@ mise use "vfox:misut/mise-exon@latest"
 <details>
 <summary>Build from source</summary>
 
-`intron` provisions the same toolchain that CI uses (LLVM, CMake, Ninja pinned in `.intron.toml`). On **Windows**, `intron install` uses this repo's `.intron.toml` to provision MSVC, CMake, and Ninja.
+`mise` installs the pinned released `exon` seed and `intron` provisions the same toolchain that CI uses (LLVM, CMake, Ninja pinned in `.intron.toml`). On **Windows**, `intron install` uses this repo's `.intron.toml` to provision MSVC, CMake, and Ninja.
 
 ```sh
+# install pinned seed tools from mise.toml
+mise install
+
 # install pinned toolchain into ~/.intron/toolchains
-intron install
+mise exec -- intron install
 
-# bootstrap with the same flags CI uses (FetchContent for cppx and tomlcpp)
-bash scripts/bootstrap.sh
+# inspect the toolchain plan used by exon
+mise exec -- intron status --output human
 
-# self-host
-./build/exon build
+# build current source with the released seed exon
+mkdir -p .exon/seed/bin
+cp "$(mise which exon)" .exon/seed/bin/exon
+touch .exon/seed/bin/exon
+./.exon/seed/bin/exon build
+
+# optional: prove the newly built current-source exon can self-host
+eval "$(mise exec -- intron env)"
+./.exon/debug/exon build
 ```
 
-`scripts/bootstrap.sh` wires `CMAKE_CXX_COMPILER`, `CMAKE_CXX_STDLIB_MODULES_JSON`, and `CMAKE_OSX_SYSROOT` from the intron-managed toolchain so local and CI bootstraps stay byte-equivalent. Self-hosted `exon build`, `exon check`, and `exon test` serialize the build automatically on macOS when `import std;` is enabled. If you change `src/build.cppm`, `src/toolchain.cppm`, or `exon.toml` in the `exon` repo, rebuild `build/exon` before self-hosting again. If `build/` still points at an older source tree, remove it and rerun the bootstrap commands.
+The released seed `exon` reads the current checkout and generates `.exon/debug/exon`, so normal source builds no longer require a separate CMake bootstrap script. Copying the seed into `.exon/seed/bin` keeps the build local to the checkout and lets older seed releases bootstrap this source tree on macOS without tripping their previous timestamp-based freshness guard. Self-hosted `exon build`, `exon check`, and `exon test` serialize the build automatically on macOS when `import std;` is enabled. If you change `src/build.cppm`, `src/toolchain.cppm`, or `exon.toml` in the `exon` repo, rebuild the current-source binary with the released seed before reusing `./.exon/debug/exon`.
 
 On Windows, a regular PowerShell session is enough:
 
 ```powershell
-intron install
-Invoke-Expression ((intron env) -join "`n")
-cmake -B build -G Ninja
-cmake --build build --target exon
-.\build\exon.exe build
+mise install
+mise exec -- intron install
+mise exec -- intron status --output human
+New-Item -ItemType Directory -Force -Path .\.exon\seed\bin | Out-Null
+Copy-Item (mise which exon) .\.exon\seed\bin\exon.exe -Force
+(Get-Item .\.exon\seed\bin\exon.exe).LastWriteTime = Get-Date
+.\.exon\seed\bin\exon.exe build
+$INTRON = mise which intron
+Invoke-Expression (& $INTRON env | Out-String)
+.\.exon\debug\exon.exe build
 ```
 
 A Visual Studio Developer Command Prompt also works, but it is no longer required when `intron` is available.
@@ -302,7 +317,7 @@ Workspace builds keep the active member inline in each indexed stage header, for
 
 `exon test --timeout <sec>` is also available for long-running or hung tests. On Windows, timeout uses a native process runner that terminates the full child process tree instead of leaving stale `cmake`, `ninja`, or test processes behind.
 
-`exon status` (or `exon doctor`) gives a TUI-lite snapshot of the current package/workspace, lockfile, build cache, detected tools, and terminal capability policy. Use `exon status --output json` when another tool needs the same information.
+`exon status` (or `exon doctor`) gives a TUI-lite snapshot of the current package/workspace, lockfile, build cache, `intron status` toolchain diagnostics, exon's detected tools, and terminal capability policy. Human output calls out missing tools, untrusted `mise.toml` files, environment/PATH issues, and stale current-source binaries with concrete rerun commands. Use `exon status --output json` when another tool needs the same information; the status event keeps the older flattened fields and adds structured `intron` and `toolchain` objects.
 
 ### Windows Toolchain Troubleshooting
 

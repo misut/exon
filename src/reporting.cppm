@@ -274,6 +274,10 @@ JsonField json_bool(std::string key, bool value) {
     return JsonField{.key = std::move(key), .value = value ? "true" : "false", .quote = false};
 }
 
+JsonField json_raw(std::string key, std::string value) {
+    return JsonField{.key = std::move(key), .value = std::move(value), .quote = false};
+}
+
 void emit_json_event(std::string_view event, std::span<JsonField const> fields = {}) {
     auto out = std::format("{{\"schema\":\"exon.cli.v1\",\"event\":\"{}\"",
                            json_escape(event));
@@ -293,18 +297,17 @@ void emit_json_event(std::string_view event, std::initializer_list<JsonField> fi
 }
 
 int emit(Diagnostic const& diag, bool color_enabled) {
-    auto label_code =
-        diag.severity == Diagnostic::Severity::Error ? ansi::red : ansi::yellow;
-    auto label_text =
-        diag.severity == Diagnostic::Severity::Error ? "error:" : "warning:";
-    auto label = color_enabled
-        ? std::format("{}{}{}{}", ansi::bold, label_code, label_text, ansi::reset)
-        : std::string{label_text};
-    std::println(std::cerr, "{} {}", label, diag.message);
-    if (!diag.context.empty())
-        std::println(std::cerr, "  at {}", diag.context);
-    for (auto const& hint : diag.hints)
-        std::println(std::cerr, "  hint: {}", hint);
+    auto severity = diag.severity == Diagnostic::Severity::Error
+        ? cppx::terminal::DiagnosticSeverity::error
+        : cppx::terminal::DiagnosticSeverity::warning;
+    std::println(std::cerr, "{}", cppx::terminal::format_diagnostic(
+        cppx::terminal::DiagnosticMessage{
+            .severity = severity,
+            .message = diag.message,
+            .context = diag.context,
+            .hints = diag.hints,
+        },
+        color_enabled));
     return diag.severity == Diagnostic::Severity::Error ? 1 : 0;
 }
 

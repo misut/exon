@@ -37,21 +37,42 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      - name: Install released seed exon
+        run: |
+          gh release download v${{ steps.tool-versions.outputs.exon }} -R misut/exon -p "exon-*-${{ matrix.platform }}.tar.gz"
+          tar xzf exon-*.tar.gz && rm exon-*.tar.gz
+          mkdir -p "$HOME/.exon/seed/bin" && mv exon "$HOME/.exon/seed/bin/"
+          touch "$HOME/.exon/seed/bin/exon"
+          echo "$HOME/.exon/seed/bin" >> $GITHUB_PATH
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Install toolchains
         run: |
           intron install llvm 22.1.2
           intron install cmake 4.3.1
           intron install ninja 1.13.2
 
-      - name: Bootstrap and release build
+      - name: Diagnose toolchain
+        run: intron status --output json
+
+      - name: Seed self-host build
         run: |
-          bash scripts/bootstrap.sh
           eval "$(intron env)"
           if [ "$RUNNER_OS" = "Linux" ]; then
             LLVM_ROOT="$HOME/.intron/toolchains/llvm/22.1.2"
             export LD_LIBRARY_PATH="$(dirname "$(find "$LLVM_ROOT" -name "libc++.so" -print -quit)"):${LD_LIBRARY_PATH:-}"
           fi
-          ./build/exon build --release
+          exon build
+
+      - name: Current-source release build
+        run: |
+          eval "$(intron env)"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            LLVM_ROOT="$HOME/.intron/toolchains/llvm/22.1.2"
+            export LD_LIBRARY_PATH="$(dirname "$(find "$LLVM_ROOT" -name "libc++.so" -print -quit)"):${LD_LIBRARY_PATH:-}"
+          fi
+          ./.exon/debug/exon build --release
           ./.exon/release/exon info
 
       - name: Package
@@ -91,6 +112,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      - name: Install released seed exon
+        shell: pwsh
+        run: |
+          gh release download v${{ steps.tool-versions.outputs.exon }} -R misut/exon -p "exon-*-x86_64-pc-windows-msvc.zip"
+          Expand-Archive -Path exon-*.zip -DestinationPath .
+          Remove-Item exon-*.zip
+          New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.exon\seed\bin" | Out-Null
+          Move-Item -Path exon.exe -Destination "$env:USERPROFILE\.exon\seed\bin\exon.exe"
+          (Get-Item "$env:USERPROFILE\.exon\seed\bin\exon.exe").LastWriteTime = Get-Date
+          echo "$env:USERPROFILE\.exon\seed\bin" >> $env:GITHUB_PATH
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Install toolchains
         shell: pwsh
         run: |
@@ -99,13 +133,21 @@ jobs:
           echo "$env:USERPROFILE\.intron\toolchains\cmake\4.3.1\bin" >> $env:GITHUB_PATH
           echo "$env:USERPROFILE\.intron\toolchains\ninja\1.13.2" >> $env:GITHUB_PATH
 
-      - name: Bootstrap and release build
+      - name: Diagnose toolchain
+        shell: pwsh
+        run: intron status --output json
+
+      - name: Seed self-host build
         shell: pwsh
         run: |
           Invoke-Expression (& intron env | Out-String)
-          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --target exon
-          .\build\exon.exe build --release
+          exon build
+
+      - name: Current-source release build
+        shell: pwsh
+        run: |
+          Invoke-Expression (& intron env | Out-String)
+          .\.exon\debug\exon.exe build --release
 
       - name: Package
         shell: pwsh
