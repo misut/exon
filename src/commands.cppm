@@ -2160,7 +2160,9 @@ int cmd_info() {
                 m = manifest::apply_workspace_defaults(std::move(m), workspace_manifest);
             }
         }
-        std::println("{}", terminal::section("package", reporting::system::stdout_is_tty()));
+        auto caps = reporting::system::stdout_capabilities();
+        std::println("{}", terminal::section_header("package", caps.color_enabled,
+                                                    caps.unicode_enabled));
         std::println("{}", terminal::key_value("name", m.name));
         std::println("{}", terminal::key_value("version", m.version));
         if (!m.description.empty())
@@ -3013,11 +3015,13 @@ std::string intron_json(IntronStatusDiagnostic const& status) {
 }
 
 void print_intron_diagnostics(IntronStatusDiagnostic const& status) {
-    auto color = reporting::system::stdout_is_tty();
-    std::println("{}", terminal::section("intron", color));
+    auto caps = reporting::system::stdout_capabilities();
+    auto color = caps.color_enabled;
+    std::println("{}", terminal::section_header("intron", color, caps.unicode_enabled));
     if (!status.ok) {
-        std::println("{} {}", terminal::status_cell(terminal::StatusKind::fail, color),
-                     "intron status unavailable");
+        std::println("{}", terminal::summary_line(terminal::StatusKind::fail,
+                                                  "intron status unavailable", color,
+                                                  caps.unicode_enabled));
         if (!status.error.empty())
             std::println("{}", terminal::key_value("error", status.error));
         for (auto const& hint : status.hints)
@@ -3025,8 +3029,9 @@ void print_intron_diagnostics(IntronStatusDiagnostic const& status) {
         return;
     }
 
-    std::println("{} {}", terminal::status_cell(terminal::StatusKind::ok, color),
-                 "intron status resolved");
+    std::println("{}", terminal::summary_line(terminal::StatusKind::ok,
+                                              "intron status resolved", color,
+                                              caps.unicode_enabled));
     std::println("{}", terminal::key_value("version", status.version));
     auto platform = status.platform_name;
     if (!status.platform_triple.empty())
@@ -3047,7 +3052,7 @@ void print_intron_diagnostics(IntronStatusDiagnostic const& status) {
         std::println("{}", terminal::key_value("msvc", status.msvc_status));
 
     std::println("");
-    std::println("{}", terminal::section("toolchain", color));
+    std::println("{}", terminal::section_header("toolchain", color, caps.unicode_enabled));
     for (auto const& tool : status.tools) {
         auto kind = tool.installed ? terminal::StatusKind::ok : terminal::StatusKind::fail;
         auto summary = std::format("{} {} {}", tool.name, tool.version,
@@ -3063,7 +3068,8 @@ void print_intron_diagnostics(IntronStatusDiagnostic const& status) {
 
     if (!status.diagnostics.empty()) {
         std::println("");
-        std::println("{}", terminal::section("diagnostics", color));
+        std::println("{}", terminal::section_header("diagnostics", color,
+                                                    caps.unicode_enabled));
         for (auto const& diagnostic : status.diagnostics)
             std::println("{} {}", terminal::status_cell(terminal::StatusKind::fail, color),
                          diagnostic);
@@ -3074,21 +3080,30 @@ void print_intron_diagnostics(IntronStatusDiagnostic const& status) {
 
 void print_exon_toolchain_status(ToolchainDiagnostic const& toolchain,
                                  IntronStatusDiagnostic const& intron) {
-    auto color = reporting::system::stdout_is_tty();
-    std::println("{}", terminal::section("exon detected tools", color));
+    auto caps = reporting::system::stdout_capabilities();
+    auto color = caps.color_enabled;
+    std::println("{}", terminal::section_header("exon detected tools", color,
+                                                caps.unicode_enabled));
     if (!toolchain.available) {
-        std::println("{} {}", terminal::status_cell(terminal::StatusKind::fail, color),
-                     "toolchain detection failed");
+        std::println("{}", terminal::summary_line(terminal::StatusKind::fail,
+                                                  "toolchain detection failed", color,
+                                                  caps.unicode_enabled));
         std::println("{}", terminal::key_value("error", toolchain.error));
         std::println("  {}", terminal::hint_line("run: intron status --output human", color));
         return;
     }
+    auto mismatches = toolchain_mismatches(toolchain, intron);
+    std::println("{}", terminal::summary_line(
+                             mismatches.empty() ? terminal::StatusKind::ok
+                                                : terminal::StatusKind::fail,
+                             mismatches.empty() ? "toolchain matches intron"
+                                                : "toolchain differs from intron",
+                             color, caps.unicode_enabled));
     std::println("{}", terminal::key_value("cmake", tool_version_line(toolchain.cmake)));
     std::println("{}", terminal::key_value("ninja", tool_version_line(toolchain.ninja)));
     std::println("{}", terminal::key_value("compiler", tool_version_line(toolchain.compiler)));
     std::println("{}", terminal::key_value("compiler kind", toolchain.compiler_kind));
 
-    auto mismatches = toolchain_mismatches(toolchain, intron);
     for (auto const& mismatch : mismatches) {
         std::println("{} {}", terminal::status_cell(terminal::StatusKind::fail, color),
                      std::format("{} differs from intron status", mismatch.tool));
@@ -3109,7 +3124,8 @@ void print_terminal_status(reporting::Options const& options) {
     auto unicode = reporting::resolve_capability(options.unicode, "EXON_UNICODE");
     auto hyperlinks = reporting::resolve_capability(options.hyperlinks, "EXON_HYPERLINKS");
     auto caps = reporting::system::stdout_capabilities();
-    std::println("{}", terminal::section("terminal", caps.color_enabled));
+    std::println("{}", terminal::section_header("terminal", caps.color_enabled,
+                                                caps.unicode_enabled));
     std::println("{}", terminal::key_value("stdout tty", caps.is_terminal ? "yes" : "no"));
     std::println("{}", terminal::key_value(
                            "width", caps.size.columns == 0
@@ -3176,7 +3192,18 @@ int cmd_status(int argc, char* argv[]) {
             return 0;
         }
 
-        std::println("{}", terminal::section("exon status", reporting::system::stdout_is_tty()));
+        auto caps = reporting::system::stdout_capabilities();
+        auto ready = manifest_exists && intron_status.ok && toolchain_status.available &&
+                     toolchain_mismatches(toolchain_status, intron_status).empty();
+        auto summary = !manifest_exists
+            ? std::string_view{"project manifest missing"}
+            : ready ? std::string_view{"project ready"}
+                    : std::string_view{"needs attention"};
+        std::println("{}", terminal::section_header("exon status", caps.color_enabled,
+                                                    caps.unicode_enabled));
+        std::println("{}", terminal::summary_line(
+                             ready ? terminal::StatusKind::ok : terminal::StatusKind::fail,
+                             summary, caps.color_enabled, caps.unicode_enabled));
         std::println("{}", terminal::key_value("root", project_root.generic_string()));
         std::println("{}", terminal::key_value("version", version));
         if (!manifest_exists) {

@@ -754,8 +754,10 @@ void print_output_block(std::string_view heading, std::string_view text) {
 
 void print_header(std::string_view verb, std::string_view name,
                   core::ProjectContext const& project) {
-    auto color = reporting::system::stdout_is_tty();
-    write_line(stdout, terminal::section(std::format("exon {} {}", verb, name), color));
+    auto caps = reporting::system::stdout_capabilities();
+    write_line(stdout, terminal::section_header(
+                           std::format("exon {} {}", verb, name),
+                           caps.color_enabled, caps.unicode_enabled));
     write_line(stdout, terminal::key_value("profile", profile_label(project)));
     write_line(stdout, terminal::key_value("target", target_label(project)));
     write_line(stdout, terminal::key_value("build dir",
@@ -784,11 +786,10 @@ void print_failure_summary(std::string_view verb, std::string_view stage,
                            reporting::ProcessResult const* result = nullptr) {
     write_line(stdout);
     auto caps = reporting::system::stdout_capabilities();
-    write_formatted_line(stdout, "{} exon: {} failed",
-                         terminal::status_badge(terminal::StatusKind::fail,
-                                                caps.color_enabled,
-                                                caps.unicode_enabled),
-                         verb);
+    write_line(stdout, terminal::summary_line(
+                           terminal::StatusKind::fail,
+                           std::format("exon: {} failed", verb),
+                           caps.color_enabled, caps.unicode_enabled));
     write_formatted_line(stdout, "  phase     {}", stage);
     write_formatted_line(stdout, "  profile   {}", profile_label(project));
     write_formatted_line(stdout, "  target    {}", target_label(project));
@@ -807,11 +808,10 @@ void print_build_success(std::string_view verb, std::filesystem::path const& art
                          std::string_view location_label) {
     write_line(stdout);
     auto caps = reporting::system::stdout_capabilities();
-    write_formatted_line(stdout, "{} exon: {} succeeded",
-                         terminal::status_badge(terminal::StatusKind::ok,
-                                                caps.color_enabled,
-                                                caps.unicode_enabled),
-                         verb);
+    write_line(stdout, terminal::summary_line(
+                           terminal::StatusKind::ok,
+                           std::format("exon: {} succeeded", verb),
+                           caps.color_enabled, caps.unicode_enabled));
     write_formatted_line(stdout, "  {:<9} {}", location_label,
                          display_path_link(artifact, project.root));
     write_formatted_line(stdout, "  elapsed   {}", reporting::format_duration(elapsed));
