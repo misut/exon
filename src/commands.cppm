@@ -3108,17 +3108,22 @@ void print_terminal_status(reporting::Options const& options) {
     auto progress = reporting::resolve_capability(options.progress, "EXON_PROGRESS");
     auto unicode = reporting::resolve_capability(options.unicode, "EXON_UNICODE");
     auto hyperlinks = reporting::resolve_capability(options.hyperlinks, "EXON_HYPERLINKS");
-    std::println("{}", terminal::section("terminal", reporting::system::stdout_is_tty()));
-    std::println("{}", terminal::key_value("stdout tty",
-                                           reporting::system::stdout_is_terminal() ? "yes" : "no"));
+    auto caps = reporting::system::stdout_capabilities();
+    std::println("{}", terminal::section("terminal", caps.color_enabled));
+    std::println("{}", terminal::key_value("stdout tty", caps.is_terminal ? "yes" : "no"));
     std::println("{}", terminal::key_value(
-                           "width", reporting::system::terminal_width() == 0
+                           "width", caps.size.columns == 0
                                         ? std::string{"unknown"}
-                                        : std::format("{}", reporting::system::terminal_width())));
+                                        : std::format("{}", caps.size.columns)));
     std::println("{}", terminal::key_value("color", reporting::to_string(color)));
     std::println("{}", terminal::key_value("progress", reporting::to_string(progress)));
     std::println("{}", terminal::key_value("unicode", reporting::to_string(unicode)));
     std::println("{}", terminal::key_value("hyperlinks", reporting::to_string(hyperlinks)));
+    std::println("{}", terminal::key_value("live progress",
+                                           caps.progress_enabled ? "enabled" : "disabled"));
+    std::println("{}", terminal::key_value("ci", caps.is_ci ? "yes" : "no"));
+    std::println("{}", terminal::key_value("github actions",
+                                           caps.is_github_actions ? "yes" : "no"));
 }
 
 int cmd_status(int argc, char* argv[]) {

@@ -34,7 +34,8 @@ keeping full tool logs available through `--output wrapped`. Terminal
 rendering can be controlled with `--color`, `--progress`, `--unicode`, and
 `--hyperlinks`, each accepting `auto`, `always`, or `never`; the matching
 environment variables are `EXON_COLOR`, `EXON_PROGRESS`, `EXON_UNICODE`, and
-`EXON_HYPERLINKS`.
+`EXON_HYPERLINKS`. `NO_COLOR=1` disables ANSI color in auto mode, while
+`FORCE_COLOR=1` enables color unless `NO_COLOR` is also set.
 
 Supported cross targets are `wasm32-wasi` and `aarch64-linux-android`.
 Android builds require `android-ndk` via intron or `ANDROID_NDK_HOME`.
