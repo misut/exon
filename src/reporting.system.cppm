@@ -34,7 +34,9 @@ bool stdout_is_tty();
 bool stderr_is_tty();
 bool stdout_hyperlinks_enabled();
 bool stdout_unicode_enabled();
+bool github_actions_enabled();
 std::size_t terminal_width();
+cppx::terminal::system::TerminalCapabilities stdout_capabilities();
 
 enum class LiveProgressRenderMode {
     disabled,
@@ -141,8 +143,16 @@ bool stdout_unicode_enabled() {
     return cppx::terminal::system::stdout_unicode_enabled(terminal_options());
 }
 
+bool github_actions_enabled() {
+    return cppx::terminal::system::github_actions();
+}
+
 std::size_t terminal_width() {
     return cppx::terminal::system::terminal_width();
+}
+
+cppx::terminal::system::TerminalCapabilities stdout_capabilities() {
+    return cppx::terminal::system::stdout_capabilities(terminal_options());
 }
 
 namespace detail {

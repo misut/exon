@@ -544,58 +544,27 @@ std::string display_path_link(std::filesystem::path const& path,
 }
 
 bool github_actions_enabled() {
-    auto const* value = std::getenv("GITHUB_ACTIONS");
-    return value != nullptr && value[0] != '\0';
-}
-
-std::string github_command_escape(std::string_view value) {
-    auto out = std::string{};
-    for (auto ch : value) {
-        switch (ch) {
-        case '%':
-            out += "%25";
-            break;
-        case '\r':
-            out += "%0D";
-            break;
-        case '\n':
-            out += "%0A";
-            break;
-        default:
-            out.push_back(ch);
-            break;
-        }
-    }
-    return out;
-}
-
-std::string github_property_escape(std::string_view value) {
-    auto out = github_command_escape(value);
-    auto escaped = std::string{};
-    escaped.reserve(out.size());
-    for (auto ch : out) {
-        if (ch == ':')
-            escaped += "%3A";
-        else if (ch == ',')
-            escaped += "%2C";
-        else
-            escaped.push_back(ch);
-    }
-    return escaped;
+    return reporting::system::github_actions_enabled();
 }
 
 void emit_github_error(std::string_view message) {
     if (!github_actions_enabled())
         return;
-    write_formatted_line(stdout, "::error::{}", github_command_escape(message));
+    write_line(stdout, terminal::github_actions_annotation({
+                           .severity = terminal::DiagnosticSeverity::error,
+                           .message = std::string{message},
+                       }));
 }
 
 void emit_github_error_at(std::string_view file, int line, std::string_view message) {
     if (!github_actions_enabled())
         return;
-    write_formatted_line(stdout, "::error file={},line={}::{}",
-                         github_property_escape(file), line,
-                         github_command_escape(message));
+    write_line(stdout, terminal::github_actions_annotation({
+                           .severity = terminal::DiagnosticSeverity::error,
+                           .message = std::string{message},
+                           .file = std::string{file},
+                           .line = line,
+                       }));
 }
 
 struct GithubAnnotation {
@@ -772,7 +741,7 @@ void print_output_block(std::string_view heading, std::string_view text) {
     if (text.empty())
         return;
     if (github_actions_enabled())
-        write_formatted_line(stdout, "::group::{}", github_command_escape(heading));
+        write_line(stdout, terminal::github_actions_group_start(heading));
     write_line(stdout);
     write_line(stdout, terminal::output_block_header(
         heading, reporting::system::stdout_is_tty()));
@@ -780,7 +749,7 @@ void print_output_block(std::string_view heading, std::string_view text) {
     if (!text.ends_with('\n'))
         write_line(stdout);
     if (github_actions_enabled())
-        write_line(stdout, "::endgroup::");
+        write_line(stdout, terminal::github_actions_group_end());
 }
 
 void print_header(std::string_view verb, std::string_view name,
@@ -814,7 +783,12 @@ void print_failure_summary(std::string_view verb, std::string_view stage,
                            std::chrono::milliseconds elapsed,
                            reporting::ProcessResult const* result = nullptr) {
     write_line(stdout);
-    write_formatted_line(stdout, "exon: {} failed", verb);
+    auto caps = reporting::system::stdout_capabilities();
+    write_formatted_line(stdout, "{} exon: {} failed",
+                         terminal::status_badge(terminal::StatusKind::fail,
+                                                caps.color_enabled,
+                                                caps.unicode_enabled),
+                         verb);
     write_formatted_line(stdout, "  phase     {}", stage);
     write_formatted_line(stdout, "  profile   {}", profile_label(project));
     write_formatted_line(stdout, "  target    {}", target_label(project));
@@ -832,7 +806,12 @@ void print_build_success(std::string_view verb, std::filesystem::path const& art
                          std::chrono::milliseconds elapsed,
                          std::string_view location_label) {
     write_line(stdout);
-    write_formatted_line(stdout, "exon: {} succeeded", verb);
+    auto caps = reporting::system::stdout_capabilities();
+    write_formatted_line(stdout, "{} exon: {} succeeded",
+                         terminal::status_badge(terminal::StatusKind::ok,
+                                                caps.color_enabled,
+                                                caps.unicode_enabled),
+                         verb);
     write_formatted_line(stdout, "  {:<9} {}", location_label,
                          display_path_link(artifact, project.root));
     write_formatted_line(stdout, "  elapsed   {}", reporting::format_duration(elapsed));
@@ -1223,7 +1202,8 @@ void print_failure_excerpt(core::ProcessStep const& step,
 
 void print_wrapped_rerun_hint() {
     write_line(stdout);
-    write_line(stdout, "hint: rerun with --output wrapped to show full tool output");
+    write_line(stdout, terminal::hint_line("rerun with --output wrapped to show full tool output",
+                                           reporting::system::stdout_is_tty()));
 }
 
 std::optional<StepFailure> run_steps_human(std::vector<core::ProcessStep> const& steps,
