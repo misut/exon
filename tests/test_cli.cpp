@@ -296,7 +296,7 @@ void test_commands_completion_words_normalize_program_name() {
 }
 
 void test_commands_metadata_json_includes_options() {
-    auto json = commands::command_catalog_json();
+    auto json = cppx::cli::command_catalog_json(commands::command_spec());
     check(json.find("\"name\":\"build\"") != std::string::npos,
           "command metadata json includes build command");
     check(json.find("\"name\":\"complete\"") != std::string::npos,
