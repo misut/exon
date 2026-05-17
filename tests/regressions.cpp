@@ -1296,6 +1296,60 @@ void test_module_detection_includes_dependency_cppm_sources() {
           "module detection: dependency cppm sources mark request as module-aware");
 }
 
+void test_matching_cmake_cache_keeps_configured_build_dir() {
+    TmpProject proj;
+    auto build_dir = proj.root / "build";
+    proj.write("build/build.ninja", "# generated\n");
+    proj.write("build/CMakeCache.txt",
+               "CMAKE_CXX_COMPILER:STRING=C:/toolchain/bin/compiler.exe\n");
+
+    toolchain::Toolchain tc;
+    tc.cxx_compiler = "C:/toolchain/bin/compiler.exe";
+
+    check(build::system::detail::configured_build_dir(build_dir, tc),
+          "configured build dir: matching CMake cache stays configured");
+    check(std::filesystem::exists(build_dir / "build.ninja"),
+          "configured build dir: matching cache keeps build files");
+}
+
+void test_compiler_cache_mismatch_invalidates_build_dir() {
+    TmpProject proj;
+    auto build_dir = proj.root / "build";
+    proj.write("build/build.ninja", "# generated\n");
+    proj.write("build/CMakeCache.txt",
+               "CMAKE_CXX_COMPILER:STRING=C:/old-toolchain/bin/compiler.exe\n");
+
+    toolchain::Toolchain tc;
+    tc.cxx_compiler = "C:/new-toolchain/bin/compiler.exe";
+
+    check(!build::system::detail::configured_build_dir(build_dir, tc),
+          "configured build dir: compiler mismatch invalidates cache");
+    check(!std::filesystem::exists(build_dir / "build.ninja"),
+          "configured build dir: compiler mismatch removes stale build files");
+}
+
+void test_windows_stale_llvm_archive_cache_invalidates_build_dir() {
+#if defined(_WIN32)
+    TmpProject proj;
+    auto build_dir = proj.root / "build";
+    proj.write("build/build.ninja", "# generated\n");
+    proj.write("build/CMakeCache.txt",
+               "CMAKE_CXX_COMPILER:STRING=C:/Program Files/Microsoft Visual Studio/cl.exe\n"
+               "CMAKE_AR:FILEPATH=C:/Users/me/.intron/toolchains/llvm/22.1.2/bin/llvm-ar.exe\n"
+               "CMAKE_CXX_COMPILER_AR:FILEPATH=C:/Users/me/.intron/toolchains/llvm/22.1.2/bin/llvm-ar.exe\n"
+               "CMAKE_LINKER:FILEPATH=C:/Users/me/.intron/toolchains/llvm/22.1.2/bin/lld-link.exe\n");
+
+    toolchain::Toolchain tc;
+    tc.is_msvc = true;
+    tc.cxx_compiler = "C:\\Program Files\\Microsoft Visual Studio\\cl.exe";
+
+    check(!build::system::detail::configured_build_dir(build_dir, tc),
+          "configured build dir: stale Windows LLVM tools invalidate MSVC cache");
+    check(!std::filesystem::exists(build_dir / "build.ninja"),
+          "configured build dir: stale Windows LLVM tools remove build files");
+#endif
+}
+
 #if defined(_WIN32)
 void test_windows_native_toolchain_diagnostic_predicates() {
     build::BuildRequest request;
@@ -1452,6 +1506,9 @@ int main(int argc, char* argv[]) {
     test_workspace_human_output();
     test_workspace_human_fail_fast_summary();
     test_module_detection_includes_dependency_cppm_sources();
+    test_matching_cmake_cache_keeps_configured_build_dir();
+    test_compiler_cache_mismatch_invalidates_build_dir();
+    test_windows_stale_llvm_archive_cache_invalidates_build_dir();
 #if defined(_WIN32)
     test_windows_native_toolchain_diagnostic_predicates();
 #endif
