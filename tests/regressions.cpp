@@ -10,6 +10,7 @@ import manifest.system;
 import reporting;
 import reporting.system;
 import toolchain;
+import toolchain.system;
 
 #if defined(_WIN32)
 extern "C" int _putenv(char const* envstring);
@@ -712,6 +713,22 @@ void test_windows_explicit_llvm_override_is_installed() {
     check(args.size() == 3, "windows override config: installs explicit host tools");
 }
 #endif
+
+void test_windows_build_tools_vswhere_command() {
+#if defined(_WIN32)
+    auto command = toolchain::system::detail::vswhere_latest_msvc_install_command(
+        "C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe",
+        "C:/Temp/exon_vswhere.txt");
+
+    check(command.contains("-products *"),
+          "windows vswhere command includes Build Tools products");
+    check(command.contains("-requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64"),
+          "windows vswhere command requires MSVC toolset");
+    check(command.contains("-property installationPath"),
+          "windows vswhere command still returns installationPath");
+#endif
+}
+
 struct TmpGitRepo {
     std::filesystem::path root;
 
@@ -1414,6 +1431,7 @@ int main(int argc, char* argv[]) {
     test_windows_legacy_common_llvm_is_skipped();
     test_windows_explicit_llvm_override_is_installed();
 #endif
+    test_windows_build_tools_vswhere_command();
     test_run_process_returns_child_exit_code();
     test_system_run_process_honors_cwd();
     test_reporting_capture_collects_stdout_and_stderr();

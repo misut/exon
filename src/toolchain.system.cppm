@@ -148,6 +148,15 @@ void finalize_compiler_provenance(toolchain::Toolchain& tc) {
         tc.compiler_kind = toolchain::CompilerKind::msvc_cl;
 }
 
+std::string vswhere_latest_msvc_install_command(std::filesystem::path const& vswhere,
+                                                std::filesystem::path const& output) {
+    return std::format(
+        "cmd /c \"\"{}\" -products * -latest "
+        "-requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 "
+        "-property installationPath > \"{}\"\"",
+        vswhere.string(), output.string());
+}
+
 // detect MSVC cl.exe (Windows). If the developer environment is already
 // loaded (vcvars64.bat), use it directly. Otherwise, locate Visual Studio
 // via vswhere.exe, run vcvars64.bat, capture the resulting environment
@@ -160,6 +169,7 @@ void detect_msvc(toolchain::Toolchain& tc) {
     if (cl != "cl.exe") {
         auto include = std::getenv("INCLUDE");
         if (include && *include) {
+            tc.cxx_compiler = cl;
             tc.has_msvc_developer_env = true;
             tc.is_msvc = true;
             tc.native_import_std = true;
@@ -174,9 +184,11 @@ void detect_msvc(toolchain::Toolchain& tc) {
         return;
 
     auto tmp_vs = std::filesystem::temp_directory_path() / "exon_vswhere.txt";
-    auto vs_cmd = std::format("cmd /c \"\"{}\" -latest -property installationPath > \"{}\"\"",
-                              vswhere.string(), tmp_vs.string());
-    std::system(vs_cmd.c_str());
+    auto vs_cmd = vswhere_latest_msvc_install_command(vswhere, tmp_vs);
+    if (std::system(vs_cmd.c_str()) != 0) {
+        std::filesystem::remove(tmp_vs);
+        return;
+    }
 
     auto vs_file = std::ifstream{tmp_vs};
     std::string vs_path;
@@ -195,7 +207,7 @@ void detect_msvc(toolchain::Toolchain& tc) {
 
     // run vcvars64.bat and capture resulting environment
     auto tmp_env = std::filesystem::temp_directory_path() / "exon_msvc_env.txt";
-    auto env_cmd = std::format("cmd /c \"\"{}\" && set > \"{}\"\"",
+    auto env_cmd = std::format("cmd /c \"\"{}\" > NUL && set > \"{}\"\"",
                                vcvars.string(), tmp_env.string());
     if (std::system(env_cmd.c_str()) != 0) {
         std::filesystem::remove(tmp_env);
@@ -216,6 +228,10 @@ void detect_msvc(toolchain::Toolchain& tc) {
     }
     env_file.close();
     std::filesystem::remove(tmp_env);
+
+    cl = find_in_path("cl.exe");
+    if (cl != "cl.exe")
+        tc.cxx_compiler = cl;
 
     tc.has_msvc_developer_env = true;
     tc.is_msvc = true;
