@@ -129,7 +129,7 @@ set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/src/vcpkg.system.cppm
     ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
     PROPERTIES COMPILE_DEFINITIONS
-    "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.35.0\""
+    "EXON_PKG_NAME=\"exon\";EXON_PKG_VERSION=\"0.35.1\""
 )
 
 if(EXON_ENABLE_TEST_TARGETS)
