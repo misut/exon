@@ -302,6 +302,86 @@ bool has_any_cmake_deps(manifest::Manifest const& m,
     return false;
 }
 
+std::optional<std::string> cmake_cache_value(std::filesystem::path const& cache,
+                                             std::string_view key) {
+    auto file = std::ifstream{cache};
+    if (!file)
+        return std::nullopt;
+
+    auto prefix = std::format("{}:", key);
+    auto line = std::string{};
+    while (std::getline(file, line)) {
+        if (!line.starts_with(prefix))
+            continue;
+        auto equals = line.find('=');
+        if (equals == std::string::npos)
+            return std::nullopt;
+        return line.substr(equals + 1);
+    }
+    return std::nullopt;
+}
+
+std::string normalized_cache_path(std::string_view value) {
+    auto text = std::string{value};
+    std::ranges::replace(text, '\\', '/');
+#if defined(_WIN32)
+    std::ranges::transform(text, text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+#endif
+    return text;
+}
+
+bool cache_path_matches(std::string_view cached, std::string_view expected) {
+    return normalized_cache_path(cached) == normalized_cache_path(expected);
+}
+
+bool cache_value_is_windows_llvm_tool(std::string_view value) {
+    auto path = normalized_cache_path(value);
+    return path.contains("/.intron/toolchains/llvm/") ||
+           path.ends_with("/llvm-ar.exe") ||
+           path.ends_with("/lld-link.exe");
+}
+
+bool cmake_cache_matches_toolchain(std::filesystem::path const& build_dir,
+                                   toolchain::Toolchain const& tc) {
+    auto cache = build_dir / "CMakeCache.txt";
+    if (!std::filesystem::exists(cache))
+        return false;
+
+    if (!tc.cxx_compiler.empty()) {
+        if (auto cached = cmake_cache_value(cache, "CMAKE_CXX_COMPILER");
+            cached && !cache_path_matches(*cached, tc.cxx_compiler)) {
+            return false;
+        }
+    }
+
+#if defined(_WIN32)
+    if (tc.is_msvc) {
+        for (auto key : {"CMAKE_AR", "CMAKE_CXX_COMPILER_AR", "CMAKE_LINKER"}) {
+            if (auto cached = cmake_cache_value(cache, key);
+                cached && cache_value_is_windows_llvm_tool(*cached)) {
+                return false;
+            }
+        }
+    }
+#endif
+
+    return true;
+}
+
+bool configured_build_dir(std::filesystem::path const& build_dir,
+                          toolchain::Toolchain const& tc) {
+    if (!std::filesystem::exists(build_dir / "build.ninja"))
+        return false;
+
+    if (cmake_cache_matches_toolchain(build_dir, tc))
+        return true;
+
+    std::filesystem::remove_all(build_dir);
+    return false;
+}
+
 bool path_uses_modules(std::filesystem::path const& root) {
     if (!std::filesystem::exists(root))
         return false;
@@ -413,7 +493,7 @@ build::BuildRequest do_prepare_request(
         .release = release,
         .with_tests = with_tests,
         .module_aware = module_aware,
-        .configured = std::filesystem::exists(project.build_dir / "build.ninja"),
+        .configured = configured_build_dir(project.build_dir, tc),
         .any_cmake_deps = any_cmake_deps,
         .wasm_toolchain_file = std::move(wasm_toolchain_file),
         .android_toolchain_file = std::move(android_toolchain_file),
