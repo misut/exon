@@ -224,6 +224,11 @@ ldflags  = ["-fsanitize=address"]
 cmake-in-root = true                      # generate portable CMakeLists.txt
 ```
 
+`standard` accepts `11`, `14`, `17`, `20`, `23`, or `26`. The default remains
+`23`, so existing `import std;` projects keep the current behavior. Projects
+that set `11`, `14`, `17`, or `20` build without enabling CMake's experimental
+standard-library module support.
+
 ### Build system
 
 The `build-system` field in `[package]` declares who manages the package's build definition.
@@ -692,6 +697,7 @@ the build, then deploy the produced artifact with Android tooling.
 
 ## Features
 
+- **C++11-C++26 projects** — `standard = 11`, `14`, `17`, `20`, `23`, or `26`, with the default kept at C++23
 - **C++23 `import std;`** — automatically detected when `standard >= 23` and clang with libc++ modules is available
 - **C++20 modules** — `.cppm` files in `src/` are handled as module sources
 - **Transitive dependencies** — recursive resolution with cycle detection

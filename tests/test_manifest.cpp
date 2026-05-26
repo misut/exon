@@ -13,6 +13,58 @@ void check(bool cond, std::string_view msg) {
     }
 }
 
+void test_supported_cpp_standard_range() {
+    for (auto standard : manifest::supported_cpp_standards) {
+        auto m = manifest::parse(std::format(R"(
+[package]
+name = "std{}"
+version = "0.1.0"
+standard = {}
+)",
+                                             standard, standard));
+
+        check(m.standard == standard,
+              std::format("supported standard {} accepted", standard));
+    }
+}
+
+void test_unsupported_cpp_standards_rejected() {
+    auto expect_error = [](std::string const& input, std::string_view msg) {
+        try {
+            (void)manifest::parse(input);
+            check(false, msg);
+        } catch (std::exception const& e) {
+            auto text = std::string{e.what()};
+            check(text.contains("must be one of 11, 14, 17, 20, 23, 26"), msg);
+        }
+    };
+
+    expect_error(R"(
+[package]
+name = "too-old"
+version = "0.1.0"
+standard = 98
+)",
+                 "reject C++98");
+
+    expect_error(R"(
+[package]
+name = "invalid"
+version = "0.1.0"
+standard = 12
+)",
+                 "reject non-standard C++12");
+
+    expect_error(R"(
+[workspace]
+members = ["app"]
+
+[workspace.package]
+standard = 30
+)",
+                 "reject unsupported workspace standard");
+}
+
 void test_basic_manifest() {
     auto input = R"(
 [package]
@@ -1001,6 +1053,8 @@ version = "0.1.0"
 }
 
 int main() {
+    test_supported_cpp_standard_range();
+    test_unsupported_cpp_standards_rejected();
     test_basic_manifest();
     test_minimal_manifest();
     test_parse_manifest_content();

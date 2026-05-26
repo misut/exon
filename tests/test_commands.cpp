@@ -259,6 +259,43 @@ core = true
           "workspace root cmake: app added once");
 }
 
+void test_generate_workspace_root_cmake_keeps_legacy_standard_range() {
+    TmpDir tmp{"exon_test_workspace_root_legacy_standard"};
+    tmp.write("exon.toml", R"(
+[workspace]
+members = ["app", "core"]
+)");
+    tmp.write("core/exon.toml", R"(
+[package]
+name = "core"
+version = "0.1.0"
+type = "lib"
+standard = 11
+)");
+    tmp.write("app/exon.toml", R"(
+[package]
+name = "app"
+version = "0.1.0"
+type = "bin"
+standard = 14
+)");
+
+    auto workspace_manifest = manifest::system::load((tmp.root / "exon.toml").string());
+    auto selection = commands::select_workspace_members(
+        tmp.root, workspace_manifest, {}, {}, {}, true, false);
+    auto cmake = commands::generate_workspace_root_cmake(tmp.root, tmp.root, selection.members);
+    auto synthetic = commands::workspace_build_manifest(tmp.root, selection.members);
+
+    check(cmake.contains("set(CMAKE_CXX_STANDARD 14)"),
+          "workspace root cmake: legacy max standard emitted");
+    check(!cmake.contains("CMAKE_EXPERIMENTAL_CXX_IMPORT_STD"),
+          "workspace root cmake: legacy members skip import std");
+    check(!cmake.contains("CMAKE_CXX_MODULE_STD"),
+          "workspace root cmake: legacy members skip module std");
+    check(synthetic.standard == 14,
+          "workspace build manifest: legacy max standard preserved");
+}
+
 void test_dependency_graph_paths_and_dedupe() {
     auto m = manifest::Manifest{};
     m.name = "app";
@@ -580,6 +617,7 @@ int main() {
     test_select_workspace_members_orders_dependency_closure();
     test_cmd_init_workspace_and_cmd_new_updates_members();
     test_generate_workspace_root_cmake_uses_single_member_entries();
+    test_generate_workspace_root_cmake_keeps_legacy_standard_range();
     test_dependency_graph_paths_and_dedupe();
     test_cmd_run_rejects_android_before_build();
     test_cmd_add_cmake_dependency();

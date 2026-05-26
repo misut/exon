@@ -1,13 +1,15 @@
 # Introduction
 
-**exon** is a Cargo-inspired package manager for C++23. It drives the
+**exon** is a Cargo-inspired package manager for C++11 through current C++.
+It drives the
 daily loop — scaffold, fetch, build, test, release — for projects that
-use C++23 modules (`import std;`) without asking the author to maintain
-CMake by hand.
+use classic `.cpp` sources or C++23 modules (`import std;`) without asking
+the author to maintain CMake by hand.
 
 ## Features
 
-- C++23 modules — `import std;` everywhere; no headers
+- C++11 through C++26 package standards, with C++23 as the default
+- C++23 modules — `import std;` where `standard >= 23`
 - Automatic `CMakeLists.txt` generation from the manifest
 - Git-based dependency resolution with a lockfile for reproducible
   builds
