@@ -30,6 +30,35 @@ struct CmakeDep {
     bool shallow = true;
 };
 
+inline constexpr std::array<int, 6> supported_cpp_standards = {11, 14, 17, 20, 23, 26};
+
+bool is_supported_cpp_standard(int standard) {
+    for (auto supported : supported_cpp_standards) {
+        if (supported == standard)
+            return true;
+    }
+    return false;
+}
+
+std::string supported_cpp_standard_values() {
+    auto out = std::string{};
+    for (auto supported : supported_cpp_standards) {
+        if (!out.empty())
+            out += ", ";
+        out += std::to_string(supported);
+    }
+    return out;
+}
+
+void require_supported_cpp_standard(int standard, std::string_view field) {
+    if (is_supported_cpp_standard(standard))
+        return;
+
+    throw std::runtime_error(std::format("{} must be one of {}, got {}",
+                                         field, supported_cpp_standard_values(),
+                                         standard));
+}
+
 // evaluate a cfg() predicate string against a platform
 // supported forms:
 //   cfg(os = "linux")
@@ -297,6 +326,7 @@ Manifest from_toml(toml::Table const& table) {
         }
         if (pkg.contains("standard")) {
             m.standard = static_cast<int>(pkg.at("standard").as_integer());
+            require_supported_cpp_standard(m.standard, "package.standard");
             m.has_standard = true;
         }
         if (pkg.contains("authors")) {
@@ -341,6 +371,8 @@ Manifest from_toml(toml::Table const& table) {
             }
             if (pkg.contains("standard")) {
                 defaults.package.standard = static_cast<int>(pkg.at("standard").as_integer());
+                require_supported_cpp_standard(defaults.package.standard,
+                                               "workspace.package.standard");
                 defaults.package.has_standard = true;
             }
             if (pkg.contains("platforms")) {

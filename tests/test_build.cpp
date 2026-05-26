@@ -459,17 +459,44 @@ void test_no_import_std_below_23() {
     TmpProject proj;
     proj.write("src/main.cpp", "int main() {}");
 
-    manifest::Manifest m;
-    m.name = "legacy";
-    m.version = "0.1.0";
-    m.type = "bin";
-    m.standard = 20;
+    for (auto standard : std::array{11, 14, 17, 20}) {
+        manifest::Manifest m;
+        m.name = std::format("legacy{}", standard);
+        m.version = "0.1.0";
+        m.type = "bin";
+        m.standard = standard;
 
-    auto cmake = build::generate_cmake(m, proj.root, {}, make_tc());
+        auto cmake = build::generate_cmake(m, proj.root, {}, make_tc());
 
-    check(!cmake.contains("CMAKE_CXX_MODULE_STD"), "no module std for C++20");
-    check(!cmake.contains("EXPERIMENTAL"), "no experimental for C++20");
-    check(cmake.contains("CMAKE_CXX_STANDARD 20"), "standard 20");
+        check(!cmake.contains("CMAKE_CXX_MODULE_STD"),
+              std::format("no module std for C++{}", standard));
+        check(!cmake.contains("EXPERIMENTAL"),
+              std::format("no experimental import std for C++{}", standard));
+        check(cmake.contains(std::format("CMAKE_CXX_STANDARD {}", standard)),
+              std::format("standard {} emitted", standard));
+    }
+}
+
+void test_supported_cpp_standards_emit_exact_cmake_standard() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}");
+
+    for (auto standard : manifest::supported_cpp_standards) {
+        manifest::Manifest m;
+        m.name = std::format("std{}", standard);
+        m.version = "0.1.0";
+        m.type = "bin";
+        m.standard = standard;
+
+        auto cmake = build::generate_cmake(m, proj.root, {}, make_tc());
+
+        check(cmake.contains(std::format("CMAKE_CXX_STANDARD {}", standard)),
+              std::format("C++{} CMake standard preserved", standard));
+        check(cmake.contains("CMAKE_CXX_STANDARD_REQUIRED ON"),
+              std::format("C++{} standard is required", standard));
+        check(cmake.contains("CMAKE_CXX_MODULE_STD") == (standard >= 23),
+              std::format("C++{} import std toggle", standard));
+    }
 }
 
 void test_configure_command_macos_uses_system_runtime() {
@@ -1675,6 +1702,8 @@ int main() {
     run("test_dev_find_deps", test_dev_find_deps);
     run("test_path_dep_in_generate_cmake", test_path_dep_in_generate_cmake);
     run("test_no_import_std_below_23", test_no_import_std_below_23);
+    run("test_supported_cpp_standards_emit_exact_cmake_standard",
+        test_supported_cpp_standards_emit_exact_cmake_standard);
     run("test_configure_command_macos_uses_system_runtime",
         test_configure_command_macos_uses_system_runtime);
     run("test_configure_command_linux_cmake_deps_keep_toolchain_runtime",

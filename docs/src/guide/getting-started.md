@@ -36,6 +36,9 @@ type    = "bin"
 standard = 23
 ```
 
+`standard` can be `11`, `14`, `17`, `20`, `23`, or `26`. New projects default
+to `23`, while older `.cpp` projects can select the earlier standard they need.
+
 ## Build and run
 
 ```sh
