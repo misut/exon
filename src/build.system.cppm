@@ -283,8 +283,9 @@ void validate_wasm_dependencies(manifest::Manifest const& m) {
 
 bool has_any_cmake_deps(manifest::Manifest const& m,
                         std::vector<fetch::FetchedDep> const& deps,
-                        toolchain::Platform const& platform) {
-    if (!m.cmake_deps.empty())
+                        toolchain::Platform const& platform,
+                        bool with_tests) {
+    if (!m.cmake_deps.empty() || (with_tests && !m.dev_cmake_deps.empty()))
         return true;
 
     for (auto const& dep : deps) {
@@ -295,7 +296,8 @@ bool has_any_cmake_deps(manifest::Manifest const& m,
             continue;
         auto dep_manifest = manifest::system::load(dep_manifest_path.string());
         dep_manifest = manifest::resolve_for_platform(std::move(dep_manifest), platform);
-        if (!dep_manifest.cmake_deps.empty())
+        if (!dep_manifest.cmake_deps.empty() ||
+            (with_tests && !dep_manifest.dev_cmake_deps.empty()))
             return true;
     }
 
@@ -479,7 +481,8 @@ build::BuildRequest do_prepare_request(
     });
     auto vcpkg_toolchain = is_wasm ? std::filesystem::path{}
                                    : setup_vcpkg(build_manifest, project.exon_dir);
-    auto any_cmake_deps = has_any_cmake_deps(build_manifest, fetch_result.deps, platform);
+    auto any_cmake_deps = has_any_cmake_deps(build_manifest, fetch_result.deps, platform,
+                                             with_tests);
     auto module_aware = request_uses_cpp_modules(project_root, fetch_result.deps, with_tests);
 
     build::BuildRequest request{

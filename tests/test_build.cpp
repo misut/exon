@@ -21,6 +21,43 @@ void check(bool cond, std::string_view msg) {
     }
 }
 
+void set_env_value(std::string const& name, std::string const& value) {
+#if defined(_WIN32)
+    auto assignment = std::format("{}={}", name, value);
+    _putenv(assignment.c_str());
+#else
+    setenv(name.c_str(), value.c_str(), 1);
+#endif
+}
+
+void unset_env_value(std::string const& name) {
+#if defined(_WIN32)
+    auto assignment = std::format("{}=", name);
+    _putenv(assignment.c_str());
+#else
+    unsetenv(name.c_str());
+#endif
+}
+
+struct EnvGuard {
+    std::string name;
+    std::optional<std::string> original;
+
+    EnvGuard(std::string name_, std::string value)
+        : name(std::move(name_)) {
+        if (auto const* current = std::getenv(name.c_str()); current)
+            original = current;
+        set_env_value(name, value);
+    }
+
+    ~EnvGuard() {
+        if (original)
+            set_env_value(name, *original);
+        else
+            unset_env_value(name);
+    }
+};
+
 std::string command_text(core::ProcessSpec const& spec) {
     auto text = spec.program;
     for (auto const& arg : spec.args) {
@@ -542,6 +579,40 @@ void test_configure_command_linux_cmake_deps_keep_toolchain_runtime() {
           "linux: compile uses libc++");
     check(text.contains("-DCMAKE_EXE_LINKER_FLAGS=-L/fake/lib -Wl,-rpath,/fake/lib -lc++abi"),
           "linux: cmake deps keep toolchain runtime");
+}
+
+void test_configure_command_compiler_launcher() {
+    TmpProject proj;
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+    m.build.compiler_launcher = "ccache";
+
+    auto debug_cmd =
+        build::configure_command(make_linux_tc(), m, proj.root / "debug-build", proj.root, false);
+    auto debug_text = command_text(debug_cmd);
+
+    check(debug_text.contains("-DCMAKE_C_COMPILER_LAUNCHER=ccache"),
+          "launcher: C launcher emitted");
+    check(debug_text.contains("-DCMAKE_CXX_COMPILER_LAUNCHER=ccache"),
+          "launcher: CXX launcher emitted");
+    check(debug_text.contains("-DCMAKE_OBJC_COMPILER_LAUNCHER=ccache"),
+          "launcher: OBJC launcher emitted");
+    check(debug_text.contains("-DCMAKE_OBJCXX_COMPILER_LAUNCHER=ccache"),
+          "launcher: OBJCXX launcher emitted");
+
+    m.build_release.compiler_launcher = "sccache";
+    auto release_cmd =
+        build::configure_command(make_linux_tc(), m, proj.root / "release-build", proj.root, true);
+    auto release_text = command_text(release_cmd);
+
+    check(release_text.contains("-DCMAKE_CXX_COMPILER_LAUNCHER=sccache"),
+          "launcher: release profile overrides base");
+    check(!release_text.contains("-DCMAKE_CXX_COMPILER_LAUNCHER=ccache"),
+          "launcher: base launcher omitted when profile override is set");
 }
 
 void test_build_command_macos_import_std_serialized() {
@@ -1290,6 +1361,141 @@ void test_generate_cmake_cmake_deps_are_generic() {
           "cmake deps: no project-specific legacy text emitted");
 }
 
+void test_generate_cmake_install_cmake_dep_uses_find_package() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}");
+    EnvGuard cache{"EXON_CACHE_DIR", (proj.root / "cache").string()};
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+    m.cmake_deps.emplace("dawn", manifest::CmakeDep{
+        .git = "https://github.com/google/dawn.git",
+        .tag = "v20260423.175430",
+        .targets = "dawn::webgpu_dawn",
+        .mode = "install",
+        .package = "Dawn",
+        .options = {{"DAWN_ENABLE_INSTALL", "ON"}},
+    });
+
+    auto cmake = build::generate_cmake(m, proj.root, {}, make_tc());
+
+    check(cmake.contains("list(PREPEND CMAKE_PREFIX_PATH"),
+          "install cmake dep: cache prefix emitted");
+    check(cmake.contains("/cache/cmake-install/dawn/"),
+          "install cmake dep: EXON_CACHE_DIR used");
+    check(cmake.contains("find_package(Dawn CONFIG REQUIRED)"),
+          "install cmake dep: config find_package emitted");
+    check(!cmake.contains("FetchContent_Declare(dawn"),
+          "install cmake dep: FetchContent not emitted");
+    check(cmake.contains("dawn::webgpu_dawn"),
+          "install cmake dep: imported target linked");
+}
+
+void test_plan_build_materializes_install_cmake_dep_when_missing() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() { return 0; }\n");
+    EnvGuard cache{"EXON_CACHE_DIR", (proj.root / "cache").string()};
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+    m.cmake_deps.emplace("glfw", manifest::CmakeDep{
+        .git = "https://github.com/glfw/glfw.git",
+        .tag = "3.4",
+        .targets = "glfw",
+        .mode = "install",
+        .package = "glfw3",
+        .options = {{"GLFW_BUILD_TESTS", "OFF"}},
+    });
+
+    build::BuildRequest request{
+        .project = build::project_context(proj.root),
+        .manifest = m,
+        .toolchain = make_tc(),
+        .configured = true,
+        .any_cmake_deps = true,
+    };
+
+    auto plan = build::plan_build(request);
+    check(!plan.configured,
+          "install cmake dep: missing cache forces configure");
+    check(plan.configure_steps.size() > 1,
+          "install cmake dep: materialization steps prepended to configure");
+    check(plan.configure_steps.front().spec.args.size() >= 3 &&
+              plan.configure_steps.front().spec.args[0] == "-E" &&
+              plan.configure_steps.front().spec.args[1] == "rm",
+          "install cmake dep: source cache reset is first missing-cache step");
+    auto joined = std::string{};
+    for (auto const& step : plan.configure_steps)
+        joined += command_text(step.spec) + "\n";
+    check(joined.contains("git -C") && joined.contains("fetch --depth 1 origin 3.4"),
+          "install cmake dep: shallow git fetch step emitted");
+    check(joined.contains("-DCMAKE_INSTALL_PREFIX="),
+          "install cmake dep: install prefix configure arg emitted");
+    check(joined.contains("-DGLFW_BUILD_TESTS=OFF"),
+          "install cmake dep: options are passed as cache args");
+    check(joined.contains("--build") && joined.contains("--target install"),
+          "install cmake dep: install build step emitted");
+}
+
+void test_plan_build_skips_install_cmake_dep_when_stamp_exists() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() { return 0; }\n");
+    auto cache_root = proj.root / "cache";
+    EnvGuard cache{"EXON_CACHE_DIR", cache_root.string()};
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+    m.cmake_deps.emplace("glfw", manifest::CmakeDep{
+        .git = "https://github.com/glfw/glfw.git",
+        .tag = "3.4",
+        .targets = "glfw",
+        .mode = "install",
+        .package = "glfw3",
+    });
+
+    build::BuildRequest request{
+        .project = build::project_context(proj.root),
+        .manifest = m,
+        .toolchain = make_tc(),
+        .configured = true,
+        .any_cmake_deps = true,
+    };
+    auto first_plan = build::plan_build(request);
+    auto stamp = std::filesystem::path{};
+    for (auto const& step : first_plan.configure_steps) {
+        if (std::ranges::find(step.spec.args, "-E") != step.spec.args.end() &&
+            std::ranges::find(step.spec.args, "touch") != step.spec.args.end()) {
+            stamp = step.spec.args.back();
+        }
+    }
+    check(!stamp.empty(), "install cmake dep: install stamp path discovered");
+    std::filesystem::create_directories(stamp.parent_path());
+    std::filesystem::create_directories(stamp.parent_path() / "install-debug");
+    {
+        auto file = std::ofstream{stamp};
+        file << "ok\n";
+    }
+
+    auto cached_plan = build::plan_build(request);
+    check(cached_plan.configured,
+          "install cmake dep: cached dependency keeps configured build dir");
+    check(cached_plan.configure_steps.size() == 1,
+          "install cmake dep: cached dependency emits only project configure step");
+    check(cached_plan.build_steps.size() == 1,
+          "install cmake dep: cached dependency emits only project build step");
+    check(cached_plan.build_steps.front().label == "building...",
+          "install cmake dep: project build step remains");
+}
+
 // test: cmake_deps from a git dep are collected at root level and linked transitively
 void test_transitive_cmake_deps_from_git() {
     TmpProject proj;
@@ -1708,6 +1914,7 @@ int main() {
         test_configure_command_macos_uses_system_runtime);
     run("test_configure_command_linux_cmake_deps_keep_toolchain_runtime",
         test_configure_command_linux_cmake_deps_keep_toolchain_runtime);
+    run("test_configure_command_compiler_launcher", test_configure_command_compiler_launcher);
     run("test_build_command_macos_import_std_serialized",
         test_build_command_macos_import_std_serialized);
     run("test_build_command_macos_no_std_modules_keeps_default_parallelism",
@@ -1747,6 +1954,12 @@ int main() {
         test_generate_cmake_no_build_flags_skipped);
     run("test_generate_cmake_cmake_deps_are_generic",
         test_generate_cmake_cmake_deps_are_generic);
+    run("test_generate_cmake_install_cmake_dep_uses_find_package",
+        test_generate_cmake_install_cmake_dep_uses_find_package);
+    run("test_plan_build_materializes_install_cmake_dep_when_missing",
+        test_plan_build_materializes_install_cmake_dep_when_missing);
+    run("test_plan_build_skips_install_cmake_dep_when_stamp_exists",
+        test_plan_build_skips_install_cmake_dep_when_stamp_exists);
     run("test_transitive_cmake_deps_from_git", test_transitive_cmake_deps_from_git);
     run("test_transitive_cmake_deps_from_path", test_transitive_cmake_deps_from_path);
     run("test_transitive_git_deps_linked", test_transitive_git_deps_linked);

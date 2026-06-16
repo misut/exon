@@ -89,9 +89,11 @@ build-system = "cmake"
 
 [workspace.build]
 cxxflags = ["-Wall"]
+compiler-launcher = "ccache"
 
 [workspace.build.debug]
 cxxflags = ["-fsanitize=address"]
+compiler-launcher = "sccache"
 )");
 
     auto member = manifest::parse(R"(
@@ -113,9 +115,13 @@ cxxflags = ["-Wextra"]
     check(applied.build.cxxflags.size() == 2, "workspace defaults: build flags merged");
     check(applied.build.cxxflags[0] == "-Wall", "workspace defaults: workspace flag first");
     check(applied.build.cxxflags[1] == "-Wextra", "workspace defaults: member flag kept");
+    check(applied.build.compiler_launcher == "ccache",
+          "workspace defaults: compiler launcher inherited");
     check(applied.build_debug.cxxflags.size() == 1 &&
               applied.build_debug.cxxflags[0] == "-fsanitize=address",
           "workspace defaults: debug build flags inherited");
+    check(applied.build_debug.compiler_launcher == "sccache",
+          "workspace defaults: debug compiler launcher inherited");
 
     auto explicit_member = manifest::parse(R"(
 [package]
@@ -124,6 +130,9 @@ version = "9.9.9"
 license = "Apache-2.0"
 standard = 23
 build-system = "exon"
+
+[build]
+compiler-launcher = "membercache"
 )");
     auto explicit_applied = manifest::apply_workspace_defaults(explicit_member, workspace);
     check(explicit_applied.version == "9.9.9", "workspace defaults: explicit version wins");
@@ -131,6 +140,10 @@ build-system = "exon"
     check(explicit_applied.standard == 23, "workspace defaults: explicit standard wins");
     check(explicit_applied.build_system == "exon",
           "workspace defaults: explicit build-system wins");
+    check(explicit_applied.build.compiler_launcher == "membercache",
+          "workspace defaults: explicit compiler launcher wins");
+    check(explicit_applied.build_debug.compiler_launcher.empty(),
+          "workspace defaults: explicit base launcher blocks profile launcher default");
 }
 
 void test_select_workspace_members_orders_dependency_closure() {
@@ -375,6 +388,8 @@ standard = 23
         "--repo", "https://github.com/glfw/glfw.git",
         "--tag", "3.4",
         "--targets", "glfw",
+        "--mode", "install",
+        "--package", "glfw3",
         "--option", "GLFW_BUILD_TESTS=OFF",
         "--option", "GLFW_BUILD_EXAMPLES=OFF",
         "--shallow", "false",
@@ -384,6 +399,10 @@ standard = 23
     auto content = read_text(tmp.root / "exon.toml");
     check(content.contains("[dependencies.cmake.glfw]"),
           "cmd add cmake: dependency section written");
+    check(content.contains("mode = \"install\""),
+          "cmd add cmake: mode written");
+    check(content.contains("package = \"glfw3\""),
+          "cmd add cmake: package written");
     check(content.contains("shallow = false"),
           "cmd add cmake: shallow flag written");
     check(content.contains("[dependencies.cmake.glfw.options]"),
@@ -397,6 +416,8 @@ standard = 23
               "cmd add cmake: repo parsed");
         check(dep.tag == "3.4", "cmd add cmake: tag parsed");
         check(dep.targets == "glfw", "cmd add cmake: targets parsed");
+        check(dep.mode == "install", "cmd add cmake: mode parsed");
+        check(dep.package == "glfw3", "cmd add cmake: package parsed");
         check(!dep.shallow, "cmd add cmake: shallow parsed");
         check(dep.options.contains("GLFW_BUILD_TESTS") &&
                   dep.options.at("GLFW_BUILD_TESTS") == "OFF",

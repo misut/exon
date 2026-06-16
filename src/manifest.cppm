@@ -26,6 +26,8 @@ struct CmakeDep {
     std::string git;         // Git repository URL
     std::string tag;         // Git tag, branch, or commit hash
     std::string targets;     // Whitespace-separated CMake target names to link
+    std::string mode = "fetch"; // "fetch" or "install"
+    std::string package;     // find_package name for mode = "install" (defaults to dep key)
     std::map<std::string, std::string> options; // set(KEY VALUE) before FetchContent
     bool shallow = true;
 };
@@ -135,6 +137,7 @@ bool eval_predicate(std::string_view pred, toolchain::Platform const& target) {
 struct Build {
     std::vector<std::string> cxxflags;
     std::vector<std::string> ldflags;
+    std::string compiler_launcher;
 };
 
 struct WorkspacePackageDefaults {
@@ -295,6 +298,8 @@ Manifest from_toml(toml::Table const& table) {
             for (auto const& v : arr)
                 out.ldflags.push_back(v.as_string());
         }
+        if (bt.contains("compiler-launcher") && bt.at("compiler-launcher").is_string())
+            out.compiler_launcher = bt.at("compiler-launcher").as_string();
     };
 
     if (table.contains("package")) {
@@ -447,6 +452,15 @@ Manifest from_toml(toml::Table const& table) {
                         throw std::runtime_error(std::format(
                             "cmake dependency '{}': missing required 'targets' field", k));
                     dep.targets = t.at("targets").as_string();
+                    if (t.contains("mode") && t.at("mode").is_string()) {
+                        dep.mode = t.at("mode").as_string();
+                        if (dep.mode != "fetch" && dep.mode != "install")
+                            throw std::runtime_error(std::format(
+                                "cmake dependency '{}': mode must be \"fetch\" or \"install\"",
+                                k));
+                    }
+                    if (t.contains("package") && t.at("package").is_string())
+                        dep.package = t.at("package").as_string();
                     if (t.contains("shallow") && t.at("shallow").is_bool())
                         dep.shallow = t.at("shallow").as_bool();
                     if (t.contains("options") && t.at("options").is_table()) {
@@ -657,6 +671,12 @@ void merge_section_into(Manifest& m, TargetSection const& ts) {
     append(m.build_debug.ldflags,    ts.build_debug.ldflags);
     append(m.build_release.cxxflags, ts.build_release.cxxflags);
     append(m.build_release.ldflags,  ts.build_release.ldflags);
+    if (!ts.build.compiler_launcher.empty())
+        m.build.compiler_launcher = ts.build.compiler_launcher;
+    if (!ts.build_debug.compiler_launcher.empty())
+        m.build_debug.compiler_launcher = ts.build_debug.compiler_launcher;
+    if (!ts.build_release.compiler_launcher.empty())
+        m.build_release.compiler_launcher = ts.build_release.compiler_launcher;
 }
 
 Manifest resolve_for_platform(Manifest m, toolchain::Platform const& target) {
@@ -687,6 +707,11 @@ void prepend_build_flags(Build& dst, Build const& defaults) {
     prepend(dst.ldflags, defaults.ldflags);
 }
 
+void inherit_build_launcher(Build& dst, Build const& defaults) {
+    if (dst.compiler_launcher.empty())
+        dst.compiler_launcher = defaults.compiler_launcher;
+}
+
 Manifest apply_workspace_defaults(Manifest member, Manifest const& workspace) {
     if (!workspace.workspace_defaults)
         return member;
@@ -707,9 +732,16 @@ Manifest apply_workspace_defaults(Manifest member, Manifest const& workspace) {
     if (!member.has_build_system && defaults.package.has_build_system)
         member.build_system = defaults.package.build_system;
 
+    auto member_has_base_launcher = !member.build.compiler_launcher.empty();
+
     prepend_build_flags(member.build, defaults.build);
     prepend_build_flags(member.build_debug, defaults.build_debug);
     prepend_build_flags(member.build_release, defaults.build_release);
+    inherit_build_launcher(member.build, defaults.build);
+    if (!member_has_base_launcher) {
+        inherit_build_launcher(member.build_debug, defaults.build_debug);
+        inherit_build_launcher(member.build_release, defaults.build_release);
+    }
     return member;
 }
 
