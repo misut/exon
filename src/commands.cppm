@@ -291,6 +291,12 @@ cxcli::CommandSpec const& command_spec() {
                                 "dependency"),
                     make_repeatable_option("option", "K=V", "set a CMake dependency option",
                                            "dependency"),
+                    make_option("install-targets", "targets",
+                                "set install-cache CMake targets", {}, "dependency"),
+                    make_option("install-package", "name",
+                                "set install-cache find_package name", {}, "dependency"),
+                    make_repeatable_option("install-option", "K=V",
+                                           "set an install-cache CMake option", "dependency"),
                     make_option("shallow", "bool", "control shallow CMake dependency clone",
                                 {"true", "false"}, "dependency"),
                     make_option("subdir", "dir", "select a git dependency subdirectory", {},
@@ -466,7 +472,8 @@ std::string usage_text() {
                     {"add [--dev] --vcpkg <name> <ver> [--features a,b,c]",
                      "add a vcpkg dependency"},
                     {"add [--dev] --cmake <name> --repo <url> --tag <tag> --targets <targets> "
-                     "[--option K=V] [--shallow false]",
+                     "[--install-targets <targets>] [--install-package <name>] "
+                     "[--option K=V] [--install-option K=V] [--shallow false]",
                      "add a raw CMake dependency"},
                     {"add [--dev] --git <repo> --version <ver> --subdir <dir> [--name <n>]",
                      "add a git dep pointing to a subdirectory"},
@@ -3850,8 +3857,11 @@ int cmd_add(int argc, char* argv[]) {
                                    cli::Option{"--shallow"},
                                    cli::Option{"--mode"},
                                    cli::Option{"--package"},
+                                   cli::Option{"--install-targets"},
+                                   cli::Option{"--install-package"},
                                    cli::ListOption{"--features"},
                                    cli::ListOption{"--option"},
+                                   cli::ListOption{"--install-option"},
                                });
         bool dev = args.has("--dev");
         bool is_path = args.has("--path");
@@ -3872,6 +3882,9 @@ int cmd_add(int argc, char* argv[]) {
         auto cmake_shallow = std::string{args.get("--shallow")};
         auto cmake_mode = std::string{args.get("--mode")};
         auto cmake_package = std::string{args.get("--package")};
+        auto cmake_install_targets = std::string{args.get("--install-targets")};
+        auto cmake_install_package = std::string{args.get("--install-package")};
+        auto cmake_install_options = args.get_list("--install-option");
         auto& positional = args.positional();
 
         if (!features.empty() && (is_path || is_workspace_dep || is_git_subdir || is_cmake))
@@ -3881,9 +3894,12 @@ int cmd_add(int argc, char* argv[]) {
             return command_error("--no-default-features requires --features");
         if (!is_cmake && (!cmake_repo.empty() || !cmake_tag.empty() || !cmake_targets.empty() ||
                           !cmake_options.empty() || !cmake_shallow.empty() ||
-                          !cmake_mode.empty() || !cmake_package.empty())) {
+                          !cmake_mode.empty() || !cmake_package.empty() ||
+                          !cmake_install_targets.empty() || !cmake_install_package.empty() ||
+                          !cmake_install_options.empty())) {
             return command_error(
-                "--repo, --tag, --targets, --option, --shallow, --mode, and --package require --cmake");
+                "--repo, --tag, --targets, --option, --shallow, --mode, --package, "
+                "--install-targets, --install-package, and --install-option require --cmake");
         }
 
         int exclusive_count = int(is_path) + int(is_workspace_dep) + int(is_vcpkg) + int(is_cmake) +
@@ -3909,6 +3925,10 @@ int cmd_add(int argc, char* argv[]) {
         std::string display;
         std::string options_section;
         std::string options_lines;
+        std::string install_section;
+        std::string install_lines;
+        std::string install_options_section;
+        std::string install_options_lines;
 
         if (is_path) {
             if (positional.size() < 2) {
@@ -3988,7 +4008,9 @@ int cmd_add(int argc, char* argv[]) {
                 std::println(std::cerr,
                              "usage: exon add [--dev] --cmake <name> --repo <url> "
                              "--tag <tag> --targets <targets> [--mode fetch|install] "
-                             "[--package PackageName] [--option K=V] [--shallow false]");
+                             "[--package PackageName] [--install-targets targets] "
+                             "[--install-package PackageName] [--option K=V] "
+                             "[--install-option K=V] [--shallow false]");
                 return 1;
             }
             if (!cmake_shallow.empty() && cmake_shallow != "true" && cmake_shallow != "false")
@@ -4017,6 +4039,24 @@ int cmd_add(int argc, char* argv[]) {
                         std::format("{} = {}\n", key, toml_string_literal(option_value));
                 }
             }
+            if (!cmake_install_targets.empty() || !cmake_install_package.empty() ||
+                !cmake_install_options.empty()) {
+                install_section = section + ".install";
+                if (!cmake_install_package.empty())
+                    install_lines +=
+                        std::format("package = {}\n", toml_string_literal(cmake_install_package));
+                if (!cmake_install_targets.empty())
+                    install_lines +=
+                        std::format("targets = {}\n", toml_string_literal(cmake_install_targets));
+                if (!cmake_install_options.empty()) {
+                    install_options_section = install_section + ".options";
+                    for (auto const& option : cmake_install_options) {
+                        auto [key, option_value] = parse_key_value_option(option);
+                        install_options_lines +=
+                            std::format("{} = {}\n", key, toml_string_literal(option_value));
+                    }
+                }
+            }
             display =
                 std::format("cmake dep {} = {{ git = \"{}\", tag = \"{}\", targets = \"{}\" }}",
                             name, cmake_repo, cmake_tag, cmake_targets);
@@ -4030,7 +4070,9 @@ int cmd_add(int argc, char* argv[]) {
                              "       exon add [--dev] --vcpkg <name> <version>\n"
                              "       exon add [--dev] --cmake <name> --repo <url> "
                              "--tag <tag> --targets <targets> [--mode fetch|install] "
-                             "[--package PackageName] [--option K=V] [--shallow false]\n"
+                             "[--package PackageName] [--install-targets targets] "
+                             "[--install-package PackageName] [--option K=V] "
+                             "[--install-option K=V] [--shallow false]\n"
                              "       exon add [--dev] --git <repo> --version <ver> --subdir <dir> "
                              "[--name <name>]");
                 return 1;
@@ -4072,6 +4114,10 @@ int cmd_add(int argc, char* argv[]) {
         manifest::insert_into_section(content, section, dep_line);
         if (!options_section.empty())
             manifest::insert_into_section(content, options_section, options_lines);
+        if (!install_section.empty())
+            manifest::insert_into_section(content, install_section, install_lines);
+        if (!install_options_section.empty())
+            manifest::insert_into_section(content, install_options_section, install_options_lines);
 
         try {
             write_text(manifest_path, content);

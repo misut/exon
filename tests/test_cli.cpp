@@ -194,7 +194,9 @@ void test_commands_usage_lists_human_output_mode() {
                      "[--no-default-features]") != std::string::npos,
           "usage lists git dependency feature options");
     check(usage.find("add [--dev] --cmake <name> --repo <url> --tag <tag> "
-                     "--targets <targets> [--option K=V] [--shallow false]") !=
+                     "--targets <targets> [--install-targets <targets>] "
+                     "[--install-package <name>] [--option K=V] [--install-option K=V] "
+                     "[--shallow false]") !=
               std::string::npos,
           "usage lists raw CMake dependency options");
     check(usage.find("outdated [pkg...] [--member a,b] [--exclude x,y] "
@@ -334,7 +336,7 @@ void test_readme_output_docs_match_usage() {
               std::string::npos,
           "README documents git dependency feature options");
     check(readme.find(
-              "`exon add [--dev] --cmake <name> --repo <url> --tag <tag> --targets <targets> [--option K=V] [--shallow false]`") !=
+              "`exon add [--dev] --cmake <name> --repo <url> --tag <tag> --targets <targets> [--install-targets <targets>] [--install-package <name>] [--option K=V] [--install-option K=V] [--shallow false]`") !=
               std::string::npos,
           "README documents raw CMake dependency options");
     check(readme.find("[dependencies.cmake.glfw]") != std::string::npos,

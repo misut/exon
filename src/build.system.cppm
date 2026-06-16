@@ -429,6 +429,7 @@ build::BuildRequest do_prepare_request(
         validate_wasm_dependencies(build_manifest);
 
     auto project = build::project_context(project_root, release, target);
+    auto local_config = manifest::system::load_local_config(project_root);
     auto tc = toolchain::system::detect();
 
     std::string wasm_toolchain_file;
@@ -490,6 +491,7 @@ build::BuildRequest do_prepare_request(
         .manifest = build_manifest,
         .portable_manifest = portable_manifest ? std::optional{*portable_manifest}
                                                : std::nullopt,
+        .local_config = std::move(local_config),
         .toolchain = std::move(tc),
         .deps = std::move(fetch_result.deps),
         .portable_deps = {},

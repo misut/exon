@@ -23,6 +23,36 @@ Manifest load(std::string_view path) {
     return manifest::parse(detail::read_file(std::filesystem::path{path}));
 }
 
+std::optional<LocalConfig> load_optional_local_config(std::filesystem::path const& path) {
+    if (!std::filesystem::exists(path))
+        return std::nullopt;
+    try {
+        return manifest::parse_local_config(detail::read_file(path));
+    } catch (std::exception const& e) {
+        throw std::runtime_error(std::format("{}: {}", path.string(), e.what()));
+    }
+}
+
+LocalConfig load_local_config(std::filesystem::path const& project_root) {
+    LocalConfig config;
+
+    auto home = toolchain::system::home_dir();
+    if (!home.empty()) {
+        if (auto global_config = load_optional_local_config(home / ".exon" / "config.toml"))
+            manifest::merge_local_config(config, *global_config);
+    }
+
+    if (auto project_config = load_optional_local_config(project_root / "exon.local.toml"))
+        manifest::merge_local_config(config, *project_config);
+
+    if (auto const* env = std::getenv("EXON_CMAKE_INSTALL_CACHE"); env && *env) {
+        config.cmake_install_cache =
+            manifest::parse_cmake_install_cache_policy(env, "EXON_CMAKE_INSTALL_CACHE");
+    }
+
+    return config;
+}
+
 // walk up from `start` looking for a workspace exon.toml; stop at HOME or filesystem root
 std::optional<std::filesystem::path> find_workspace_root(std::filesystem::path start) {
     auto home = toolchain::system::home_dir();

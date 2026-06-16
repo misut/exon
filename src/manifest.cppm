@@ -22,17 +22,64 @@ struct GitFeatureDep {
     bool default_features = true;
 };
 
+enum class CmakeInstallCachePolicy {
+    Auto,
+    Off,
+    Prefer,
+    Require,
+};
+
+struct CmakeInstallConfig {
+    std::string package; // find_package name for install-cache consumers
+    std::string targets; // whitespace-separated installed/imported target names
+    std::map<std::string, std::string> options; // extra CMake options for install materialization
+};
+
 struct CmakeDep {
     std::string git;         // Git repository URL
     std::string tag;         // Git tag, branch, or commit hash
     std::string targets;     // Whitespace-separated CMake target names to link
     std::string mode = "fetch"; // "fetch" or "install"
-    std::string package;     // find_package name for mode = "install" (defaults to dep key)
+    std::string package;     // legacy find_package name for mode = "install" (defaults to dep key)
+    std::optional<CmakeInstallConfig> install; // install-cache consumer metadata
     std::map<std::string, std::string> options; // set(KEY VALUE) before FetchContent
     bool shallow = true;
 };
 
+struct LocalConfig {
+    std::optional<CmakeInstallCachePolicy> cmake_install_cache;
+    std::map<std::string, CmakeInstallCachePolicy> cmake_install_cache_deps;
+};
+
 inline constexpr std::array<int, 6> supported_cpp_standards = {11, 14, 17, 20, 23, 26};
+
+std::string_view cmake_install_cache_policy_name(CmakeInstallCachePolicy policy) {
+    switch (policy) {
+    case CmakeInstallCachePolicy::Auto:
+        return "auto";
+    case CmakeInstallCachePolicy::Off:
+        return "off";
+    case CmakeInstallCachePolicy::Prefer:
+        return "prefer";
+    case CmakeInstallCachePolicy::Require:
+        return "require";
+    }
+    return "auto";
+}
+
+CmakeInstallCachePolicy parse_cmake_install_cache_policy(std::string_view value,
+                                                         std::string_view field) {
+    if (value == "auto")
+        return CmakeInstallCachePolicy::Auto;
+    if (value == "off")
+        return CmakeInstallCachePolicy::Off;
+    if (value == "prefer")
+        return CmakeInstallCachePolicy::Prefer;
+    if (value == "require")
+        return CmakeInstallCachePolicy::Require;
+    throw std::runtime_error(std::format(
+        "{} must be one of auto, off, prefer, require, got {}", field, value));
+}
 
 bool is_supported_cpp_standard(int standard) {
     for (auto supported : supported_cpp_standards) {
@@ -461,6 +508,26 @@ Manifest from_toml(toml::Table const& table) {
                     }
                     if (t.contains("package") && t.at("package").is_string())
                         dep.package = t.at("package").as_string();
+                    if (t.contains("install") && t.at("install").is_table()) {
+                        auto const& install_table = t.at("install").as_table();
+                        CmakeInstallConfig install;
+                        if (install_table.contains("package") &&
+                            install_table.at("package").is_string()) {
+                            install.package = install_table.at("package").as_string();
+                        }
+                        if (install_table.contains("targets") &&
+                            install_table.at("targets").is_string()) {
+                            install.targets = install_table.at("targets").as_string();
+                        }
+                        if (install_table.contains("options") &&
+                            install_table.at("options").is_table()) {
+                            for (auto const& [ok, ov] : install_table.at("options").as_table()) {
+                                if (ov.is_string())
+                                    install.options.emplace(ok, ov.as_string());
+                            }
+                        }
+                        dep.install = std::move(install);
+                    }
                     if (t.contains("shallow") && t.at("shallow").is_bool())
                         dep.shallow = t.at("shallow").as_bool();
                     if (t.contains("options") && t.at("options").is_table()) {
@@ -964,6 +1031,63 @@ std::string predicate_to_cmake(std::string_view pred) {
     if (parsed.negated)
         return std::format("NOT ({})", result);
     return result;
+}
+
+LocalConfig local_config_from_toml(toml::Table const& table) {
+    LocalConfig config;
+    if (!table.contains("cmake-install-cache"))
+        return config;
+
+    if (!table.at("cmake-install-cache").is_table()) {
+        throw std::runtime_error("[cmake-install-cache] must be a table");
+    }
+
+    auto const& cache = table.at("cmake-install-cache").as_table();
+    if (cache.contains("mode")) {
+        if (!cache.at("mode").is_string())
+            throw std::runtime_error("[cmake-install-cache].mode must be a string");
+        config.cmake_install_cache =
+            parse_cmake_install_cache_policy(cache.at("mode").as_string(),
+                                             "[cmake-install-cache].mode");
+    }
+
+    if (cache.contains("dependencies")) {
+        if (!cache.at("dependencies").is_table()) {
+            throw std::runtime_error("[cmake-install-cache].dependencies must be a table");
+        }
+        for (auto const& [name, value] : cache.at("dependencies").as_table()) {
+            if (value.is_string()) {
+                config.cmake_install_cache_deps.emplace(
+                    name, parse_cmake_install_cache_policy(
+                              value.as_string(),
+                              std::format("[cmake-install-cache].dependencies.{}", name)));
+            } else if (value.is_table() && value.as_table().contains("mode") &&
+                       value.as_table().at("mode").is_string()) {
+                config.cmake_install_cache_deps.emplace(
+                    name, parse_cmake_install_cache_policy(
+                              value.as_table().at("mode").as_string(),
+                              std::format("[cmake-install-cache].dependencies.{}.mode", name)));
+            } else {
+                throw std::runtime_error(std::format(
+                    "[cmake-install-cache].dependencies.{} must be a string or table with mode",
+                    name));
+            }
+        }
+    }
+
+    return config;
+}
+
+LocalConfig parse_local_config(std::string_view content) {
+    auto table = toml::parse(std::string{content});
+    return local_config_from_toml(table);
+}
+
+void merge_local_config(LocalConfig& base, LocalConfig const& overlay) {
+    if (overlay.cmake_install_cache)
+        base.cmake_install_cache = overlay.cmake_install_cache;
+    for (auto const& [name, policy] : overlay.cmake_install_cache_deps)
+        base.cmake_install_cache_deps[name] = policy;
 }
 
 Manifest parse(std::string_view content) {

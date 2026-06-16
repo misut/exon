@@ -20,6 +20,7 @@ struct BuildRequest {
     core::ProjectContext project;
     manifest::Manifest manifest;
     std::optional<manifest::Manifest> portable_manifest;
+    manifest::LocalConfig local_config;
     toolchain::Toolchain toolchain;
     std::vector<fetch::FetchedDep> deps;
     std::vector<fetch::FetchedDep> portable_deps;
@@ -592,8 +593,73 @@ std::string cmake_package_name(std::string const& dep_name, manifest::CmakeDep c
     return dep.package.empty() ? dep_name : dep.package;
 }
 
-bool is_install_mode(manifest::CmakeDep const& dep) {
-    return dep.mode == "install";
+manifest::CmakeInstallCachePolicy cmake_install_cache_policy(
+    std::string const& name, manifest::CmakeDep const& dep,
+    manifest::LocalConfig const& config) {
+    if (auto it = config.cmake_install_cache_deps.find(name);
+        it != config.cmake_install_cache_deps.end()) {
+        return it->second;
+    }
+    if (config.cmake_install_cache)
+        return *config.cmake_install_cache;
+    return dep.mode == "install" ? manifest::CmakeInstallCachePolicy::Prefer
+                                  : manifest::CmakeInstallCachePolicy::Auto;
+}
+
+bool has_install_metadata(manifest::CmakeDep const& dep) {
+    return dep.install.has_value() || dep.mode == "install";
+}
+
+bool uses_install_cache(std::string const& name, manifest::CmakeDep const& dep,
+                        manifest::LocalConfig const& config) {
+    auto policy = cmake_install_cache_policy(name, dep, config);
+    switch (policy) {
+    case manifest::CmakeInstallCachePolicy::Off:
+        return false;
+    case manifest::CmakeInstallCachePolicy::Auto:
+        return dep.mode == "install";
+    case manifest::CmakeInstallCachePolicy::Prefer:
+        return has_install_metadata(dep);
+    case manifest::CmakeInstallCachePolicy::Require:
+        if (!has_install_metadata(dep)) {
+            throw std::runtime_error(std::format(
+                "cmake dependency '{}': install cache is required but no install metadata is declared",
+                name));
+        }
+        return true;
+    }
+    return false;
+}
+
+std::string effective_cmake_package_name(std::string const& name,
+                                         manifest::CmakeDep const& dep) {
+    if (dep.install && !dep.install->package.empty())
+        return dep.install->package;
+    return cmake_package_name(name, dep);
+}
+
+std::string effective_cmake_targets(std::string const& name,
+                                    manifest::CmakeDep const& dep,
+                                    manifest::LocalConfig const& config) {
+    if (uses_install_cache(name, dep, config) && dep.install &&
+        !dep.install->targets.empty()) {
+        return dep.install->targets;
+    }
+    return dep.targets;
+}
+
+manifest::CmakeDep effective_install_cmake_dep(std::string const& name,
+                                               manifest::CmakeDep const& dep) {
+    auto effective = dep;
+    effective.mode = "install";
+    effective.package = effective_cmake_package_name(name, dep);
+    if (dep.install) {
+        if (!dep.install->targets.empty())
+            effective.targets = dep.install->targets;
+        for (auto const& [key, value] : dep.install->options)
+            effective.options[key] = value;
+    }
+    return effective;
 }
 
 std::string cache_component(std::string_view value) {
@@ -759,10 +825,11 @@ void append_cmake_install_cache_steps(std::vector<core::ProcessStep>& steps,
                                              request.project.target);
     auto planned = std::set<std::string>{};
     auto add = [&](std::string const& name, manifest::CmakeDep const& dep) {
-        if (!is_install_mode(dep))
+        if (!uses_install_cache(name, dep, request.local_config))
             return;
 
-        auto entry = cmake_install_cache_entry(name, dep, request.toolchain, request.release,
+        auto effective_dep = effective_install_cmake_dep(name, dep);
+        auto entry = cmake_install_cache_entry(name, effective_dep, request.toolchain, request.release,
                                               request.project.target);
         if (!planned.insert(entry.root.string()).second)
             return;
@@ -1071,7 +1138,8 @@ core::ProjectContext project_context(std::filesystem::path const& project_root,
 std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path const& project_root,
                            std::vector<fetch::FetchedDep> const& deps,
                            toolchain::Toolchain const& tc, bool with_tests = false,
-                           bool release = false, std::string_view target = {}) {
+                           bool release = false, std::string_view target = {},
+                           manifest::LocalConfig local_config = {}) {
     std::ostringstream out;
 
     bool import_std = (m.standard >= 23 &&
@@ -1107,22 +1175,25 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
         bool any = !all_cmake_deps.empty() || (with_tests && !all_dev_cmake_deps.empty());
         if (any) {
             bool any_fetch = false;
-            for (auto const& [_, cd] : all_cmake_deps)
-                any_fetch = any_fetch || !detail::is_install_mode(cd);
+            for (auto const& [name, cd] : all_cmake_deps)
+                any_fetch = any_fetch ||
+                            !detail::uses_install_cache(name, cd, local_config);
             if (with_tests) {
-                for (auto const& [_, cd] : all_dev_cmake_deps)
-                    any_fetch = any_fetch || !detail::is_install_mode(cd);
+                for (auto const& [name, cd] : all_dev_cmake_deps)
+                    any_fetch = any_fetch ||
+                                !detail::uses_install_cache(name, cd, local_config);
             }
             if (any_fetch)
                 out << "include(FetchContent)\n";
             auto emit_one = [&](std::string const& name, manifest::CmakeDep const& cd) {
-                if (detail::is_install_mode(cd)) {
+                if (detail::uses_install_cache(name, cd, local_config)) {
+                    auto effective_dep = detail::effective_install_cmake_dep(name, cd);
                     auto entry =
-                        detail::cmake_install_cache_entry(name, cd, tc, release, target);
+                        detail::cmake_install_cache_entry(name, effective_dep, tc, release, target);
                     out << std::format("list(PREPEND CMAKE_PREFIX_PATH \"{}\")\n",
                                        entry.install_dir.generic_string());
                     out << std::format("find_package({} CONFIG REQUIRED)\n\n",
-                                       detail::cmake_package_name(name, cd));
+                                       detail::cmake_package_name(name, effective_dep));
                     return;
                 }
                 for (auto const& [k, v] : cd.options)
@@ -1159,14 +1230,16 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
     for (auto const& [_, tgts] : m.find_deps)
         for (auto& t : detail::split_targets(tgts))
             find_targets.push_back(std::move(t));
-    for (auto const& [_, dep] : m.cmake_deps)
-        for (auto& t : detail::split_targets(dep.targets))
+    for (auto const& [name, dep] : m.cmake_deps)
+        for (auto& t : detail::split_targets(
+                 detail::effective_cmake_targets(name, dep, local_config)))
             find_targets.push_back(std::move(t));
     for (auto const& [_, tgts] : m.dev_find_deps)
         for (auto& t : detail::split_targets(tgts))
             dev_find_targets.push_back(std::move(t));
-    for (auto const& [_, dep] : m.dev_cmake_deps)
-        for (auto& t : detail::split_targets(dep.targets))
+    for (auto const& [name, dep] : m.dev_cmake_deps)
+        for (auto& t : detail::split_targets(
+                 detail::effective_cmake_targets(name, dep, local_config)))
             dev_find_targets.push_back(std::move(t));
 
     // emit dependency as static library
@@ -1253,8 +1326,10 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
             std::vector<std::string> link_targets;
             for (auto const& child_name : dep.dependency_names)
                 detail::append_unique(link_targets, child_name);
-            for (auto const& [_, cmake_dep] : dep_m.cmake_deps) {
-                for (auto& t : detail::split_targets(cmake_dep.targets))
+            for (auto const& [dep_name, cmake_dep] : dep_m.cmake_deps) {
+                for (auto& t : detail::split_targets(
+                         detail::effective_cmake_targets(dep_name, cmake_dep,
+                                                         local_config)))
                     detail::append_unique(link_targets, t);
             }
             if (!link_targets.empty()) {
@@ -1907,7 +1982,7 @@ BuildPlan base_plan(BuildRequest const& request, bool with_tests = false) {
             .path = request.project.exon_dir / "CMakeLists.txt",
             .content = generate_cmake(request.manifest, request.project.root, request.deps,
                                       request.toolchain, with_tests, request.release,
-                                      request.project.target),
+                                      request.project.target, request.local_config),
         },
     });
 

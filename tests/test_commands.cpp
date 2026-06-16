@@ -425,6 +425,52 @@ standard = 23
     }
 }
 
+void test_cmd_add_cmake_dependency_install_metadata() {
+    TmpDir tmp{"exon_test_add_cmake_dependency_install_metadata"};
+    tmp.write("exon.toml", R"([package]
+name = "app"
+version = "0.1.0"
+type = "bin"
+standard = 23
+)");
+
+    CwdGuard cwd{tmp.root};
+    auto rc = run_command(commands::cmd_add, {
+        "exon", "add", "--cmake", "dawn",
+        "--repo", "https://github.com/google/dawn.git",
+        "--tag", "v20260423.175430",
+        "--targets", "webgpu_dawn",
+        "--install-package", "Dawn",
+        "--install-targets", "dawn::webgpu_dawn",
+        "--install-option", "DAWN_ENABLE_INSTALL=ON",
+    });
+
+    check(rc == 0, "cmd add cmake install metadata: succeeds");
+    auto content = read_text(tmp.root / "exon.toml");
+    check(content.contains("[dependencies.cmake.dawn.install]"),
+          "cmd add cmake install metadata: install section written");
+    check(content.contains("package = \"Dawn\""),
+          "cmd add cmake install metadata: install package written");
+    check(content.contains("targets = \"dawn::webgpu_dawn\""),
+          "cmd add cmake install metadata: install targets written");
+    check(content.contains("[dependencies.cmake.dawn.install.options]"),
+          "cmd add cmake install metadata: install options section written");
+
+    auto m = manifest::system::load((tmp.root / "exon.toml").string());
+    check(m.cmake_deps.contains("dawn"), "cmd add cmake install metadata: parsed");
+    if (m.cmake_deps.contains("dawn")) {
+        auto const& dep = m.cmake_deps.at("dawn");
+        check(dep.targets == "webgpu_dawn",
+              "cmd add cmake install metadata: fetch targets parsed");
+        check(dep.install && dep.install->targets == "dawn::webgpu_dawn",
+              "cmd add cmake install metadata: install targets parsed");
+        check(dep.install && dep.install->package == "Dawn",
+              "cmd add cmake install metadata: install package parsed");
+        check(dep.install && dep.install->options.at("DAWN_ENABLE_INSTALL") == "ON",
+              "cmd add cmake install metadata: install option parsed");
+    }
+}
+
 void test_dist_naming_matches_release_artifacts() {
     auto m = manifest::Manifest{};
     m.name = "exon";
@@ -642,6 +688,7 @@ int main() {
     test_dependency_graph_paths_and_dedupe();
     test_cmd_run_rejects_android_before_build();
     test_cmd_add_cmake_dependency();
+    test_cmd_add_cmake_dependency_install_metadata();
     test_dist_naming_matches_release_artifacts();
     test_dist_archive_command_uses_build_dir_payload();
     test_dist_zip_archive_is_valid_zip();
