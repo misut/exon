@@ -3848,6 +3848,8 @@ int cmd_add(int argc, char* argv[]) {
                                    cli::Option{"--tag"},
                                    cli::Option{"--targets"},
                                    cli::Option{"--shallow"},
+                                   cli::Option{"--mode"},
+                                   cli::Option{"--package"},
                                    cli::ListOption{"--features"},
                                    cli::ListOption{"--option"},
                                });
@@ -3868,6 +3870,8 @@ int cmd_add(int argc, char* argv[]) {
         auto cmake_tag = std::string{args.get("--tag")};
         auto cmake_targets = std::string{args.get("--targets")};
         auto cmake_shallow = std::string{args.get("--shallow")};
+        auto cmake_mode = std::string{args.get("--mode")};
+        auto cmake_package = std::string{args.get("--package")};
         auto& positional = args.positional();
 
         if (!features.empty() && (is_path || is_workspace_dep || is_git_subdir || is_cmake))
@@ -3876,9 +3880,10 @@ int cmd_add(int argc, char* argv[]) {
         if (no_default_features && features.empty())
             return command_error("--no-default-features requires --features");
         if (!is_cmake && (!cmake_repo.empty() || !cmake_tag.empty() || !cmake_targets.empty() ||
-                          !cmake_options.empty() || !cmake_shallow.empty())) {
+                          !cmake_options.empty() || !cmake_shallow.empty() ||
+                          !cmake_mode.empty() || !cmake_package.empty())) {
             return command_error(
-                "--repo, --tag, --targets, --option, and --shallow require --cmake");
+                "--repo, --tag, --targets, --option, --shallow, --mode, and --package require --cmake");
         }
 
         int exclusive_count = int(is_path) + int(is_workspace_dep) + int(is_vcpkg) + int(is_cmake) +
@@ -3982,17 +3987,26 @@ int cmd_add(int argc, char* argv[]) {
                 cmake_targets.empty()) {
                 std::println(std::cerr,
                              "usage: exon add [--dev] --cmake <name> --repo <url> "
-                             "--tag <tag> --targets <targets> [--option K=V] [--shallow false]");
+                             "--tag <tag> --targets <targets> [--mode fetch|install] "
+                             "[--package PackageName] [--option K=V] [--shallow false]");
                 return 1;
             }
             if (!cmake_shallow.empty() && cmake_shallow != "true" && cmake_shallow != "false")
                 return command_error("--shallow must be true or false");
+            if (cmake_mode.empty())
+                cmake_mode = "fetch";
+            if (cmake_mode != "fetch" && cmake_mode != "install")
+                return command_error("--mode must be fetch or install");
 
             name = positional[0];
             section = section_prefix + ".cmake." + name;
             dep_line =
                 std::format("git = {}\ntag = {}\ntargets = {}\n", toml_string_literal(cmake_repo),
                             toml_string_literal(cmake_tag), toml_string_literal(cmake_targets));
+            if (cmake_mode != "fetch")
+                dep_line += std::format("mode = {}\n", toml_string_literal(cmake_mode));
+            if (!cmake_package.empty())
+                dep_line += std::format("package = {}\n", toml_string_literal(cmake_package));
             if (cmake_shallow == "false")
                 dep_line += "shallow = false\n";
             if (!cmake_options.empty()) {
@@ -4015,7 +4029,8 @@ int cmd_add(int argc, char* argv[]) {
                              "       exon add [--dev] --workspace <name>\n"
                              "       exon add [--dev] --vcpkg <name> <version>\n"
                              "       exon add [--dev] --cmake <name> --repo <url> "
-                             "--tag <tag> --targets <targets> [--option K=V] [--shallow false]\n"
+                             "--tag <tag> --targets <targets> [--mode fetch|install] "
+                             "[--package PackageName] [--option K=V] [--shallow false]\n"
                              "       exon add [--dev] --git <repo> --version <ver> --subdir <dir> "
                              "[--name <name>]");
                 return 1;

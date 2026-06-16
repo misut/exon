@@ -389,6 +389,21 @@ BuildFlags resolve_flags(toolchain::Toolchain const& tc, manifest::Manifest cons
     return flags;
 }
 
+std::string active_compiler_launcher(manifest::Manifest const& m, bool release) {
+    auto const& profile = release ? m.build_release : m.build_debug;
+    if (!profile.compiler_launcher.empty())
+        return profile.compiler_launcher;
+    return m.build.compiler_launcher;
+}
+
+void append_compiler_launcher_args(core::ProcessSpec& spec, std::string const& launcher) {
+    if (launcher.empty())
+        return;
+    for (auto const& lang : {"C", "CXX", "OBJC", "OBJCXX"}) {
+        spec.args.push_back(std::format("-DCMAKE_{}_COMPILER_LAUNCHER={}", lang, launcher));
+    }
+}
+
 core::ProcessSpec configure_cmd(toolchain::Toolchain const& tc,
                                 manifest::Manifest const& m,
                                 std::filesystem::path const& build_dir,
@@ -414,6 +429,7 @@ core::ProcessSpec configure_cmd(toolchain::Toolchain const& tc,
     };
     if (!tc.ninja.empty())
         spec.args.push_back(std::format("-DCMAKE_MAKE_PROGRAM={}", tc.ninja));
+    append_compiler_launcher_args(spec, active_compiler_launcher(m, release));
 
     if (!wasm_toolchain.empty()) {
         // WASM cross-compilation: toolchain file handles compiler, sysroot, flags.
@@ -570,6 +586,262 @@ std::vector<std::string> split_targets(std::string_view s) {
 void append_unique(std::vector<std::string>& items, std::string const& value) {
     if (std::ranges::find(items, value) == items.end())
         items.push_back(value);
+}
+
+std::string cmake_package_name(std::string const& dep_name, manifest::CmakeDep const& dep) {
+    return dep.package.empty() ? dep_name : dep.package;
+}
+
+bool is_install_mode(manifest::CmakeDep const& dep) {
+    return dep.mode == "install";
+}
+
+std::string cache_component(std::string_view value) {
+    auto out = std::string{};
+    for (auto ch : value) {
+        auto uch = static_cast<unsigned char>(ch);
+        if (std::isalnum(uch) || ch == '-' || ch == '_' || ch == '.')
+            out.push_back(ch);
+        else
+            out.push_back('_');
+    }
+    if (out.empty())
+        return "dep";
+    return out;
+}
+
+std::uint64_t fnv1a(std::string_view text) {
+    auto hash = std::uint64_t{14695981039346656037ull};
+    for (auto ch : text) {
+        hash ^= static_cast<unsigned char>(ch);
+        hash *= std::uint64_t{1099511628211ull};
+    }
+    return hash;
+}
+
+std::filesystem::path exon_cache_dir() {
+    if (auto const* env = std::getenv("EXON_CACHE_DIR"); env && *env)
+        return std::filesystem::path{env};
+#if defined(_WIN32)
+    if (auto const* profile = std::getenv("USERPROFILE"); profile && *profile)
+        return std::filesystem::path{profile} / ".exon" / "cache";
+#endif
+    if (auto const* home = std::getenv("HOME"); home && *home)
+        return std::filesystem::path{home} / ".exon" / "cache";
+    return std::filesystem::current_path() / ".exon" / "cache";
+}
+
+std::string cmake_install_cache_key(std::string const& name, manifest::CmakeDep const& dep,
+                                    toolchain::Toolchain const& tc, bool release,
+                                    std::string_view target) {
+    auto text = std::ostringstream{};
+    text << "name=" << name << '\n';
+    text << "git=" << dep.git << '\n';
+    text << "tag=" << dep.tag << '\n';
+    text << "targets=" << dep.targets << '\n';
+    text << "package=" << cmake_package_name(name, dep) << '\n';
+    text << "profile=" << (release ? "release" : "debug") << '\n';
+    text << "target=" << target << '\n';
+    text << "cmake=" << tc.cmake << '\n';
+    text << "cxx=" << tc.cxx_compiler << '\n';
+    text << "env-cxx=" << tc.env_cxx << '\n';
+    text << "sysroot=" << tc.sysroot << '\n';
+    text << "compiler-kind=" << toolchain::compiler_kind_name(tc.compiler_kind) << '\n';
+    text << "msvc=" << (tc.is_msvc ? "true" : "false") << '\n';
+    for (auto const& [key, value] : dep.options)
+        text << "option:" << key << '=' << value << '\n';
+    return std::format("{:016x}", fnv1a(text.str()));
+}
+
+struct CmakeInstallCacheEntry {
+    std::string name;
+    manifest::CmakeDep dep;
+    std::filesystem::path root;
+    std::filesystem::path source_dir;
+    std::filesystem::path build_dir;
+    std::filesystem::path install_dir;
+    std::filesystem::path source_stamp;
+    std::filesystem::path install_stamp;
+};
+
+CmakeInstallCacheEntry cmake_install_cache_entry(std::string const& name,
+                                                 manifest::CmakeDep const& dep,
+                                                 toolchain::Toolchain const& tc,
+                                                 bool release,
+                                                 std::string_view target) {
+    auto hash = cmake_install_cache_key(name, dep, tc, release, target);
+    auto root = exon_cache_dir() / "cmake-install" / cache_component(name) / hash;
+    return {
+        .name = name,
+        .dep = dep,
+        .root = root,
+        .source_dir = root / "src",
+        .build_dir = root / (release ? "build-release" : "build-debug"),
+        .install_dir = root / (release ? "install-release" : "install-debug"),
+        .source_stamp = root / ".source-ready",
+        .install_stamp = root / (release ? ".install-release-ready" : ".install-debug-ready"),
+    };
+}
+
+struct CmakeDependencyMaps {
+    std::map<std::string, manifest::CmakeDep> deps;
+    std::map<std::string, manifest::CmakeDep> dev_deps;
+    std::map<std::string, manifest::Manifest> resolved_dep_manifests;
+};
+
+CmakeDependencyMaps collect_cmake_dependency_maps(manifest::Manifest const& m,
+                                                  std::vector<fetch::FetchedDep> const& deps,
+                                                  bool with_tests,
+                                                  std::string_view target) {
+    auto platform = target.empty()
+        ? toolchain::detect_host_platform()
+        : *toolchain::platform_from_target(target);
+
+    CmakeDependencyMaps maps{
+        .deps = m.cmake_deps,
+        .dev_deps = with_tests ? m.dev_cmake_deps
+                               : std::map<std::string, manifest::CmakeDep>{},
+    };
+
+    for (auto const& dep : deps) {
+        auto dep_manifest_path = dep.path / "exon.toml";
+        if (!std::filesystem::exists(dep_manifest_path))
+            continue;
+        auto dep_m = manifest::system::load(dep_manifest_path.string());
+        dep_m = manifest::resolve_for_platform(std::move(dep_m), platform);
+        for (auto const& [k, v] : dep_m.cmake_deps)
+            maps.deps.emplace(k, v);
+        if (with_tests)
+            for (auto const& [k, v] : dep_m.dev_cmake_deps)
+                maps.dev_deps.emplace(k, v);
+        maps.resolved_dep_manifests.emplace(dep.path.string(), std::move(dep_m));
+    }
+
+    return maps;
+}
+
+core::ProcessStep make_step(core::ProcessSpec spec, std::string label,
+                            std::filesystem::path const& cwd) {
+    spec.cwd = cwd;
+    return {
+        .spec = std::move(spec),
+        .label = std::move(label),
+    };
+}
+
+core::ProcessSpec dependency_configure_command(BuildRequest const& request,
+                                               CmakeInstallCacheEntry const& entry) {
+    auto dep_manifest = manifest::Manifest{};
+    dep_manifest.name = entry.name;
+    dep_manifest.version = entry.dep.tag;
+    dep_manifest.type = "lib";
+    dep_manifest.standard = request.manifest.standard;
+    dep_manifest.build.compiler_launcher =
+        active_compiler_launcher(request.manifest, request.release);
+
+    auto spec = configure_cmd(request.toolchain, dep_manifest, entry.build_dir,
+                              entry.source_dir, request.release, {}, {},
+                              request.wasm_toolchain_file,
+                              request.android_toolchain_file, request.android_abi,
+                              request.android_platform, request.android_clang_target,
+                              request.android_sysroot, true);
+    spec.args.push_back(std::format("-DCMAKE_INSTALL_PREFIX={}",
+                                    entry.install_dir.string()));
+    for (auto const& [key, value] : entry.dep.options)
+        spec.args.push_back(std::format("-D{}={}", key, value));
+    return spec;
+}
+
+void append_cmake_install_cache_steps(std::vector<core::ProcessStep>& steps,
+                                      BuildRequest const& request,
+                                      bool with_tests) {
+    auto maps = collect_cmake_dependency_maps(request.manifest, request.deps, with_tests,
+                                             request.project.target);
+    auto planned = std::set<std::string>{};
+    auto add = [&](std::string const& name, manifest::CmakeDep const& dep) {
+        if (!is_install_mode(dep))
+            return;
+
+        auto entry = cmake_install_cache_entry(name, dep, request.toolchain, request.release,
+                                              request.project.target);
+        if (!planned.insert(entry.root.string()).second)
+            return;
+        if (std::filesystem::exists(entry.install_stamp) &&
+            std::filesystem::exists(entry.install_dir))
+            return;
+
+        auto const cwd = request.project.root;
+        auto label = std::format("preparing cmake dependency {}...", name);
+
+        if (!std::filesystem::exists(entry.source_stamp) ||
+            !std::filesystem::exists(entry.source_dir)) {
+            steps.push_back(make_step({
+                .program = request.toolchain.cmake,
+                .args = {"-E", "rm", "-rf", entry.source_dir.string()},
+            }, label, cwd));
+            steps.push_back(make_step({
+                .program = request.toolchain.cmake,
+                .args = {"-E", "make_directory", entry.source_dir.string()},
+            }, label, cwd));
+            steps.push_back(make_step({
+                .program = "git",
+                .args = {"-C", entry.source_dir.string(), "init"},
+            }, label, cwd));
+            steps.push_back(make_step({
+                .program = "git",
+                .args = {"-C", entry.source_dir.string(), "remote", "add", "origin", dep.git},
+            }, label, cwd));
+
+            auto fetch_args = std::vector<std::string>{
+                "-C", entry.source_dir.string(), "fetch",
+            };
+            if (dep.shallow) {
+                fetch_args.push_back("--depth");
+                fetch_args.push_back("1");
+            }
+            fetch_args.push_back("origin");
+            fetch_args.push_back(dep.tag);
+            steps.push_back(make_step({
+                .program = "git",
+                .args = std::move(fetch_args),
+            }, label, cwd));
+            steps.push_back(make_step({
+                .program = "git",
+                .args = {"-C", entry.source_dir.string(), "checkout", "--detach", "FETCH_HEAD"},
+            }, label, cwd));
+            steps.push_back(make_step({
+                .program = request.toolchain.cmake,
+                .args = {"-E", "touch", entry.source_stamp.string()},
+            }, label, cwd));
+        }
+
+        steps.push_back(make_step({
+            .program = request.toolchain.cmake,
+            .args = {"-E", "rm", "-rf", entry.build_dir.string(), entry.install_dir.string()},
+        }, label, cwd));
+        steps.push_back(make_step({
+            .program = request.toolchain.cmake,
+            .args = {"-E", "make_directory", entry.build_dir.string(), entry.install_dir.string()},
+        }, label, cwd));
+
+        auto configure = dependency_configure_command(request, entry);
+        steps.push_back(make_step(std::move(configure), label, cwd));
+        steps.push_back(make_step({
+            .program = request.toolchain.cmake,
+            .args = {"--build", entry.build_dir.string(), "--target", "install"},
+        }, std::format("installing cmake dependency {}...", name), cwd));
+        steps.push_back(make_step({
+            .program = request.toolchain.cmake,
+            .args = {"-E", "touch", entry.install_stamp.string()},
+        }, label, cwd));
+    };
+
+    for (auto const& [name, dep] : maps.deps)
+        add(name, dep);
+    if (with_tests) {
+        for (auto const& [name, dep] : maps.dev_deps)
+            add(name, dep);
+    }
 }
 
 void emit_cmake_preamble(std::ostringstream& out, manifest::Manifest const& m,
@@ -823,35 +1095,36 @@ std::string generate_cmake(manifest::Manifest const& m, std::filesystem::path co
 
     // Pre-scan path deps: resolve their manifests for the current platform
     // so we can collect cmake deps and reuse them in emit_dep.
-    auto platform = target.empty()
-        ? toolchain::detect_host_platform()
-        : *toolchain::platform_from_target(target);
-
-    std::map<std::string, manifest::CmakeDep> all_cmake_deps = m.cmake_deps;
-    std::map<std::string, manifest::CmakeDep> all_dev_cmake_deps =
-        with_tests ? m.dev_cmake_deps : std::map<std::string, manifest::CmakeDep>{};
-    std::map<std::string, manifest::Manifest> resolved_dep_manifests;
-
-    for (auto const& dep : deps) {
-        auto dep_manifest_path = dep.path / "exon.toml";
-        if (!std::filesystem::exists(dep_manifest_path)) continue;
-        auto dep_m = manifest::system::load(dep_manifest_path.string());
-        dep_m = manifest::resolve_for_platform(std::move(dep_m), platform);
-        for (auto const& [k, v] : dep_m.cmake_deps)
-            all_cmake_deps.emplace(k, v);
-        if (with_tests)
-            for (auto const& [k, v] : dep_m.dev_cmake_deps)
-                all_dev_cmake_deps.emplace(k, v);
-        resolved_dep_manifests.emplace(dep.path.string(), std::move(dep_m));
-    }
+    auto cmake_dep_maps =
+        detail::collect_cmake_dependency_maps(m, deps, with_tests, target);
+    auto const& all_cmake_deps = cmake_dep_maps.deps;
+    auto const& all_dev_cmake_deps = cmake_dep_maps.dev_deps;
+    auto const& resolved_dep_manifests = cmake_dep_maps.resolved_dep_manifests;
 
     // [dependencies.cmake] — raw CMake projects. Includes
     // cmake deps from path dependencies so their targets are available.
     {
         bool any = !all_cmake_deps.empty() || (with_tests && !all_dev_cmake_deps.empty());
         if (any) {
-            out << "include(FetchContent)\n";
+            bool any_fetch = false;
+            for (auto const& [_, cd] : all_cmake_deps)
+                any_fetch = any_fetch || !detail::is_install_mode(cd);
+            if (with_tests) {
+                for (auto const& [_, cd] : all_dev_cmake_deps)
+                    any_fetch = any_fetch || !detail::is_install_mode(cd);
+            }
+            if (any_fetch)
+                out << "include(FetchContent)\n";
             auto emit_one = [&](std::string const& name, manifest::CmakeDep const& cd) {
+                if (detail::is_install_mode(cd)) {
+                    auto entry =
+                        detail::cmake_install_cache_entry(name, cd, tc, release, target);
+                    out << std::format("list(PREPEND CMAKE_PREFIX_PATH \"{}\")\n",
+                                       entry.install_dir.generic_string());
+                    out << std::format("find_package({} CONFIG REQUIRED)\n\n",
+                                       detail::cmake_package_name(name, cd));
+                    return;
+                }
                 for (auto const& [k, v] : cd.options)
                     out << std::format("set({} {})\n", k, v);
                 out << std::format("FetchContent_Declare({}\n", name);
@@ -1648,6 +1921,11 @@ BuildPlan base_plan(BuildRequest const& request, bool with_tests = false) {
             .success_message = "synced CMakeLists.txt",
         });
     }
+
+    auto configure_step_count = plan.configure_steps.size();
+    append_cmake_install_cache_steps(plan.configure_steps, request, with_tests);
+    if (plan.configure_steps.size() != configure_step_count)
+        plan.configured = false;
 
     plan.configure_steps.push_back({
         .spec = {

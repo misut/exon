@@ -250,10 +250,12 @@ version = "1.0.0"
 [build]
 cxxflags = ["-Wall", "-Wextra"]
 ldflags = ["-Wl,--gc-sections"]
+compiler-launcher = "ccache"
 
 [build.debug]
 cxxflags = ["-g", "-fsanitize=address"]
 ldflags = ["-fsanitize=address"]
+compiler-launcher = "sccache"
 
 [build.release]
 cxxflags = ["-O3", "-DNDEBUG"]
@@ -267,17 +269,21 @@ cxxflags = ["-O3", "-DNDEBUG"]
     check(m.build.cxxflags[1] == "-Wextra", "build: cxxflags[1]");
     check(m.build.ldflags.size() == 1, "build: 1 ldflag");
     check(m.build.ldflags[0] == "-Wl,--gc-sections", "build: ldflags[0]");
+    check(m.build.compiler_launcher == "ccache", "build: compiler launcher");
 
     check(m.build_debug.cxxflags.size() == 2, "build.debug: 2 cxxflags");
     check(m.build_debug.cxxflags[0] == "-g", "build.debug: cxxflags[0]");
     check(m.build_debug.cxxflags[1] == "-fsanitize=address", "build.debug: cxxflags[1]");
     check(m.build_debug.ldflags.size() == 1, "build.debug: 1 ldflag");
     check(m.build_debug.ldflags[0] == "-fsanitize=address", "build.debug: ldflags[0]");
+    check(m.build_debug.compiler_launcher == "sccache", "build.debug: compiler launcher");
 
     check(m.build_release.cxxflags.size() == 2, "build.release: 2 cxxflags");
     check(m.build_release.cxxflags[0] == "-O3", "build.release: cxxflags[0]");
     check(m.build_release.cxxflags[1] == "-DNDEBUG", "build.release: cxxflags[1]");
     check(m.build_release.ldflags.empty(), "build.release: no ldflags");
+    check(m.build_release.compiler_launcher.empty(),
+          "build.release: no compiler launcher by default");
 }
 
 void test_build_section_omitted() {
@@ -292,6 +298,7 @@ version = "1.0.0"
 
     check(m.build.cxxflags.empty(), "build: no cxxflags by default");
     check(m.build.ldflags.empty(), "build: no ldflags by default");
+    check(m.build.compiler_launcher.empty(), "build: no compiler launcher by default");
     check(m.build_debug.cxxflags.empty(), "build.debug: no cxxflags by default");
     check(m.build_release.cxxflags.empty(), "build.release: no cxxflags by default");
 }
@@ -712,6 +719,65 @@ refl = { git = "github.com/misut/txn", version = "0.1.0", subdir = "" }
 )"), "subdir: empty subdir throws");
 }
 
+void test_cmake_deps_modes() {
+    auto input = R"(
+[package]
+name = "app"
+version = "1.0.0"
+
+[dependencies.cmake.glfw]
+git = "https://github.com/glfw/glfw.git"
+tag = "3.4"
+targets = "glfw"
+
+[dependencies.cmake.dawn]
+git = "https://github.com/google/dawn.git"
+tag = "v20260423.175430"
+targets = "dawn::webgpu_dawn"
+mode = "install"
+package = "Dawn"
+shallow = false
+
+[dependencies.cmake.dawn.options]
+DAWN_ENABLE_INSTALL = "ON"
+)";
+
+    auto table = toml::parse(input);
+    auto m = manifest::from_toml(table);
+
+    check(m.cmake_deps.at("glfw").mode == "fetch",
+          "cmake dep: default mode is fetch");
+    check(m.cmake_deps.at("dawn").mode == "install",
+          "cmake dep: install mode parsed");
+    check(m.cmake_deps.at("dawn").package == "Dawn",
+          "cmake dep: package parsed");
+    check(!m.cmake_deps.at("dawn").shallow,
+          "cmake dep: shallow false parsed with install mode");
+    check(m.cmake_deps.at("dawn").options.at("DAWN_ENABLE_INSTALL") == "ON",
+          "cmake dep: install options parsed");
+}
+
+void test_cmake_deps_invalid_mode() {
+    bool threw = false;
+    try {
+        auto table = toml::parse(R"(
+[package]
+name = "app"
+version = "1.0.0"
+
+[dependencies.cmake.bad]
+git = "https://example.com/bad.git"
+tag = "main"
+targets = "bad"
+mode = "binary"
+)");
+        (void)manifest::from_toml(table);
+    } catch (std::runtime_error const& e) {
+        threw = std::string{e.what()}.contains("mode must be");
+    }
+    check(threw, "cmake dep: invalid mode throws");
+}
+
 void test_platforms_specific() {
     auto input = R"(
 [package]
@@ -936,16 +1002,20 @@ version = "1.0.0"
 
 [build]
 cxxflags = ["-Wall"]
+compiler-launcher = "basecache"
 
 [target.'cfg(os = "linux")'.build]
 cxxflags = ["-fsanitize=address,undefined"]
 ldflags = ["-fsanitize=address,undefined"]
+compiler-launcher = "ccache"
 
 [target.'cfg(os = "linux")'.build.debug]
 cxxflags = ["-O0"]
+compiler-launcher = "sccache"
 
 [target.'cfg(os = "windows")'.build]
 cxxflags = ["/fsanitize=address"]
+compiler-launcher = "clcache"
 )";
 
     auto table = toml::parse(input);
@@ -969,15 +1039,21 @@ cxxflags = ["/fsanitize=address"]
     check(linux_ts->build.ldflags.size() == 1 &&
               linux_ts->build.ldflags[0] == "-fsanitize=address,undefined",
           "build: linux base ldflag parsed");
+    check(linux_ts->build.compiler_launcher == "ccache",
+          "build: linux compiler launcher parsed");
     check(linux_ts->build_debug.cxxflags.size() == 1 &&
               linux_ts->build_debug.cxxflags[0] == "-O0",
           "build: linux build.debug parsed");
+    check(linux_ts->build_debug.compiler_launcher == "sccache",
+          "build: linux build.debug compiler launcher parsed");
     check(linux_ts->build_release.cxxflags.empty(),
           "build: linux build.release empty");
 
     check(windows_ts->build.cxxflags.size() == 1 &&
               windows_ts->build.cxxflags[0] == "/fsanitize=address",
           "build: windows MSVC cxxflag parsed");
+    check(windows_ts->build.compiler_launcher == "clcache",
+          "build: windows compiler launcher parsed");
 
     // After resolve_for_platform(linux), m.build should have base + linux merged
     auto linux_m = manifest::resolve_for_platform(m, toolchain::make_platform("linux", "x86_64"));
@@ -988,16 +1064,26 @@ cxxflags = ["/fsanitize=address"]
     check(linux_m.build.ldflags.size() == 1 &&
               linux_m.build.ldflags[0] == "-fsanitize=address,undefined",
           "build: linux merged ldflags");
+    check(linux_m.build.compiler_launcher == "ccache",
+          "build: linux compiler launcher overrides base");
     check(linux_m.build_debug.cxxflags.size() == 1 &&
               linux_m.build_debug.cxxflags[0] == "-O0",
           "build: linux build_debug merged");
+    check(linux_m.build_debug.compiler_launcher == "sccache",
+          "build: linux build_debug compiler launcher merged");
 
     // Windows resolve gets base + windows
     auto win_m = manifest::resolve_for_platform(m, toolchain::make_platform("windows", "x86_64"));
     check(win_m.build.cxxflags.size() == 2, "build: windows merged base + windows");
     check(win_m.build.cxxflags[1] == "/fsanitize=address",
           "build: windows MSVC flag appended");
+    check(win_m.build.compiler_launcher == "clcache",
+          "build: windows compiler launcher overrides base");
     check(win_m.build.ldflags.empty(), "build: windows ldflags empty");
+
+    auto mac_m = manifest::resolve_for_platform(m, toolchain::make_platform("macos", "aarch64"));
+    check(mac_m.build.compiler_launcher == "basecache",
+          "build: unmatched target keeps base compiler launcher");
 }
 
 void test_target_section_vcpkg() {
@@ -1076,6 +1162,8 @@ int main() {
     test_resolve_git_features_to_modules();
     test_subdir_deps();
     test_subdir_deps_missing_fields();
+    test_cmake_deps_modes();
+    test_cmake_deps_invalid_mode();
     test_platforms_specific();
     test_platforms_android();
     test_platforms_wildcard_match();
