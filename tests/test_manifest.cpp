@@ -733,12 +733,19 @@ targets = "glfw"
 [dependencies.cmake.dawn]
 git = "https://github.com/google/dawn.git"
 tag = "v20260423.175430"
-targets = "dawn::webgpu_dawn"
+targets = "webgpu_dawn"
 mode = "install"
 package = "Dawn"
 shallow = false
 
 [dependencies.cmake.dawn.options]
+DAWN_ENABLE_INSTALL = "ON"
+
+[dependencies.cmake.dawn.install]
+package = "Dawn"
+targets = "dawn::webgpu_dawn"
+
+[dependencies.cmake.dawn.install.options]
 DAWN_ENABLE_INSTALL = "ON"
 )";
 
@@ -751,9 +758,17 @@ DAWN_ENABLE_INSTALL = "ON"
           "cmake dep: install mode parsed");
     check(m.cmake_deps.at("dawn").package == "Dawn",
           "cmake dep: package parsed");
+    check(m.cmake_deps.at("dawn").install.has_value(),
+          "cmake dep: install metadata parsed");
+    check(m.cmake_deps.at("dawn").install->targets == "dawn::webgpu_dawn",
+          "cmake dep: install targets parsed");
+    check(m.cmake_deps.at("dawn").install->package == "Dawn",
+          "cmake dep: install package parsed");
     check(!m.cmake_deps.at("dawn").shallow,
           "cmake dep: shallow false parsed with install mode");
     check(m.cmake_deps.at("dawn").options.at("DAWN_ENABLE_INSTALL") == "ON",
+          "cmake dep: base options parsed");
+    check(m.cmake_deps.at("dawn").install->options.at("DAWN_ENABLE_INSTALL") == "ON",
           "cmake dep: install options parsed");
 }
 
@@ -776,6 +791,42 @@ mode = "binary"
         threw = std::string{e.what()}.contains("mode must be");
     }
     check(threw, "cmake dep: invalid mode throws");
+}
+
+void test_local_config_cmake_install_cache_policy() {
+    auto config = manifest::parse_local_config(R"(
+[cmake-install-cache]
+mode = "prefer"
+
+[cmake-install-cache.dependencies]
+dawn = "require"
+
+[cmake-install-cache.dependencies.glfw]
+mode = "off"
+)");
+
+    check(config.cmake_install_cache &&
+              *config.cmake_install_cache == manifest::CmakeInstallCachePolicy::Prefer,
+          "local config: global cmake install cache policy parsed");
+    check(config.cmake_install_cache_deps.at("dawn") ==
+              manifest::CmakeInstallCachePolicy::Require,
+          "local config: shorthand dependency policy parsed");
+    check(config.cmake_install_cache_deps.at("glfw") ==
+              manifest::CmakeInstallCachePolicy::Off,
+          "local config: table dependency policy parsed");
+}
+
+void test_local_config_invalid_cmake_install_cache_policy() {
+    bool threw = false;
+    try {
+        (void)manifest::parse_local_config(R"(
+[cmake-install-cache]
+mode = "sometimes"
+)");
+    } catch (std::runtime_error const& e) {
+        threw = std::string{e.what()}.contains("must be one of auto, off, prefer, require");
+    }
+    check(threw, "local config: invalid cmake install cache policy throws");
 }
 
 void test_platforms_specific() {
@@ -1164,6 +1215,8 @@ int main() {
     test_subdir_deps_missing_fields();
     test_cmake_deps_modes();
     test_cmake_deps_invalid_mode();
+    test_local_config_cmake_install_cache_policy();
+    test_local_config_invalid_cmake_install_cache_policy();
     test_platforms_specific();
     test_platforms_android();
     test_platforms_wildcard_match();

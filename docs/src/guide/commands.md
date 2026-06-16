@@ -51,7 +51,7 @@ deploy the artifact to a device or emulator.
   `[dependencies.path]`
 - `exon add --workspace <name>` — add a workspace dep to
   `[dependencies.workspace]`
-- `exon add --cmake <name> --repo <url> --tag <tag> --targets <targets> [--option K=V] [--shallow false]`
+- `exon add --cmake <name> --repo <url> --tag <tag> --targets <targets> [--install-targets <targets>] [--install-package <name>] [--option K=V] [--install-option K=V] [--shallow false]`
   — add a raw CMake `FetchContent` dep to `[dependencies.cmake.<name>]`
 - `exon add --dev ...` — write under `[dev-dependencies*]` instead
 - `exon remove <name>` — drop the dep entry from the manifest

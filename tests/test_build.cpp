@@ -1394,6 +1394,103 @@ void test_generate_cmake_install_cmake_dep_uses_find_package() {
           "install cmake dep: imported target linked");
 }
 
+void test_generate_cmake_install_metadata_prefers_local_policy() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}");
+    EnvGuard cache{"EXON_CACHE_DIR", (proj.root / "cache").string()};
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+    m.cmake_deps.emplace("dawn", manifest::CmakeDep{
+        .git = "https://github.com/google/dawn.git",
+        .tag = "v20260423.175430",
+        .targets = "webgpu_dawn",
+        .install = manifest::CmakeInstallConfig{
+            .package = "Dawn",
+            .targets = "dawn::webgpu_dawn",
+            .options = {{"DAWN_ENABLE_INSTALL", "ON"}},
+        },
+        .options = {{"DAWN_BUILD_TESTS", "OFF"}},
+    });
+
+    auto auto_cmake = build::generate_cmake(m, proj.root, {}, make_tc());
+    check(auto_cmake.contains("FetchContent_Declare(dawn"),
+          "install metadata: auto policy keeps fetch mode");
+    check(auto_cmake.contains("webgpu_dawn"),
+          "install metadata: auto policy links fetch target");
+    check(!auto_cmake.contains("find_package(Dawn CONFIG REQUIRED)"),
+          "install metadata: auto policy does not find package");
+
+    manifest::LocalConfig prefer;
+    prefer.cmake_install_cache = manifest::CmakeInstallCachePolicy::Prefer;
+    auto prefer_cmake = build::generate_cmake(m, proj.root, {}, make_tc(), false, false, {},
+                                              prefer);
+    check(prefer_cmake.contains("find_package(Dawn CONFIG REQUIRED)"),
+          "install metadata: prefer policy emits find_package");
+    check(prefer_cmake.contains("dawn::webgpu_dawn"),
+          "install metadata: prefer policy links install target");
+    check(!prefer_cmake.contains("FetchContent_Declare(dawn"),
+          "install metadata: prefer policy skips FetchContent");
+}
+
+void test_generate_cmake_local_policy_can_disable_legacy_install_mode() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}");
+    EnvGuard cache{"EXON_CACHE_DIR", (proj.root / "cache").string()};
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+    m.cmake_deps.emplace("glfw", manifest::CmakeDep{
+        .git = "https://github.com/glfw/glfw.git",
+        .tag = "3.4",
+        .targets = "glfw",
+        .mode = "install",
+        .package = "glfw3",
+    });
+
+    manifest::LocalConfig off;
+    off.cmake_install_cache = manifest::CmakeInstallCachePolicy::Off;
+    auto cmake = build::generate_cmake(m, proj.root, {}, make_tc(), false, false, {}, off);
+
+    check(cmake.contains("FetchContent_Declare(glfw"),
+          "install policy off: legacy install mode falls back to fetch");
+    check(!cmake.contains("find_package(glfw3 CONFIG REQUIRED)"),
+          "install policy off: find_package is suppressed");
+}
+
+void test_generate_cmake_local_policy_require_needs_install_metadata() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() {}");
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+    m.cmake_deps.emplace("glfw", manifest::CmakeDep{
+        .git = "https://github.com/glfw/glfw.git",
+        .tag = "3.4",
+        .targets = "glfw",
+    });
+
+    manifest::LocalConfig require;
+    require.cmake_install_cache = manifest::CmakeInstallCachePolicy::Require;
+
+    bool threw = false;
+    try {
+        (void)build::generate_cmake(m, proj.root, {}, make_tc(), false, false, {}, require);
+    } catch (std::runtime_error const& e) {
+        threw = std::string{e.what()}.contains("install cache is required");
+    }
+    check(threw, "install policy require: missing install metadata throws");
+}
+
 void test_plan_build_materializes_install_cmake_dep_when_missing() {
     TmpProject proj;
     proj.write("src/main.cpp", "int main() { return 0; }\n");
@@ -1494,6 +1591,54 @@ void test_plan_build_skips_install_cmake_dep_when_stamp_exists() {
           "install cmake dep: cached dependency emits only project build step");
     check(cached_plan.build_steps.front().label == "building...",
           "install cmake dep: project build step remains");
+}
+
+void test_plan_build_materializes_install_metadata_when_preferred() {
+    TmpProject proj;
+    proj.write("src/main.cpp", "int main() { return 0; }\n");
+    EnvGuard cache{"EXON_CACHE_DIR", (proj.root / "cache").string()};
+
+    manifest::Manifest m;
+    m.name = "app";
+    m.version = "1.0.0";
+    m.type = "bin";
+    m.standard = 23;
+    m.cmake_deps.emplace("dawn", manifest::CmakeDep{
+        .git = "https://github.com/google/dawn.git",
+        .tag = "v20260423.175430",
+        .targets = "webgpu_dawn",
+        .install = manifest::CmakeInstallConfig{
+            .package = "Dawn",
+            .targets = "dawn::webgpu_dawn",
+            .options = {{"DAWN_ENABLE_INSTALL", "ON"}},
+        },
+        .options = {{"DAWN_BUILD_TESTS", "OFF"}},
+    });
+
+    manifest::LocalConfig prefer;
+    prefer.cmake_install_cache = manifest::CmakeInstallCachePolicy::Prefer;
+    build::BuildRequest request{
+        .project = build::project_context(proj.root),
+        .manifest = m,
+        .local_config = prefer,
+        .toolchain = make_tc(),
+        .configured = true,
+        .any_cmake_deps = true,
+    };
+
+    auto plan = build::plan_build(request);
+    auto joined = std::string{};
+    for (auto const& step : plan.configure_steps)
+        joined += command_text(step.spec) + "\n";
+
+    check(!plan.configured,
+          "install metadata plan: preferred install cache forces configure");
+    check(joined.contains("-DDAWN_BUILD_TESTS=OFF"),
+          "install metadata plan: base options are passed to install configure");
+    check(joined.contains("-DDAWN_ENABLE_INSTALL=ON"),
+          "install metadata plan: install options are passed to install configure");
+    check(joined.contains("--target install"),
+          "install metadata plan: install target is built");
 }
 
 // test: cmake_deps from a git dep are collected at root level and linked transitively
@@ -1956,10 +2101,18 @@ int main() {
         test_generate_cmake_cmake_deps_are_generic);
     run("test_generate_cmake_install_cmake_dep_uses_find_package",
         test_generate_cmake_install_cmake_dep_uses_find_package);
+    run("test_generate_cmake_install_metadata_prefers_local_policy",
+        test_generate_cmake_install_metadata_prefers_local_policy);
+    run("test_generate_cmake_local_policy_can_disable_legacy_install_mode",
+        test_generate_cmake_local_policy_can_disable_legacy_install_mode);
+    run("test_generate_cmake_local_policy_require_needs_install_metadata",
+        test_generate_cmake_local_policy_require_needs_install_metadata);
     run("test_plan_build_materializes_install_cmake_dep_when_missing",
         test_plan_build_materializes_install_cmake_dep_when_missing);
     run("test_plan_build_skips_install_cmake_dep_when_stamp_exists",
         test_plan_build_skips_install_cmake_dep_when_stamp_exists);
+    run("test_plan_build_materializes_install_metadata_when_preferred",
+        test_plan_build_materializes_install_metadata_when_preferred);
     run("test_transitive_cmake_deps_from_git", test_transitive_cmake_deps_from_git);
     run("test_transitive_cmake_deps_from_path", test_transitive_cmake_deps_from_path);
     run("test_transitive_git_deps_linked", test_transitive_git_deps_linked);
